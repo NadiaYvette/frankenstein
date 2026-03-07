@@ -1,34 +1,25 @@
 -- | Frankenstein Core -> MLIR Emitter
 --
--- Translates Frankenstein Core IR into MLIR textual format, then
--- invokes mlir-opt and mlir-translate to produce LLVM IR, and
--- finally compiles to native code via llc/clang.
---
--- The emitter maps Core constructs to MLIR dialects:
---   EVar, ELit, ECon    -> arith constants, variable references
---   EApp                -> func.call
---   ELam                -> func.func (lifted to top level)
---   ELet                -> SSA value definitions
---   ECase               -> scf.if or arith.cmpi + branch
---   ERetain/ERelease    -> calls to Koka C runtime
---   EDelay/EForce       -> calls to thunk allocator/forcer
---   EPerform/EHandle    -> evidence vector manipulation
+-- Emits textual MLIR, then invokes mlir-opt → mlir-translate → clang
+-- to produce a native executable.
 
 module Frankenstein.MlirEmit.Emitter
   ( emitProgram
+  , emitProgramText
   , compileToExecutable
   , EmitConfig(..)
   , defaultEmitConfig
   ) where
 
 import Frankenstein.Core.Types
-import Frankenstein.MlirEmit.Dialects
 
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import System.Process (readProcessWithExitCode)
+import Data.IORef
+import System.Process (readProcessWithExitCode, readProcess)
 import System.Exit (ExitCode(..))
+import Control.Monad.State
 
 data EmitConfig = EmitConfig
   { ecMlirOptPath       :: !FilePath
@@ -49,221 +40,341 @@ defaultEmitConfig = EmitConfig
   , ecOutputPath        = "a.out"
   }
 
--- | Emit a Frankenstein Core program as an MLIR module
-emitProgram :: Program -> MlirModule
-emitProgram prog =
-  let -- Collect all definitions and emit as MLIR functions
-      funcs = map emitDef (progDefs prog)
-      -- External declarations for Koka runtime
-      externs = kokaRuntimeExterns
-  in MlirModule
-    { modFuncs = funcs
-    , modExtern = externs
-    }
+-- Emission state: tracks SSA counter and collected top-level functions
+data EmitState = EmitState
+  { esCounter   :: !Int
+  , esLiftedFns :: ![Text]  -- accumulated lifted lambda functions
+  }
 
--- | Koka C runtime external declarations
-kokaRuntimeExterns :: [(Text, [MlirType], [MlirType])]
-kokaRuntimeExterns =
-  [ ("kk_retain",    [MlirPtr], [])
-  , ("kk_release",   [MlirPtr], [])
-  , ("kk_drop",      [MlirPtr], [])
-  , ("kk_reuse",     [MlirPtr, MlirI32], [MlirPtr])
-  , ("kk_is_unique", [MlirPtr], [MlirI1])
-  , ("kk_alloc",     [MlirI64], [MlirPtr])
-  , ("kk_thunk_alloc",  [MlirPtr], [MlirPtr])   -- allocate thunk
-  , ("kk_thunk_force",  [MlirPtr], [MlirPtr])   -- force thunk
-  , ("kk_evv_get",      [],        [MlirPtr])   -- get evidence vector
-  , ("kk_evv_push",     [MlirPtr], [])           -- push handler
-  , ("kk_evv_pop",      [],        [])           -- pop handler
-  , ("kk_evv_lookup",   [MlirI32], [MlirPtr])   -- lookup by effect tag
-  ]
+type Emit a = State EmitState a
 
--- | Emit a single definition as an MLIR function
-emitDef :: Def -> MlirFunc
-emitDef def =
+freshName :: Text -> Emit Text
+freshName prefix = do
+  s <- get
+  let n = esCounter s
+  put s { esCounter = n + 1 }
+  pure $ prefix <> T.pack (show n)
+
+addLiftedFn :: Text -> Emit ()
+addLiftedFn fn = modify (\s -> s { esLiftedFns = fn : esLiftedFns s })
+
+-- | Emit a Frankenstein Core program as MLIR text
+emitProgram :: Program -> Text
+emitProgram = emitProgramText
+
+emitProgramText :: Program -> Text
+emitProgramText prog =
+  let -- Rename user's "main" to "_frankenstein_main" so we can generate our own entry point
+      defs = progDefs prog
+      hasMain = any (\d -> nameText (qnameName (defName d)) == "main") defs
+      renamedDefs = if hasMain
+        then map (\d -> if nameText (qnameName (defName d)) == "main"
+                        then d { defName = QName "" (Name "_frankenstein_main" 99) }
+                        else d) defs
+        else defs
+      initState = EmitState 0 []
+      (bodyText, finalState) = runState (emitDefs renamedDefs) initState
+      liftedFns = T.unlines (reverse (esLiftedFns finalState))
+      mainWrapper = if hasMain
+        then T.unlines
+          [ "  func.func @main() -> i32 {"
+          , "    %result = func.call @_frankenstein_main() : () -> i64"
+          , "    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr"
+          , "    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
+          , "    %zero = arith.constant 0 : i32"
+          , "    func.return %zero : i32"
+          , "  }"
+          ]
+        else ""
+  in T.unlines
+    [ "module {"
+    , ""
+    , "  // External declarations"
+    , "  llvm.func @printf(!llvm.ptr, ...) -> i32"
+    , "  llvm.mlir.global internal constant @fmt_int(\"%ld\\n\\00\") {addr_space = 0 : i32}"
+    , "  llvm.mlir.global internal constant @fmt_str(\"%s\\n\\00\") {addr_space = 0 : i32}"
+    , ""
+    , "  // Lifted functions"
+    , liftedFns
+    , ""
+    , bodyText
+    , mainWrapper
+    , "}"
+    ]
+
+emitDefs :: [Def] -> Emit Text
+emitDefs defs = do
+  texts <- mapM emitDef defs
+  pure $ T.unlines texts
+
+emitDef :: Def -> Emit Text
+emitDef def = do
   let name = nameText (qnameName (defName def))
-      (argNames, argTypes, retType) = decomposeType (defType def)
-      mlirArgs = zip (map (\n -> "%" <> n) argNames) (map typeToMlir argTypes)
-      mlirRets = [typeToMlir retType]
-      -- Emit the body
-      (ops, resultName) = emitExpr 0 (defExpr def)
-      -- Add return
-      retOp = (Nothing, FuncReturn [MlirValue ("%" <> resultName) (typeToMlir retType)])
-      block = MlirBlock
-        { blockLabel = "entry"
-        , blockArgs = []
-        , blockOps = ops ++ [retOp]
-        }
-  in MlirFunc
-    { funcName = name
-    , funcArgs = mlirArgs
-    , funcResults = mlirRets
-    , funcBlocks = [block]
-    , funcAttrs = []
-    }
+      (argNames, argTypes, retType) = decomposeDefType (defType def)
+  case defExpr def of
+    ELam params body -> do
+      let mlirArgs = T.intercalate ", "
+            [ "%" <> nameText pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
+          mlirRetTy = typeToMlir retType
+      bodyText <- emitBody body mlirRetTy
+      pure $ T.unlines
+        [ "  func.func @" <> sanitizeName name <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {"
+        , bodyText
+        , "  }"
+        ]
+    -- Non-lambda top-level: emit as nullary function
+    expr -> do
+      let mlirRetTy = typeToMlir retType
+      bodyText <- emitBody expr mlirRetTy
+      pure $ T.unlines
+        [ "  func.func @" <> sanitizeName name <> "() -> " <> mlirRetTy <> " {"
+        , bodyText
+        , "  }"
+        ]
 
--- | Decompose a function type into argument names, types, and return type
-decomposeType :: Type -> ([Text], [Type], Type)
-decomposeType (TFun args _eff ret) =
-  let argNames = [T.pack ("arg" ++ show i) | i <- [0..length args - 1]]
-      argTypes = map snd args
-  in (argNames, argTypes, ret)
-decomposeType (TForall _ body) = decomposeType body
-decomposeType t = ([], [], t)
+-- | Emit a function body, producing MLIR operations ending with func.return
+emitBody :: Expr -> Text -> Emit Text
+emitBody expr retTy = do
+  (ops, resultName) <- emitExpr expr
+  pure $ T.unlines $
+    map ("    " <>) ops ++
+    [ "    func.return %" <> resultName <> " : " <> retTy ]
 
--- | Convert Frankenstein Type to MLIR type
-typeToMlir :: Type -> MlirType
+-- | Emit a Core expression. Returns (list of MLIR ops, result SSA name)
+emitExpr :: Expr -> Emit ([Text], Text)
+emitExpr (ELit (LitInt n)) = do
+  name <- freshName "v"
+  pure (["%" <> name <> " = arith.constant " <> T.pack (show n) <> " : i64"], name)
+
+emitExpr (ELit (LitFloat n)) = do
+  name <- freshName "v"
+  pure (["%" <> name <> " = arith.constant " <> T.pack (show n) <> " : f64"], name)
+
+emitExpr (EVar n) = do
+  -- Variable reference — assume it's already in scope as an SSA value
+  pure ([], sanitizeName (nameText n))
+
+emitExpr (EApp (EVar fn) [a, b])
+  | nameText fn == "+" || nameText fn == "add" = emitBinOp "arith.addi" "i64" a b
+  | nameText fn == "-" || nameText fn == "sub" = emitBinOp "arith.subi" "i64" a b
+  | nameText fn == "*" || nameText fn == "mul" = emitBinOp "arith.muli" "i64" a b
+  | nameText fn == "==" || nameText fn == "eq" = emitCmpOp "eq" a b
+  | nameText fn == "/=" || nameText fn == "ne" = emitCmpOp "ne" a b
+  | nameText fn == "<" || nameText fn == "lt"  = emitCmpOp "slt" a b
+  | nameText fn == ">" || nameText fn == "gt"  = emitCmpOp "sgt" a b
+  | nameText fn == "<=" || nameText fn == "le" = emitCmpOp "sle" a b
+  | nameText fn == ">=" || nameText fn == "ge" = emitCmpOp "sge" a b
+
+emitExpr (EApp (EVar fn) args) = do
+  -- General function call
+  argResults <- mapM emitExpr args
+  let allOps = concatMap fst argResults
+      argNames = map snd argResults
+      argList = T.intercalate ", " ["%" <> n | n <- argNames]
+      argTypeList = T.intercalate ", " (replicate (length args) "i64")
+  resultName <- freshName "v"
+  let callOp = "%" <> resultName <> " = func.call @" <> sanitizeName (nameText fn)
+               <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
+  pure (allOps ++ [callOp], resultName)
+
+emitExpr (ECase scrut branches) = do
+  -- Pattern matching: for integer literals, use cmpi + scf.if
+  -- For now: handle the common case of matching on 0 vs default
+  (scrutOps, scrutName) <- emitExpr scrut
+  case branches of
+    [Branch (PatLit (LitInt 0)) _ thenExpr, Branch _ _ elseExpr] ->
+      emitIntCase scrutOps scrutName 0 thenExpr elseExpr
+    [Branch (PatLit (LitInt n)) _ thenExpr, Branch _ _ elseExpr] ->
+      emitIntCase scrutOps scrutName n thenExpr elseExpr
+    -- Two branches: treat first as "then" for when scrut is truthy
+    [Branch _ _ thenExpr, Branch _ _ elseExpr] -> do
+      emitIfElse scrutOps scrutName thenExpr elseExpr
+    -- Single branch: just emit the body
+    [Branch _ _ body] -> do
+      (bodyOps, bodyName) <- emitExpr body
+      pure (scrutOps ++ bodyOps, bodyName)
+    _ -> do
+      name <- freshName "v"
+      pure (scrutOps ++ ["// unhandled case with " <> T.pack (show (length branches)) <> " branches",
+                          "%" <> name <> " = arith.constant 0 : i64"], name)
+
+emitExpr (ELet [binds] body) = do
+  bindOps <- concat <$> mapM emitBind binds
+  (bodyOps, bodyName) <- emitExpr body
+  pure (bindOps ++ bodyOps, bodyName)
+
+emitExpr (ELet (bg:bgs) body) = do
+  bindOps <- concat <$> mapM emitBind bg
+  (restOps, restName) <- emitExpr (ELet bgs body)
+  pure (bindOps ++ restOps, restName)
+
+emitExpr (ELam params body) = do
+  -- Lambda should have been lifted to top level. If we encounter one inline,
+  -- lift it now and emit a reference to it.
+  liftedName <- freshName "lambda"
+  let mlirArgs = T.intercalate ", "
+        [ "%" <> nameText pn <> ": i64" | (pn, _) <- params ]
+  (bodyOps, bodyResult) <- emitExpr body
+  let fnText = T.unlines $
+        [ "  func.func @" <> liftedName <> "(" <> mlirArgs <> ") -> i64 {" ] ++
+        map ("    " <>) bodyOps ++
+        [ "    func.return %" <> bodyResult <> " : i64"
+        , "  }" ]
+  addLiftedFn fnText
+  -- Return the function name as a value (not quite right for MLIR, but functional)
+  name <- freshName "v"
+  pure (["// lambda lifted as @" <> liftedName,
+         "%" <> name <> " = arith.constant 0 : i64"], name)
+
+-- Perceus operations
+emitExpr (EDrop e) = do
+  (eOps, eName) <- emitExpr e
+  pure (eOps ++ ["// drop %" <> eName], eName)
+
+emitExpr (ERetain e) = do
+  (eOps, eName) <- emitExpr e
+  pure (eOps ++ ["// retain %" <> eName], eName)
+
+emitExpr (EDelay e) = do
+  (eOps, eName) <- emitExpr e
+  pure (eOps ++ ["// delay (thunk) %" <> eName], eName)
+
+emitExpr (EForce e) = do
+  (eOps, eName) <- emitExpr e
+  pure (eOps ++ ["// force (thunk) %" <> eName], eName)
+
+emitExpr _ = do
+  name <- freshName "v"
+  pure (["%" <> name <> " = arith.constant 0 : i64  // unimplemented expr"], name)
+
+-- Helpers
+
+emitBinOp :: Text -> Text -> Expr -> Expr -> Emit ([Text], Text)
+emitBinOp op ty a b = do
+  (aOps, aName) <- emitExpr a
+  (bOps, bName) <- emitExpr b
+  resultName <- freshName "v"
+  let binOp = "%" <> resultName <> " = " <> op <> " %" <> aName <> ", %" <> bName <> " : " <> ty
+  pure (aOps ++ bOps ++ [binOp], resultName)
+
+emitCmpOp :: Text -> Expr -> Expr -> Emit ([Text], Text)
+emitCmpOp pred' a b = do
+  (aOps, aName) <- emitExpr a
+  (bOps, bName) <- emitExpr b
+  resultName <- freshName "v"
+  let cmpOp = "%" <> resultName <> " = arith.cmpi " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : i64"
+  pure (aOps ++ bOps ++ [cmpOp], resultName)
+
+emitIntCase :: [Text] -> Text -> Integer -> Expr -> Expr -> Emit ([Text], Text)
+emitIntCase scrutOps scrutName litVal thenExpr elseExpr = do
+  -- Compare scrutinee to literal value
+  cmpName <- freshName "cmp"
+  let litOps = if litVal == 0
+        then ["%" <> cmpName <> " = arith.cmpi eq, %" <> scrutName <> ", %" <> scrutName <> " : i64"
+             -- Actually: compare to constant 0
+             ]
+        else []
+  -- Use constant comparison
+  zeroName <- freshName "v"
+  cmpName2 <- freshName "cmp"
+  let cmpOps = [ "%" <> zeroName <> " = arith.constant " <> T.pack (show litVal) <> " : i64"
+               , "%" <> cmpName2 <> " = arith.cmpi eq, %" <> scrutName <> ", %" <> zeroName <> " : i64"
+               ]
+  emitScfIf (scrutOps ++ cmpOps) cmpName2 thenExpr elseExpr
+
+emitIfElse :: [Text] -> Text -> Expr -> Expr -> Emit ([Text], Text)
+emitIfElse condOps condName thenExpr elseExpr = do
+  -- condName should be i1; if it's i64, compare != 0
+  zeroName <- freshName "v"
+  cmpName <- freshName "cmp"
+  let toI1 = [ "%" <> zeroName <> " = arith.constant 0 : i64"
+             , "%" <> cmpName <> " = arith.cmpi ne, %" <> condName <> ", %" <> zeroName <> " : i64"
+             ]
+  emitScfIf (condOps ++ toI1) cmpName thenExpr elseExpr
+
+emitScfIf :: [Text] -> Text -> Expr -> Expr -> Emit ([Text], Text)
+emitScfIf preOps condName thenExpr elseExpr = do
+  resultName <- freshName "v"
+  (thenOps, thenResult) <- emitExpr thenExpr
+  (elseOps, elseResult) <- emitExpr elseExpr
+  let ifOps =
+        [ "%" <> resultName <> " = scf.if %" <> condName <> " -> i64 {" ] ++
+        map ("  " <>) thenOps ++
+        [ "  scf.yield %" <> thenResult <> " : i64"
+        , "} else {"
+        ] ++
+        map ("  " <>) elseOps ++
+        [ "  scf.yield %" <> elseResult <> " : i64"
+        , "}"
+        ]
+  pure (preOps ++ ifOps, resultName)
+
+emitBind :: Bind -> Emit [Text]
+emitBind bnd = do
+  (ops, resultName) <- emitExpr (bindExpr bnd)
+  let bname = sanitizeName (nameText (Frankenstein.Core.Types.bindName bnd))
+  if bname == resultName
+    then pure ops
+    else pure $ ops ++ ["// let " <> bname <> " = %" <> resultName]
+
+-- Type decomposition
+decomposeDefType :: Type -> ([Text], [Type], Type)
+decomposeDefType (TFun args _eff ret) =
+  ( [T.pack ("arg" ++ show i) | i <- [0..length args - 1]]
+  , map snd args
+  , ret )
+decomposeDefType (TForall _ body) = decomposeDefType body
+decomposeDefType t = ([], [], t)
+
+-- Type to MLIR type string
+typeToMlir :: Type -> Text
 typeToMlir (TCon tc)
-  | nameText (qnameName (tcName tc)) == "int"    = MlirI64
-  | nameText (qnameName (tcName tc)) == "i32"    = MlirI32
-  | nameText (qnameName (tcName tc)) == "i64"    = MlirI64
-  | nameText (qnameName (tcName tc)) == "float"  = MlirF64
-  | nameText (qnameName (tcName tc)) == "f32"    = MlirF32
-  | nameText (qnameName (tcName tc)) == "f64"    = MlirF64
-  | nameText (qnameName (tcName tc)) == "bool"   = MlirI1
-  | nameText (qnameName (tcName tc)) == "char"   = MlirI32
-  | nameText (qnameName (tcName tc)) == "unit"   = MlirNone
-  | nameText (qnameName (tcName tc)) == "string" = MlirPtr
-  | otherwise = MlirPtr  -- boxed/heap-allocated value
-typeToMlir _ = MlirPtr  -- default: pointer to boxed value
+  | n == "int" || n == "i64" || n == "integer" = "i64"
+  | n == "i32"    = "i32"
+  | n == "float" || n == "f64" = "f64"
+  | n == "f32"    = "f32"
+  | n == "bool"   = "i1"
+  | n == "unit"   = "i64"  -- represent unit as i64 (0) for simplicity
+  | otherwise     = "i64"  -- default to i64 for unrecognized types
+  where n = nameText (qnameName (tcName tc))
+typeToMlir _ = "i64"
 
--- | Emit a Core expression, producing MLIR operations and a result name.
--- Returns (operations, result_name) where result_name is the SSA name
--- of the value produced.
-emitExpr :: Int -> Expr -> ([(Maybe Text, MlirOp)], Text)
-emitExpr counter expr = case expr of
-  ELit (LitInt n) ->
-    let name = T.pack ("v" ++ show counter)
-    in ([(Just name, ArithConstI n MlirI64)], name)
+-- Sanitize names for MLIR (replace special chars)
+sanitizeName :: Text -> Text
+sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~" :: [Char]) then '_' else c)
 
-  ELit (LitFloat n) ->
-    let name = T.pack ("v" ++ show counter)
-    in ([(Just name, ArithConstF n MlirF64)], name)
-
-  EVar n ->
-    -- Variable reference: just use the name
-    ([], nameText n)
-
-  EApp (EVar fn) args ->
-    let -- Emit each argument
-        (argOps, argNames) = emitArgs (counter) args
-        nextCounter = counter + length args
-        resultName = T.pack ("v" ++ show nextCounter)
-        callOp = (Just resultName,
-                  FuncCall (nameText fn)
-                           [MlirValue ("%" <> n) MlirPtr | n <- argNames]
-                           [MlirPtr])
-    in (argOps ++ [callOp], resultName)
-
-  ELet [binds] body ->
-    let -- Emit each binding
-        (bindOps, _) = emitBindGroup counter binds
-        nextCounter = counter + length binds
-        (bodyOps, bodyResult) = emitExpr nextCounter body
-    in (bindOps ++ bodyOps, bodyResult)
-
-  ECase scrut branches ->
-    let (scrutOps, scrutName) = emitExpr counter scrut
-        -- For now: emit as a series of comparisons
-        -- Real implementation needs proper pattern match compilation
-        resultName = T.pack ("v" ++ show (counter + 1))
-    in (scrutOps ++ [(Just resultName, RawMlir $ "// case on %" <> scrutName)], resultName)
-
-  -- Perceus operations
-  ERetain e ->
-    let (eOps, eName) = emitExpr counter e
-    in (eOps ++ [(Nothing, KokaRetain (MlirValue ("%" <> eName) MlirPtr))], eName)
-
-  ERelease e ->
-    let (eOps, eName) = emitExpr counter e
-    in (eOps ++ [(Nothing, KokaRelease (MlirValue ("%" <> eName) MlirPtr))], eName)
-
-  EDrop e ->
-    let (eOps, eName) = emitExpr counter e
-    in (eOps ++ [(Nothing, KokaDrop (MlirValue ("%" <> eName) MlirPtr))], eName)
-
-  -- Laziness operations
-  EDelay e ->
-    let (eOps, eName) = emitExpr counter e
-        thunkName = T.pack ("v" ++ show (counter + length eOps))
-    in (eOps ++ [(Just thunkName,
-                  FuncCall "kk_thunk_alloc"
-                           [MlirValue ("%" <> eName) MlirPtr]
-                           [MlirPtr])],
-        thunkName)
-
-  EForce e ->
-    let (eOps, eName) = emitExpr counter e
-        resultName = T.pack ("v" ++ show (counter + length eOps))
-    in (eOps ++ [(Just resultName,
-                  FuncCall "kk_thunk_force"
-                           [MlirValue ("%" <> eName) MlirPtr]
-                           [MlirPtr])],
-        resultName)
-
-  _ ->
-    let name = T.pack ("v" ++ show counter)
-    in ([(Just name, RawMlir $ "// unimplemented: " <> T.pack (take 80 (show expr)))], name)
-
-emitArgs :: Int -> [Expr] -> ([(Maybe Text, MlirOp)], [Text])
-emitArgs _ [] = ([], [])
-emitArgs counter (e:es) =
-  let (eOps, eName) = emitExpr counter e
-      (restOps, restNames) = emitArgs (counter + length eOps + 1) es
-  in (eOps ++ restOps, eName : restNames)
-
-emitBindGroup :: Int -> [Bind] -> ([(Maybe Text, MlirOp)], [Text])
-emitBindGroup _ [] = ([], [])
-emitBindGroup counter (b:bs) =
-  let (bOps, bName) = emitExpr counter (bindExpr b)
-      -- Alias the binding name to the result
-      name = nameText (bindName b)
-      aliasOps = if name == bName then [] else [(Just name, RawMlir $ "// alias " <> name <> " = %" <> bName)]
-      (restOps, restNames) = emitBindGroup (counter + length bOps + 1) bs
-  in (bOps ++ aliasOps ++ restOps, bName : restNames)
-
--- | Full compilation pipeline: Core -> MLIR text -> mlir-opt -> LLVM IR -> executable
+-- | Full compilation pipeline
 compileToExecutable :: EmitConfig -> Program -> IO (Either Text FilePath)
 compileToExecutable config prog = do
-  let mlirMod = emitProgram prog
-      mlirText = renderModule mlirMod
+  let mlirText = emitProgramText prog
+      mlirPath = ecOutputPath config ++ ".mlir"
+      optPath = ecOutputPath config ++ ".opt.mlir"
+      llPath = ecOutputPath config ++ ".ll"
 
-  -- Write MLIR to temp file
-  let mlirPath = ecOutputPath config ++ ".mlir"
+  -- Write MLIR
   TIO.writeFile mlirPath mlirText
 
-  -- Run mlir-opt for optimization
-  let optFlags = if ecOptLevel config > 0
-                 then ["--convert-scf-to-cf", "--convert-func-to-llvm",
-                       "--convert-arith-to-llvm", "--reconcile-unrealized-casts"]
-                 else ["--convert-func-to-llvm", "--convert-arith-to-llvm",
-                       "--reconcile-unrealized-casts"]
+  -- mlir-opt: lower to LLVM dialect
   (ec1, out1, err1) <- readProcessWithExitCode (ecMlirOptPath config)
-    (optFlags ++ [mlirPath]) ""
+    ["--convert-scf-to-cf", "--convert-func-to-llvm", "--convert-arith-to-llvm",
+     "--convert-cf-to-llvm", "--reconcile-unrealized-casts", mlirPath] ""
   case ec1 of
-    ExitFailure _ -> pure $ Left $ T.pack $ "mlir-opt failed: " ++ err1
+    ExitFailure _ -> pure $ Left $ "mlir-opt failed: " <> T.pack err1
     ExitSuccess -> do
-      -- Write optimized MLIR
-      let optPath = ecOutputPath config ++ ".opt.mlir"
       writeFile optPath out1
 
-      -- Translate to LLVM IR
+      -- mlir-translate: MLIR → LLVM IR
       (ec2, out2, err2) <- readProcessWithExitCode (ecMlirTranslatePath config)
         ["--mlir-to-llvmir", optPath] ""
       case ec2 of
-        ExitFailure _ -> pure $ Left $ T.pack $ "mlir-translate failed: " ++ err2
+        ExitFailure _ -> pure $ Left $ "mlir-translate failed: " <> T.pack err2
         ExitSuccess -> do
-          -- Write LLVM IR
-          let llPath = ecOutputPath config ++ ".ll"
           writeFile llPath out2
 
-          -- Compile to executable
-          let runtimeFlags = case ecKokaRuntimePath config of
-                Just p  -> ["-L" ++ p, "-lkklib"]
-                Nothing -> []
+          -- clang: LLVM IR → executable
           (ec3, _, err3) <- readProcessWithExitCode (ecClangPath config)
-            ([llPath, "-o", ecOutputPath config, "-O" ++ show (ecOptLevel config)]
-             ++ runtimeFlags) ""
+            [llPath, "-x", "ir", "-o", ecOutputPath config,
+             "-O" ++ show (ecOptLevel config)] ""
           case ec3 of
-            ExitFailure _ -> pure $ Left $ T.pack $ "clang failed: " ++ err3
+            ExitFailure _ -> pure $ Left $ "clang failed: " <> T.pack err3
             ExitSuccess -> pure $ Right $ ecOutputPath config

@@ -1,89 +1,129 @@
 module Main (main) where
 
 import Frankenstein.Core.Types
-import Frankenstein.GhcBridge.Driver
+import Frankenstein.Core.Perceus (insertPerceus)
+import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
+import Frankenstein.GhcBridge.Driver (compileToCore, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
 import Frankenstein.MercuryBridge.CoreTranslate
 import Frankenstein.RustBridge.MirParse
 import Frankenstein.RustBridge.CoreTranslate
-import Frankenstein.MlirEmit.Emitter
-import Frankenstein.MlirEmit.Dialects
+import Frankenstein.MlirEmit.Emitter (emitProgram, compileToExecutable, defaultEmitConfig, EmitConfig(..))
 
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Environment (getArgs)
-import System.FilePath (takeExtension)
+import System.FilePath (takeExtension, takeBaseName)
+import Data.List (partition, dropWhile)
 
 main :: IO ()
 main = do
   args <- getArgs
-  case args of
-    [] -> do
-      putStrLn "Frankenstein — Polyglot Compiler"
-      putStrLn ""
-      putStrLn "Usage: frankenstein <input-file> [--emit-mlir | --emit-core]"
-      putStrLn ""
-      putStrLn "Supported input formats:"
-      putStrLn "  .hs     Haskell  (via GHC API)"
-      putStrLn "  .m      Mercury  (via mmc --dump-hlds)"
-      putStrLn "  .rs     Rust     (via rustc MIR)"
-      putStrLn ""
-      putStrLn "All paths converge on Koka Core → MLIR → LLVM → native."
+  case parseArgs args of
+    ShowHelp -> printHelp
+    DemoMode flags -> do
+      let prog = demoFactorialWithMain
+      handleOutput prog flags
+    CompileFiles files flags -> do
+      results <- mapM compileFile files
+      let (errs, progs) = partitionResults results
+      if not (null errs) then
+        mapM_ (\(f, e) -> TIO.putStrLn $ "Error [" <> T.pack f <> "]: " <> e) errs
+      else do
+        let needsMain = flagCompile flags
+        case linkProgramsWith needsMain progs of
+          Left linkErrs -> mapM_ (TIO.putStrLn . formatLinkError) linkErrs
+          Right lr -> do
+            let prog = lrProgram lr
+            when (length progs > 1) $
+              TIO.putStrLn $ "Linked " <> T.pack (show (length progs))
+                          <> " modules (main in " <> lrMainModule lr <> ")"
+            handleOutput prog flags
+  where
+    when True  m = m
+    when False _ = pure ()
 
-    (inputFile:flags) -> do
-      let ext = takeExtension inputFile
-          emitMlir = "--emit-mlir" `elem` flags
-          emitCore = "--emit-core" `elem` flags
+-- Command-line parsing
 
-      result <- case ext of
-        ".hs" -> compileHaskell inputFile
-        ".m"  -> compileMercury inputFile
-        ".rs" -> compileRust inputFile
-        _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
+data Flags = Flags
+  { flagEmitCore :: !Bool
+  , flagEmitMlir :: !Bool
+  , flagCompile  :: !Bool
+  , flagOutput   :: !FilePath
+  } deriving (Show)
 
-      case result of
-        Left err -> TIO.putStrLn $ "Error: " <> err
-        Right prog -> do
-          if emitCore then do
-            TIO.putStrLn $ "=== Frankenstein Core ==="
-            TIO.putStrLn $ prettyProgram prog
-          else if emitMlir then do
-            let mlirMod = emitProgram prog
-            TIO.putStrLn $ renderModule mlirMod
-          else do
-            TIO.putStrLn $ "=== Frankenstein Core ==="
-            TIO.putStrLn $ prettyProgram prog
-            TIO.putStrLn $ ""
-            TIO.putStrLn $ "=== MLIR ==="
-            let mlirMod = emitProgram prog
-            TIO.putStrLn $ renderModule mlirMod
+defaultFlags :: Flags
+defaultFlags = Flags False False False "a.out"
+
+data Command
+  = ShowHelp
+  | DemoMode Flags
+  | CompileFiles [FilePath] Flags
+  deriving (Show)
+
+parseArgs :: [String] -> Command
+parseArgs [] = ShowHelp
+parseArgs args
+  | "--help" `elem` args || "-h" `elem` args = ShowHelp
+  | "--demo" `elem` args = DemoMode (parseFlags args)
+  | otherwise =
+      let (files, flagArgs) = partition (not . isFlag) args
+      in if null files
+         then ShowHelp
+         else CompileFiles files (parseFlags flagArgs)
+
+isFlag :: String -> Bool
+isFlag ('-':'-':_) = True
+isFlag _ = False
+
+parseFlags :: [String] -> Flags
+parseFlags args = Flags
+  { flagEmitCore = "--emit-core" `elem` args
+  , flagEmitMlir = "--emit-mlir" `elem` args
+  , flagCompile  = "--compile" `elem` args
+  , flagOutput   = case dropWhile (/= "--output") args of
+                     ("--output":o:_) -> o
+                     _ -> case dropWhile (/= "-o") args of
+                            ("-o":o:_) -> o
+                            _ -> "a.out"
+  }
+
+-- Compilation dispatch
+
+compileFile :: FilePath -> IO (Either (FilePath, Text) Program)
+compileFile path = do
+  let ext = takeExtension path
+  result <- case ext of
+    ".hs" -> compileHaskell path
+    ".m"  -> compileMercury path
+    ".rs" -> compileRust path
+    _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
+  pure $ case result of
+    Left err   -> Left (path, err)
+    Right prog -> Right prog
 
 compileHaskell :: FilePath -> IO (Either Text Program)
 compileHaskell inputFile = do
   TIO.putStrLn $ "Compiling Haskell: " <> T.pack inputFile
-  TIO.putStrLn $ "(GHC bridge — subprocess mode)"
-  -- For now: demonstrate with a hardcoded simple program
-  -- TODO: invoke GHC API
   result <- compileToCore inputFile
   case result of
     Left err -> do
-      TIO.putStrLn $ "GHC bridge not yet active: " <> err
-      TIO.putStrLn $ "Using demo program..."
+      TIO.putStrLn $ "  GHC bridge error: " <> err
+      TIO.putStrLn $ "  Using demo program..."
       pure $ Right demoHaskellProgram
-    Right _ -> pure $ Left "GHC Core translation not yet connected"
+    Right gcr -> pure $ Right (gcrProgram gcr)
 
 compileMercury :: FilePath -> IO (Either Text Program)
 compileMercury inputFile = do
   TIO.putStrLn $ "Compiling Mercury: " <> T.pack inputFile
-  TIO.putStrLn $ "(mmc --dump-hlds mode)"
   result <- dumpHlds inputFile
   case result of
     Left err -> do
-      TIO.putStrLn $ "Mercury bridge error: " <> err
-      TIO.putStrLn $ "Using demo program..."
+      TIO.putStrLn $ "  Mercury bridge error: " <> err
+      TIO.putStrLn $ "  Using demo program..."
       pure $ Right demoMercuryProgram
-    Right dumpText -> do
+    Right dumpText ->
       case parseHldsDump dumpText of
         Left err -> pure $ Left $ "HLDS parse error: " <> err
         Right hlds -> pure $ translateHlds hlds
@@ -91,19 +131,122 @@ compileMercury inputFile = do
 compileRust :: FilePath -> IO (Either Text Program)
 compileRust inputFile = do
   TIO.putStrLn $ "Compiling Rust: " <> T.pack inputFile
-  TIO.putStrLn $ "(rustc MIR dump mode)"
   result <- dumpMir inputFile
   case result of
     Left err -> do
-      TIO.putStrLn $ "Rust bridge error: " <> err
-      TIO.putStrLn $ "Using demo program..."
+      TIO.putStrLn $ "  Rust bridge error: " <> err
+      TIO.putStrLn $ "  Using demo program..."
       pure $ Right demoRustProgram
     Right mirText ->
       case parseMirText mirText of
         Left err -> pure $ Left $ "MIR parse error: " <> err
         Right mir -> pure $ translateMir mir
 
--- Demo programs for testing the pipeline before bridges are connected
+-- Output handling
+
+handleOutput :: Program -> Flags -> IO ()
+handleOutput prog0 flags = do
+  let prog = insertPerceus prog0
+      config = defaultEmitConfig { ecOutputPath = flagOutput flags }
+  case () of
+    _ | flagCompile flags -> do
+          TIO.putStrLn "=== Compiling to native ==="
+          result <- compileToExecutable config prog
+          case result of
+            Left err -> TIO.putStrLn $ "Compilation error: " <> err
+            Right path -> TIO.putStrLn $ "Compiled: " <> T.pack path
+      | flagEmitCore flags -> do
+          TIO.putStrLn "=== Frankenstein Core ==="
+          TIO.putStrLn $ prettyProgram prog
+      | flagEmitMlir flags ->
+          TIO.putStrLn $ emitProgram prog
+      | otherwise -> do
+          TIO.putStrLn "=== Frankenstein Core ==="
+          TIO.putStrLn $ prettyProgram prog
+          TIO.putStrLn ""
+          TIO.putStrLn "=== MLIR ==="
+          TIO.putStrLn $ emitProgram prog
+
+-- Helpers
+
+partitionResults :: [Either (FilePath, Text) Program] -> ([(FilePath, Text)], [Program])
+partitionResults = go [] []
+  where
+    go errs progs [] = (reverse errs, reverse progs)
+    go errs progs (Left e : rest) = go (e:errs) progs rest
+    go errs progs (Right p : rest) = go errs (p:progs) rest
+
+formatLinkError :: LinkError -> Text
+formatLinkError (DuplicateDefinition qn m1 m2) =
+  "Link error: duplicate definition '" <> nameText (qnameName qn)
+  <> "' in modules " <> m1 <> " and " <> m2
+formatLinkError NoMainFunction =
+  "Link error: no 'main' function found in any module"
+formatLinkError (MultipleMainFunctions ms) =
+  "Link error: 'main' found in multiple modules: " <> T.intercalate ", " ms
+
+printHelp :: IO ()
+printHelp = do
+  putStrLn "Frankenstein — Polyglot Compiler"
+  putStrLn ""
+  putStrLn "Usage: frankenstein [options] <input-files...>"
+  putStrLn ""
+  putStrLn "Options:"
+  putStrLn "  --emit-core   Print Frankenstein Core IR"
+  putStrLn "  --emit-mlir   Print MLIR output"
+  putStrLn "  --compile     Compile to native executable"
+  putStrLn "  -o, --output  Output path (default: a.out)"
+  putStrLn "  --demo        Run built-in demo (factorial)"
+  putStrLn "  -h, --help    Show this help"
+  putStrLn ""
+  putStrLn "Supported input formats:"
+  putStrLn "  .hs     Haskell  (via GHC API)"
+  putStrLn "  .m      Mercury  (via mmc --dump-hlds)"
+  putStrLn "  .rs     Rust     (via rustc MIR)"
+  putStrLn ""
+  putStrLn "Multiple files from different languages can be compiled together:"
+  putStrLn "  frankenstein search.m Transform.hs sort_buf.rs --compile"
+  putStrLn ""
+  putStrLn "All paths converge on Koka Core → Perceus → MLIR → LLVM → native."
+
+-------------------------------------------------------------------------------
+-- Demo programs
+-------------------------------------------------------------------------------
+
+demoFactorialWithMain :: Program
+demoFactorialWithMain = Program
+  { progName = QName "demo" (Name "factorial" 0)
+  , progDefs =
+      [ Def
+          { defName = QName "" (Name "factorial" 1)
+          , defType = TFun [(Many, intType)] EffectRowEmpty intType
+          , defExpr =
+              ELam [(Name "n" 2, intType)] $
+                ECase (EVar (Name "n" 2))
+                  [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 1))
+                  , Branch (PatVar (Name "n" 2) intType) Nothing
+                      (EApp (EVar (Name "*" 0))
+                        [ EVar (Name "n" 2)
+                        , EApp (EVar (Name "factorial" 1))
+                               [EApp (EVar (Name "-" 0)) [EVar (Name "n" 2), ELit (LitInt 1)]]
+                        ])
+                  ]
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      , Def
+          { defName = QName "" (Name "main" 10)
+          , defType = TFun [] EffectRowEmpty intType
+          , defExpr =
+              EApp (EVar (Name "factorial" 1)) [ELit (LitInt 10)]
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      ]
+  , progData = []
+  , progEffects = []
+  }
+  where intType = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
 
 demoHaskellProgram :: Program
 demoHaskellProgram = Program
@@ -140,7 +283,7 @@ demoMercuryProgram = Program
           { defName = QName "demo" (Name "append" 1)
           , defType = TFun
               [(Many, listType), (Many, listType)]
-              EffectRowEmpty  -- det: pure
+              EffectRowEmpty
               listType
           , defExpr =
               ELam [(Name "xs" 2, listType), (Name "ys" 3, listType)] $
@@ -173,15 +316,14 @@ demoRustProgram = Program
       [ Def
           { defName = QName "demo" (Name "sum_vec" 1)
           , defType = TFun
-              [(Affine, vecType)]  -- Vec<i64> consumed (ownership transfer)
+              [(Affine, vecType)]
               EffectRowEmpty
               intType
           , defExpr =
               ELam [(Name "v" 2, vecType)] $
-                -- Simplified: just show the ownership pattern
                 ELet [[Bind (Name "result" 3) intType (ELit (LitInt 0)) DefVar]]
                   (EApp (EVar (Name "fold" 0))
-                    [ EVar (Name "v" 2)     -- moved into fold
+                    [ EVar (Name "v" 2)
                     , EVar (Name "result" 3)
                     , ELam [(Name "acc" 4, intType), (Name "x" 5, intType)]
                         (EApp (EVar (Name "+" 0)) [EVar (Name "acc" 4), EVar (Name "x" 5)])
@@ -194,7 +336,7 @@ demoRustProgram = Program
           , defType = TFun [(Affine, vecType)] EffectRowEmpty unitType
           , defExpr =
               ELam [(Name "v" 6, vecType)] $
-                EDrop (EVar (Name "v" 6))  -- explicit drop (Rust: drop(v))
+                EDrop (EVar (Name "v" 6))
           , defSort = DefFun
           , defVisibility = Public
           }
@@ -207,17 +349,20 @@ demoRustProgram = Program
     vecType = TCon (TypeCon (QName "std" (Name "vec" 0)) KindValue)
     unitType = TCon (TypeCon (QName "std" (Name "unit" 0)) KindValue)
 
--- Simple pretty printer for Core programs
+-------------------------------------------------------------------------------
+-- Pretty printer
+-------------------------------------------------------------------------------
+
 prettyProgram :: Program -> Text
 prettyProgram prog = T.unlines $
-  [ "module " <> qnameToText (progName prog) ]
+  [ "module " <> ppQName (progName prog) ]
   ++ concatMap prettyDef (progDefs prog)
 
 prettyDef :: Def -> [Text]
 prettyDef d =
   [ ""
-  , qnameToText (defName d) <> " : " <> prettyType (defType d)
-  , qnameToText (defName d) <> " = " <> prettyExpr 1 (defExpr d)
+  , ppQName (defName d) <> " : " <> prettyType (defType d)
+  , ppQName (defName d) <> " = " <> prettyExpr (defExpr d)
   ]
 
 prettyType :: Type -> Text
@@ -226,9 +371,10 @@ prettyType (TFun args eff ret) =
   <> " -> " <> prettyEff eff <> " " <> prettyType ret
 prettyType (TCon tc) = nameText (qnameName (tcName tc))
 prettyType (TVar tv) = nameText (tvName tv)
-prettyType (TForall tvs body) = "forall " <> T.intercalate " " (map (nameText . tvName) tvs) <> ". " <> prettyType body
+prettyType (TForall tvs body) =
+  "forall " <> T.intercalate " " (map (nameText . tvName) tvs) <> ". " <> prettyType body
 prettyType (TApp a b) = prettyType a <> "<" <> prettyType b <> ">"
-prettyType (TSyn name _ _) = qnameToText name
+prettyType (TSyn name _ _) = ppQName name
 
 prettyMult :: Multiplicity -> Text
 prettyMult Many = ""
@@ -237,34 +383,36 @@ prettyMult Linear = "linear "
 
 prettyEff :: EffectRow -> Text
 prettyEff EffectRowEmpty = "total"
-prettyEff (EffectRowExtend name rest) = "<" <> qnameToText name <> "," <> prettyEff rest <> ">"
+prettyEff (EffectRowExtend name rest) = "<" <> ppQName name <> "," <> prettyEff rest <> ">"
 prettyEff (EffectRowVar tv) = nameText (tvName tv)
 
-prettyExpr :: Int -> Expr -> Text
-prettyExpr _ (EVar n) = nameText n
-prettyExpr _ (ELit (LitInt n)) = T.pack (show n)
-prettyExpr _ (ELit (LitFloat n)) = T.pack (show n)
-prettyExpr _ (ELit (LitChar c)) = T.pack (show c)
-prettyExpr _ (ELit (LitString s)) = "\"" <> s <> "\""
-prettyExpr _ (ECon qn) = qnameToText qn
-prettyExpr d (EApp f args) = prettyExpr d f <> "(" <> T.intercalate ", " (map (prettyExpr d) args) <> ")"
-prettyExpr d (ELam params body) =
-  "fn(" <> T.intercalate ", " [nameText n | (n, _) <- params] <> ") " <> prettyExpr d body
-prettyExpr d (ELet binds body) =
-  "let " <> T.intercalate "; " [nameText (bindName b) <> " = " <> prettyExpr d (bindExpr b) | bg <- binds, b <- bg]
-  <> " in " <> prettyExpr d body
-prettyExpr d (ECase scrut branches) =
-  "match " <> prettyExpr d scrut <> " { " <>
-  T.intercalate " | " [prettyExpr d (branchBody br) | br <- branches] <> " }"
-prettyExpr d (EDrop e) = "drop(" <> prettyExpr d e <> ")"
-prettyExpr d (ERetain e) = "retain(" <> prettyExpr d e <> ")"
-prettyExpr d (ERelease e) = "release(" <> prettyExpr d e <> ")"
-prettyExpr d (EDelay e) = "delay(" <> prettyExpr d e <> ")"
-prettyExpr d (EForce e) = "force(" <> prettyExpr d e <> ")"
-prettyExpr d (EPerform eff args) = "perform " <> qnameToText eff <> "(" <> T.intercalate ", " (map (prettyExpr d) args) <> ")"
-prettyExpr _ _ = "..."
+prettyExpr :: Expr -> Text
+prettyExpr (EVar n) = nameText n
+prettyExpr (ELit (LitInt n)) = T.pack (show n)
+prettyExpr (ELit (LitFloat n)) = T.pack (show n)
+prettyExpr (ELit (LitChar c)) = T.pack (show c)
+prettyExpr (ELit (LitString s)) = "\"" <> s <> "\""
+prettyExpr (ECon qn) = ppQName qn
+prettyExpr (EApp f args) =
+  prettyExpr f <> "(" <> T.intercalate ", " (map prettyExpr args) <> ")"
+prettyExpr (ELam params body) =
+  "fn(" <> T.intercalate ", " [nameText n | (n, _) <- params] <> ") " <> prettyExpr body
+prettyExpr (ELet binds body) =
+  "let " <> T.intercalate "; " [nameText (bindName b) <> " = " <> prettyExpr (bindExpr b) | bg <- binds, b <- bg]
+  <> " in " <> prettyExpr body
+prettyExpr (ECase scrut branches) =
+  "match " <> prettyExpr scrut <> " { "
+  <> T.intercalate " | " [prettyExpr (branchBody br) | br <- branches] <> " }"
+prettyExpr (EDrop e) = "drop(" <> prettyExpr e <> ")"
+prettyExpr (ERetain e) = "retain(" <> prettyExpr e <> ")"
+prettyExpr (ERelease e) = "release(" <> prettyExpr e <> ")"
+prettyExpr (EDelay e) = "delay(" <> prettyExpr e <> ")"
+prettyExpr (EForce e) = "force(" <> prettyExpr e <> ")"
+prettyExpr (EPerform eff args) =
+  "perform " <> ppQName eff <> "(" <> T.intercalate ", " (map prettyExpr args) <> ")"
+prettyExpr _ = "..."
 
-qnameToText :: QName -> Text
-qnameToText qn
+ppQName :: QName -> Text
+ppQName qn
   | T.null (qnameModule qn) = nameText (qnameName qn)
   | otherwise = qnameModule qn <> "." <> nameText (qnameName qn)

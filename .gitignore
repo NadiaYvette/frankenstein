@@ -1,13 +1,39 @@
+# === Cabal / GHC build artifacts ===
 dist-newstyle/
-rustc-shim/target/
-donors/
+.ghc.environment.*
+
+# === Haskell object files ===
 *.o
 *.hi
 *.dyn_o
 *.dyn_hi
+
+# === Rustc shim build ===
+rustc-shim/target/
+
+# === Donor codebases (vendored, not committed) ===
+donors/
+
+# === Build artifacts in root (MLIR/LLVM pipeline) ===
+a.out
+a.out.*
+*.mlir
+*.ll
+
+# === Mercury build artifacts ===
+*.hlds_dump*
 *.c_date
 *.d
+*.mh
+*.err
 append.c
-append.mh
 append.o
-*.hlds_dump*
+search.c
+search.o
+
+# === GHC artifacts in test dir ===
+test/haskell/*.hi
+test/haskell/*.o
+
+# === Output directories ===
+result/

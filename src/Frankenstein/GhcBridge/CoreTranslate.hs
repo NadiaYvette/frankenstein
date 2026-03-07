@@ -3,82 +3,237 @@
 -- Translates GHC's System FC Core into Frankenstein's Core IR.
 -- Key mappings:
 --   GHC Var        -> EVar
---   GHC App        -> EApp
+--   GHC App        -> EApp (collected multi-arg)
 --   GHC Lam        -> ELam
 --   GHC Let        -> ELet
 --   GHC Case       -> ECase
---   GHC Cast       -> (type annotation, mostly dropped)
+--   GHC Cast       -> (coercion dropped, recurse on inner)
 --   GHC Tick       -> (profiling, dropped)
 --   GHC Type       -> (type argument, becomes ETypeApp)
 --   GHC Coercion   -> (dropped / erased)
 --
--- Demand annotations on binders -> Multiplicity + laziness decisions:
---   Strict demand (U) -> value is strict, no EDelay wrapper
---   Lazy demand (L)   -> wrap in EDelay, consumer uses EForce
---   Absent demand (A) -> dead code, drop the binding
---
--- Type class dictionaries -> evidence parameters (mirrors Koka's approach)
+-- Demand annotations on binders -> laziness decisions:
+--   Strict demand  -> no EDelay wrapper
+--   Lazy demand    -> wrap in EDelay
 
 module Frankenstein.GhcBridge.CoreTranslate
   ( translateProgram
   , translateExpr
   ) where
 
-import Frankenstein.Core.Types
+import qualified Frankenstein.Core.Types as F
+
+import GHC.Core
+  ( CoreProgram, CoreBind, CoreExpr
+  , Bind(..), Expr(..), Alt(..), AltCon(..)
+  )
+import GHC.Types.Var (Var, varName, isTyVar)
+import GHC.Types.Name (getOccString, nameUnique)
+import GHC.Types.Unique (getKey)
+import GHC.Types.Literal (Literal(..))
+import GHC.Types.Id (idDemandInfo)
+import GHC.Types.Demand (isStrictDmd, isAbsDmd)
+import GHC.Core.DataCon (dataConName)
 
 import Data.Text (Text)
 import qualified Data.Text as T
 
--- | Translate a GHC Core program to Frankenstein Core.
--- Takes the module name and a list of serialized top-level bindings.
-translateProgram :: Text -> Text -> Either Text Program
-translateProgram modName _coreText =
-  -- Phase 1: Parse GHC's textual Core dump
-  -- Phase 2: Direct translation from GHC Core AST (when ghc package is linked)
-  --
-  -- The translation strategy:
-  -- 1. Walk each top-level binding group
-  -- 2. For recursive groups: emit as BindGroup (mutual recursion)
-  -- 3. For non-recursive: emit as singleton BindGroup
-  -- 4. Translate types: GHC's ForAllTy -> TForall, FunTy -> TFun
-  -- 5. Insert effect annotations: GHC's IO monad -> IO effect row
-  -- 6. Dictionary arguments -> evidence parameters
-  -- 7. Strictness annotations -> laziness effect decisions
-  Left "GHC Core translation not yet implemented"
+-------------------------------------------------------------------------------
+-- Public API
+-------------------------------------------------------------------------------
 
--- | Translate a single GHC Core expression.
--- Placeholder for when we have direct GHC API access.
-translateExpr :: Text -> Either Text Expr
-translateExpr _exprText =
-  Left "Expression translation not yet implemented"
+-- | Translate a full GHC Core program to a Frankenstein Program.
+translateProgram :: Text -> CoreProgram -> Either Text F.Program
+translateProgram modName binds =
+  let defs = concatMap translateTopBind binds
+  in Right $ F.Program
+    { F.progName    = F.QName modName (F.Name modName 0)
+    , F.progDefs    = defs
+    , F.progData    = []
+    , F.progEffects = []
+    }
 
--- Translation helpers (to be filled in with real GHC Core -> Frankenstein Core):
---
--- translateBind :: GHC.CoreBind -> [BindGroup]
--- translateBind (GHC.NonRec b e) = [[Bind (translateName b) (translateType (GHC.varType b)) (translateExpr' e) (classifyBind b)]]
--- translateBind (GHC.Rec pairs) = [map (\(b,e) -> Bind (translateName b) (translateType (GHC.varType b)) (translateExpr' e) DefFun) pairs]
---
--- translateExpr' :: GHC.CoreExpr -> Expr
--- translateExpr' (GHC.Var v) = EVar (translateName v)
--- translateExpr' (GHC.Lit l) = ELit (translateLit l)
--- translateExpr' (GHC.App f a)
---   | GHC.Type ty <- a = ETypeApp (translateExpr' f) [translateType ty]
---   | otherwise         = EApp (translateExpr' f) [translateExpr' a]
--- translateExpr' (GHC.Lam b e)
---   | GHC.isTyVar b = ETypeLam [translateTyVar b] (translateExpr' e)
---   | otherwise      = ELam [(translateName b, translateType (GHC.varType b))] (translateExpr' e)
--- translateExpr' (GHC.Let bind body) = ELet (translateBind bind) (translateExpr' body)
--- translateExpr' (GHC.Case scrut b _ty alts) = ECase (translateExpr' scrut) (map translateAlt alts)
--- translateExpr' (GHC.Cast e _co) = translateExpr' e  -- drop coercions
--- translateExpr' (GHC.Tick _tick e) = translateExpr' e  -- drop ticks
---
--- classifyBind :: GHC.Id -> DefSort
--- classifyBind b
---   | GHC.isStrictDmd (GHC.idDemandInfo b) = DefVal  -- strict, can be a value
---   | otherwise = DefFun  -- might be a thunk / function
---
--- decideLaziness :: GHC.Id -> GHC.CoreExpr -> Expr
--- decideLaziness b e
---   | GHC.isAbsDmd (GHC.idDemandInfo b) = ELit (LitInt 0)  -- dead code
---   | GHC.isStrictDmd (GHC.idDemandInfo b) = translateExpr' e
---   | otherwise = EDelay (translateExpr' e)  -- lazy: wrap in thunk
+-- | Translate a single GHC Core expression (public entry point).
+translateExpr :: CoreExpr -> F.Expr
+translateExpr = trExpr
+
+-------------------------------------------------------------------------------
+-- Top-level bindings -> Defs
+-------------------------------------------------------------------------------
+
+translateTopBind :: CoreBind -> [F.Def]
+translateTopBind (NonRec b e) =
+  [ F.Def
+      { F.defName       = qualifyName b
+      , F.defType       = anyType
+      , F.defExpr       = decideLaziness b e
+      , F.defSort       = classifyBind b
+      , F.defVisibility = F.Public
+      }
+  ]
+translateTopBind (Rec pairs) =
+  [ F.Def
+      { F.defName       = qualifyName b
+      , F.defType       = anyType
+      , F.defExpr       = trExpr e
+      , F.defSort       = F.DefFun
+      , F.defVisibility = F.Public
+      }
+  | (b, e) <- pairs
+  ]
+
+-------------------------------------------------------------------------------
+-- Expression translation
+-------------------------------------------------------------------------------
+
+trExpr :: CoreExpr -> F.Expr
+trExpr (Var v) = F.EVar (translateName v)
+
+trExpr (Lit l) = F.ELit (translateLit l)
+
+-- Type application: App f (Type _) => ETypeApp
+trExpr (App f (Type _)) = F.ETypeApp (trExpr f) [anyType]
+
+-- Regular application: collect args into multi-arg EApp
+trExpr (App f a) =
+  case collectArgs (App f a) of
+    (fun, args) -> F.EApp (trExpr fun) (map trExpr args)
+
+-- Type lambda: skip type binders, recurse on body
+trExpr (Lam b e)
+  | isTyVar b = F.ETypeLam [translateTyVar b] (trExpr e)
+  | otherwise  = F.ELam [(translateName b, anyType)] (trExpr e)
+
+-- Let: translate binding groups
+trExpr (Let bind body) =
+  F.ELet (translateBind bind) (trExpr body)
+
+-- Case: translate scrutinee and alternatives
+trExpr (Case scrut _bndr _ty alts) =
+  F.ECase (trExpr scrut) (map translateAlt alts)
+
+-- Cast: drop coercion, recurse
+trExpr (Cast e _co) = trExpr e
+
+-- Tick: drop profiling tick, recurse
+trExpr (Tick _tick e) = trExpr e
+
+-- Type: skip (shouldn't appear at expression level normally)
+trExpr (Type _) = F.ELit (F.LitInt 0)
+
+-- Coercion: skip
+trExpr (Coercion _) = F.ELit (F.LitInt 0)
+
+-------------------------------------------------------------------------------
+-- Collect nested applications into (fun, [args])
+-- Skips type arguments along the way
+-------------------------------------------------------------------------------
+
+collectArgs :: CoreExpr -> (CoreExpr, [CoreExpr])
+collectArgs = go []
+  where
+    go args (App f (Type _)) = go args f            -- skip type args
+    go args (App f a)        = go (a : args) f       -- collect value args
+    go args e                = (e, args)
+
+-------------------------------------------------------------------------------
+-- Binding groups
+-------------------------------------------------------------------------------
+
+translateBind :: CoreBind -> [F.BindGroup]
+translateBind (NonRec b e) =
+  [[ F.Bind
+      { F.bindName = translateName b
+      , F.bindType = anyType
+      , F.bindExpr = decideLaziness b e
+      , F.bindSort = classifyBind b
+      }
+  ]]
+translateBind (Rec pairs) =
+  [[ F.Bind
+      { F.bindName = translateName b
+      , F.bindType = anyType
+      , F.bindExpr = trExpr e
+      , F.bindSort = F.DefFun
+      }
+   | (b, e) <- pairs
+  ]]
+
+-------------------------------------------------------------------------------
+-- Case alternatives
+-------------------------------------------------------------------------------
+
+translateAlt :: Alt Var -> F.Branch
+translateAlt (Alt con bndrs rhs) = F.Branch
+  { F.branchPattern = translateAltCon con bndrs
+  , F.branchGuard   = Nothing
+  , F.branchBody    = trExpr rhs
+  }
+
+translateAltCon :: AltCon -> [Var] -> F.Pattern
+translateAltCon DEFAULT _ = F.PatWild anyType
+translateAltCon (LitAlt lit) _ = F.PatLit (translateLit lit)
+translateAltCon (DataAlt dc) bndrs =
+  F.PatCon
+    (F.QName T.empty (F.Name (T.pack (getOccString (dataConName dc))) 0))
+    (map (\b -> F.PatVar (translateName b) anyType) (filter (not . isTyVar) bndrs))
+
+-------------------------------------------------------------------------------
+-- Literals
+-------------------------------------------------------------------------------
+
+translateLit :: Literal -> F.Lit
+translateLit (LitChar c)       = F.LitChar c
+translateLit (LitNumber _ n)   = F.LitInt n
+translateLit (LitFloat r)      = F.LitFloat (fromRational r)
+translateLit (LitDouble r)     = F.LitFloat (fromRational r)
+translateLit (LitString _)     = F.LitString "<bytestring>"
+translateLit _                 = F.LitInt 0  -- LitNullAddr, LitRubbish, LitLabel
+
+-------------------------------------------------------------------------------
+-- Names and type helpers
+-------------------------------------------------------------------------------
+
+translateName :: Var -> F.Name
+translateName v = F.Name
+  { F.nameText   = T.pack (getOccString v)
+  , F.nameUnique = fromIntegral (getKey (nameUnique (varName v)))
+  }
+
+translateTyVar :: Var -> F.TypeVar
+translateTyVar v = F.TypeVar
+  { F.tvName         = translateName v
+  , F.tvKind         = F.KindStar
+  , F.tvMultiplicity = F.Many
+  }
+
+qualifyName :: Var -> F.QName
+qualifyName v = F.QName T.empty (translateName v)
+
+-- | Generic "any" type placeholder.
+-- All types map to this until we implement proper type translation.
+anyType :: F.Type
+anyType = F.TCon $ F.TypeCon
+  { F.tcName = F.QName T.empty (F.Name "any" 0)
+  , F.tcKind = F.KindValue
+  }
+
+-------------------------------------------------------------------------------
+-- Demand / laziness classification
+-------------------------------------------------------------------------------
+
+-- | Classify a binding based on GHC's demand information.
+classifyBind :: Var -> F.DefSort
+classifyBind b
+  | isStrictDmd (idDemandInfo b) = F.DefVal
+  | otherwise                     = F.DefFun
+
+-- | Decide whether to wrap an expression in EDelay based on demand.
+-- Strict bindings: use expression directly.
+-- Absent bindings: dead code, emit a placeholder.
+-- Lazy bindings: wrap in EDelay (thunk).
+decideLaziness :: Var -> CoreExpr -> F.Expr
+decideLaziness b e
+  | isAbsDmd (idDemandInfo b)    = F.ELit (F.LitInt 0)  -- dead code
+  | isStrictDmd (idDemandInfo b) = trExpr e              -- strict: no thunk
+  | otherwise                     = F.EDelay (trExpr e)  -- lazy: wrap in thunk

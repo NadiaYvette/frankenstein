@@ -15,6 +15,8 @@ library
     exposed-modules:
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
+        Frankenstein.Core.Perceus
+        Frankenstein.Core.Linker
         Frankenstein.GhcBridge.Driver
         Frankenstein.GhcBridge.CoreTranslate
         Frankenstein.MercuryBridge.HldsParse
@@ -32,7 +34,8 @@ library
         filepath,
         directory,
         mtl,
-        transformers
+        transformers,
+        ghc == 9.14.*
     hs-source-dirs:   src
     default-language: GHC2024
 

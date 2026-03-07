@@ -1,0 +1,14 @@
+[package]
+name = "frankenstein-rustc-shim"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rustc-mir-dump"
+path = "src/main.rs"
+
+[package.metadata]
+# This crate must be built with nightly:
+#   rustup run nightly cargo build
+# And needs rustc-dev component:
+#   rustup component add rustc-dev --toolchain nightly

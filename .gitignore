@@ -1,0 +1,13 @@
+dist-newstyle/
+rustc-shim/target/
+donors/
+*.o
+*.hi
+*.dyn_o
+*.dyn_hi
+*.c_date
+*.d
+append.c
+append.mh
+append.o
+*.hlds_dump*

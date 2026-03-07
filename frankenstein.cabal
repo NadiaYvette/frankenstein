@@ -1,0 +1,48 @@
+cabal-version:      3.0
+name:               frankenstein
+version:            0.1.0.0
+license:            GPL-2.0-only
+license-file:       LICENSE
+synopsis:           Polyglot compiler: Haskell, Mercury, Rust via Koka Core + MLIR
+build-type:         Simple
+
+common warnings
+    ghc-options: -Wall -Wno-unused-imports -Wno-orphans
+    default-extensions: OverloadedStrings
+
+library
+    import:           warnings
+    exposed-modules:
+        Frankenstein.Core.Types
+        Frankenstein.Core.KokaCore
+        Frankenstein.GhcBridge.Driver
+        Frankenstein.GhcBridge.CoreTranslate
+        Frankenstein.MercuryBridge.HldsParse
+        Frankenstein.MercuryBridge.CoreTranslate
+        Frankenstein.RustBridge.MirParse
+        Frankenstein.RustBridge.CoreTranslate
+        Frankenstein.MlirEmit.Emitter
+        Frankenstein.MlirEmit.Dialects
+    build-depends:
+        base >= 4.17 && < 5,
+        containers,
+        text,
+        bytestring,
+        process,
+        filepath,
+        directory,
+        mtl,
+        transformers
+    hs-source-dirs:   src
+    default-language: GHC2024
+
+executable frankenstein
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:
+        base >= 4.17 && < 5,
+        frankenstein,
+        text,
+        filepath
+    hs-source-dirs:   app
+    default-language: GHC2024

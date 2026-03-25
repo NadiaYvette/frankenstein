@@ -40,6 +40,9 @@ main = do
             when (length progs > 1) $
               TIO.putStrLn $ "Linked " <> T.pack (show (length progs))
                           <> " modules (main in " <> lrMainModule lr <> ")"
+            -- Print linker validation warnings
+            when (not (null (lrWarnings lr))) $ do
+              mapM_ TIO.putStrLn (lrWarnings lr)
             handleOutput prog flags
   where
     when True  m = m

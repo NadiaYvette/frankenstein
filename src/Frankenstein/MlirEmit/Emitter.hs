@@ -840,8 +840,9 @@ compileToExecutable config prog = do
                 ExitFailure _ -> pure $ Left $ "clang (runtime) failed: " <> T.pack err3a
                 ExitSuccess -> do
                   -- Link LLVM IR + runtime .o → executable
+                  -- Use -x ir for .ll, then -x none to reset for .o
                   (ec3b, _, err3b) <- readProcessWithExitCode (ecClangPath config)
-                    [llPath, "-x", "ir", rtObjPath,
+                    ["-x", "ir", llPath, "-x", "none", rtObjPath,
                      "-o", ecOutputPath config,
                      "-O" ++ show (ecOptLevel config)] ""
                   case ec3b of

@@ -9,6 +9,7 @@ import Frankenstein.MercuryBridge.CoreTranslate
 import Frankenstein.RustBridge.MirParse
 import Frankenstein.RustBridge.CoreTranslate
 import Frankenstein.MlirEmit.Emitter (emitProgram, compileToExecutable, defaultEmitConfig, EmitConfig(..))
+import Frankenstein.OrganIR.Consumer (consumeProgram)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -26,7 +27,7 @@ main = do
       let prog = demoFactorialWithMain
       handleOutput prog flags
     CompileFiles files flags -> do
-      results <- mapM compileFile files
+      results <- mapM (compileFile (flagFromJson flags)) files
       let (errs, progs) = partitionResults results
       if not (null errs) then
         mapM_ (\(f, e) -> TIO.putStrLn $ "Error [" <> T.pack f <> "]: " <> e) errs
@@ -51,10 +52,11 @@ data Flags = Flags
   , flagEmitMlir :: !Bool
   , flagCompile  :: !Bool
   , flagOutput   :: !FilePath
+  , flagFromJson :: !Bool
   } deriving (Show)
 
 defaultFlags :: Flags
-defaultFlags = Flags False False False "a.out"
+defaultFlags = Flags False False False "a.out" False
 
 data Command
   = ShowHelp
@@ -68,10 +70,14 @@ parseArgs args
   | "--help" `elem` args || "-h" `elem` args = ShowHelp
   | "--demo" `elem` args = DemoMode (parseFlags args)
   | otherwise =
-      let (files, flagArgs) = partition (not . isFlag) args
+      let flags = parseFlags args
+          (files, _flagArgs) = partition (not . isFlag) args
       in if null files
-         then ShowHelp
-         else CompileFiles files (parseFlags flagArgs)
+         -- --from-json with no file argument means read stdin
+         then if flagFromJson flags
+              then CompileFiles ["-"] flags
+              else ShowHelp
+         else CompileFiles files flags
 
 isFlag :: String -> Bool
 isFlag ('-':'-':_) = True
@@ -87,18 +93,22 @@ parseFlags args = Flags
                      _ -> case dropWhile (/= "-o") args of
                             ("-o":o:_) -> o
                             _ -> "a.out"
+  , flagFromJson = "--from-json" `elem` args || "--from-organ" `elem` args
   }
 
 -- Compilation dispatch
 
-compileFile :: FilePath -> IO (Either (FilePath, Text) Program)
-compileFile path = do
+compileFile :: Bool -> FilePath -> IO (Either (FilePath, Text) Program)
+compileFile fromJson path = do
   let ext = takeExtension path
-  result <- case ext of
-    ".hs" -> compileHaskell path
-    ".m"  -> compileMercury path
-    ".rs" -> compileRust path
-    _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
+  result <- case () of
+    _ | fromJson || ext == ".json" || ext == ".organ" || path == "-"
+                -> compileOrganIR path
+      | otherwise -> case ext of
+          ".hs" -> compileHaskell path
+          ".m"  -> compileMercury path
+          ".rs" -> compileRust path
+          _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
   pure $ case result of
     Left err   -> Left (path, err)
     Right prog -> Right prog
@@ -141,6 +151,17 @@ compileRust inputFile = do
       case parseMirText mirText of
         Left err -> pure $ Left $ "MIR parse error: " <> err
         Right mir -> pure $ translateMir mir
+
+compileOrganIR :: FilePath -> IO (Either Text Program)
+compileOrganIR inputFile = do
+  let label = if inputFile == "-" then "<stdin>" else inputFile
+  TIO.putStrLn $ "Compiling OrganIR: " <> T.pack label
+  jsonText <- if inputFile == "-"
+              then TIO.getContents
+              else TIO.readFile inputFile
+  case consumeProgram jsonText of
+    Left err   -> pure $ Left $ "OrganIR consumer error: " <> T.pack err
+    Right prog -> pure $ Right prog
 
 -- Output handling
 
@@ -192,17 +213,24 @@ printHelp = do
   putStrLn "Usage: frankenstein [options] <input-files...>"
   putStrLn ""
   putStrLn "Options:"
-  putStrLn "  --emit-core   Print Frankenstein Core IR"
-  putStrLn "  --emit-mlir   Print MLIR output"
-  putStrLn "  --compile     Compile to native executable"
-  putStrLn "  -o, --output  Output path (default: a.out)"
-  putStrLn "  --demo        Run built-in demo (factorial)"
-  putStrLn "  -h, --help    Show this help"
+  putStrLn "  --emit-core       Print Frankenstein Core IR"
+  putStrLn "  --emit-mlir       Print MLIR output"
+  putStrLn "  --compile         Compile to native executable"
+  putStrLn "  -o, --output      Output path (default: a.out)"
+  putStrLn "  --from-json       Treat input as OrganIR JSON (also: --from-organ)"
+  putStrLn "  --demo            Run built-in demo (factorial)"
+  putStrLn "  -h, --help        Show this help"
   putStrLn ""
   putStrLn "Supported input formats:"
-  putStrLn "  .hs     Haskell  (via GHC API)"
-  putStrLn "  .m      Mercury  (via mmc --dump-hlds)"
-  putStrLn "  .rs     Rust     (via rustc MIR)"
+  putStrLn "  .hs     Haskell   (via GHC API)"
+  putStrLn "  .m      Mercury   (via mmc --dump-hlds)"
+  putStrLn "  .rs     Rust      (via rustc MIR)"
+  putStrLn "  .json   OrganIR   (organ-bank JSON)"
+  putStrLn "  .organ  OrganIR   (organ-bank JSON)"
+  putStrLn ""
+  putStrLn "OrganIR JSON can also be piped from stdin:"
+  putStrLn "  rustc-shim foo.rs | frankenstein --from-json -"
+  putStrLn "  frankenstein --from-json < dump.json"
   putStrLn ""
   putStrLn "Multiple files from different languages can be compiled together:"
   putStrLn "  frankenstein search.m Transform.hs sort_buf.rs --compile"

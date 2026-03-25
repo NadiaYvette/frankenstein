@@ -1,0 +1,5 @@
+packages: .
+
+-- organ-ir from organ-bank (local path)
+optional-packages:
+  ../organ-bank/organ-ir

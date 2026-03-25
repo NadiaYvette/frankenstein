@@ -9,6 +9,7 @@ import Frankenstein.MercuryBridge.HldsParse
 import Frankenstein.MercuryBridge.CoreTranslate
 import Frankenstein.RustBridge.MirParse
 import Frankenstein.RustBridge.CoreTranslate
+import Frankenstein.KokaBridge.Driver (compileKokaFile)
 import Frankenstein.MlirEmit.Emitter (emitProgram, compileToExecutable, defaultEmitConfig, EmitConfig(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
@@ -110,6 +111,7 @@ compileFile fromJson path = do
                 -> compileOrganIR path
       | otherwise -> case ext of
           ".hs" -> compileHaskell path
+          ".kk" -> compileKoka path
           ".m"  -> compileMercury path
           ".rs" -> compileRust path
           _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
@@ -141,6 +143,17 @@ compileMercury inputFile = do
       case parseHldsDump dumpText of
         Left err -> pure $ Left $ "HLDS parse error: " <> err
         Right hlds -> pure $ translateHlds hlds
+
+compileKoka :: FilePath -> IO (Either Text Program)
+compileKoka inputFile = do
+  TIO.putStrLn $ "Compiling Koka: " <> T.pack inputFile
+  result <- compileKokaFile inputFile
+  case result of
+    Left err -> do
+      TIO.putStrLn $ "  Koka bridge error: " <> err
+      TIO.putStrLn $ "  Using demo program..."
+      pure $ Right demoKokaProgram
+    Right prog -> pure $ Right prog
 
 compileRust :: FilePath -> IO (Either Text Program)
 compileRust inputFile = do
@@ -230,6 +243,7 @@ printHelp = do
   putStrLn ""
   putStrLn "Supported input formats:"
   putStrLn "  .hs     Haskell   (via GHC API)"
+  putStrLn "  .kk     Koka      (via Koka compiler library)"
   putStrLn "  .m      Mercury   (via mmc --dump-hlds)"
   putStrLn "  .rs     Rust      (via rustc MIR)"
   putStrLn "  .json   OrganIR   (organ-bank JSON)"
@@ -343,6 +357,42 @@ demoMercuryProgram = Program
   where
     listType = TCon (TypeCon (QName "std" (Name "list" 0)) KindValue)
     anyType = TCon (TypeCon (QName "std" (Name "any" 0)) KindValue)
+
+demoKokaProgram :: Program
+demoKokaProgram = Program
+  { progName = QName "demo" (Name "koka" 0)
+  , progDefs =
+      [ Def
+          { defName = QName "" (Name "factorial" 1)
+          , defType = TFun [(Many, intType)] EffectRowEmpty intType
+          , defExpr =
+              ELam [(Name "n" 2, intType)] $
+                ECase (EVar (Name "n" 2))
+                  [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 1))
+                  , Branch (PatVar (Name "n" 2) intType) Nothing
+                      (EApp (EVar (Name "*" 0))
+                        [ EVar (Name "n" 2)
+                        , EApp (EVar (Name "factorial" 1))
+                               [EApp (EVar (Name "-" 0)) [EVar (Name "n" 2), ELit (LitInt 1)]]
+                        ])
+                  ]
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      , Def
+          { defName = QName "" (Name "main" 10)
+          , defType = TFun [] (EffectRowExtend (QName "std" (Name "io" 0)) EffectRowEmpty)
+                          intType
+          , defExpr =
+              EApp (EVar (Name "factorial" 1)) [ELit (LitInt 10)]
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      ]
+  , progData = []
+  , progEffects = []
+  }
+  where intType = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
 
 demoRustProgram :: Program
 demoRustProgram = Program

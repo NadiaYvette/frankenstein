@@ -3,5 +3,7 @@ packages: .
 with-compiler: /home/nyc/.ghcup/ghc/9.14.1/bin/ghc
 
 -- organ-ir from organ-bank (local path)
+-- koka library from donors/ (direct linking for KokaBridge)
 optional-packages:
   ../organ-bank/organ-ir
+  donors/koka/

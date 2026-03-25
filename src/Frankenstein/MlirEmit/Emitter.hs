@@ -102,6 +102,12 @@ emitProgramText prog =
     , "  func.func private @kk_release(i64) -> ()"
     , "  func.func private @kk_reuse(i64) -> i64"
     , ""
+    , "  // Boxed value runtime declarations"
+    , "  func.func private @kk_alloc_con(i64, i64) -> i64"
+    , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
+    , "  func.func private @kk_tag(i64) -> i64"
+    , "  func.func private @kk_field(i64, i64) -> i64"
+    , ""
     , "  // Lifted functions"
     , liftedFns
     , ""
@@ -172,39 +178,40 @@ emitExpr (EVar n) = do
   -- Variable reference — assume it's already in scope as an SSA value
   pure ([], sanitizeName (nameText n))
 
--- Constructor reference: create a tagged struct
--- Layout: !llvm.struct<(i64)> where first field is the tag
+-- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
   let tag = conTag qn
   tagName <- freshName "v"
-  structName <- freshName "v"
+  nfieldsName <- freshName "v"
   resultName <- freshName "v"
   pure ([ "%" <> tagName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
-        , "%" <> structName <> " = llvm.mlir.undef : !llvm.struct<(i64)>"
-        , "%" <> resultName <> " = llvm.insertvalue %" <> structName <> ", %" <> tagName <> "[0] : !llvm.struct<(i64)>"
+        , "%" <> nfieldsName <> " = arith.constant 0 : i64"
+        , "%" <> resultName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
         ], resultName)
 
--- Constructor application: create tagged struct with payload
+-- Constructor application: allocate via runtime, set fields
 emitExpr (EApp (ECon qn) args) = do
   let tag = conTag qn
       nFields = length args
-      structTy = conStructType nFields
   -- Emit all argument expressions
   argResults <- mapM emitExpr args
   let allOps = concatMap fst argResults
       argNames = map snd argResults
-  -- Build the struct: undef, insert tag, insert each field
+  -- Allocate the constructor
   tagName <- freshName "v"
-  baseName <- freshName "v"
-  let tagOps = [ "%" <> tagName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
-               , "%" <> baseName <> " = llvm.mlir.undef : " <> structTy
-               ]
-  -- Insert tag at position 0
-  afterTagName <- freshName "v"
-  let insertTag = "%" <> afterTagName <> " = llvm.insertvalue %" <> baseName <> ", %" <> tagName <> "[0] : " <> structTy
-  -- Insert each field at positions 1..n
-  (insertOps, finalName) <- foldInsertFields afterTagName structTy argNames 1
-  pure (allOps ++ tagOps ++ [insertTag] ++ insertOps, finalName)
+  nfieldsName <- freshName "v"
+  ptrName <- freshName "v"
+  let allocOps = [ "%" <> tagName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
+                 , "%" <> nfieldsName <> " = arith.constant " <> T.pack (show nFields) <> " : i64"
+                 , "%" <> ptrName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
+                 ]
+  -- Set each field via kk_set_field
+  setOps <- mapM (\(i, aName) -> do
+    idxName <- freshName "v"
+    pure [ "%" <> idxName <> " = arith.constant " <> T.pack (show i) <> " : i64"
+         , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxName <> ", %" <> aName <> ") : (i64, i64, i64) -> ()"
+         ]) (zip [(0::Int)..] argNames)
+  pure (allOps ++ allocOps ++ concat setOps, ptrName)
 
 -- Float binary ops
 emitExpr (EApp (EVar fn) [a, b])
@@ -492,15 +499,13 @@ emitMultiIntCase scrutOps scrutName ((litVal, body):rest) defaultExpr = do
         ]
   pure (scrutOps ++ cmpOps ++ ifOps, resultName)
 
--- | Emit constructor case: extract tag from struct, chain scf.if on tag values
+-- | Emit constructor case: extract tag via kk_tag, chain scf.if on tag values
 emitConCase :: [Text] -> Text -> [(QName, [Pattern], Expr)] -> Expr -> Emit ([Text], Text)
 emitConCase scrutOps scrutName conBranches defaultExpr = do
-  -- Extract tag from the scrutinee struct
-  -- We use a generic struct type for extraction — the tag is always at position 0
+  -- Extract tag from the scrutinee via runtime call
   tagName <- freshName "v"
-  let maxFields = maximum (map (\(_, pats, _) -> length pats) conBranches)
-      structTy = conStructType maxFields
-      extractTag = "%" <> tagName <> " = llvm.extractvalue %" <> scrutName <> "[0] : " <> structTy
+  let extractTag = "%" <> tagName <> " = func.call @kk_tag(%" <> scrutName <> ") : (i64) -> i64"
+      structTy = "i64"  -- not used for extraction anymore, kept for API compat
   -- Build chain of comparisons
   (chainOps, chainResult) <- emitConChain tagName scrutName structTy conBranches defaultExpr
   pure (scrutOps ++ [extractTag] ++ chainOps, chainResult)
@@ -563,19 +568,29 @@ emitPatternBindings scrutName structTy pats = do
   pure (allOps, allNames)
 
 emitPatField :: Text -> Text -> (Int, Pattern) -> Emit ([Text], Text)
-emitPatField scrutName structTy (idx, PatVar n _) = do
+emitPatField scrutName _structTy (idx, PatVar n _) = do
   let varName = sanitizeName (nameText n)
+  -- Fields are 0-indexed from kk_field's perspective.
+  -- Pattern index 1 corresponds to field 0 (index 0 is the tag in the old scheme).
+  let fieldIdx = idx - 1
+  idxName <- freshName "v"
   fieldName <- freshName "v"
-  let extractOp = "%" <> fieldName <> " = llvm.extractvalue %" <> scrutName <> "[" <> T.pack (show idx) <> "] : " <> structTy
+  let extractOps = [ "%" <> idxName <> " = arith.constant " <> T.pack (show fieldIdx) <> " : i64"
+                   , "%" <> fieldName <> " = func.call @kk_field(%" <> scrutName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
+                   ]
       aliasOp = "// let " <> varName <> " = %" <> fieldName
-  pure ([extractOp, aliasOp], fieldName)
+  pure (extractOps ++ [aliasOp], fieldName)
 emitPatField _ _ (_, PatWild _) = do
   name <- freshName "v"
   pure (["// wildcard field ignored"], name)
-emitPatField scrutName structTy (idx, _) = do
+emitPatField scrutName _structTy (idx, _) = do
+  let fieldIdx = idx - 1
+  idxName <- freshName "v"
   fieldName <- freshName "v"
-  let extractOp = "%" <> fieldName <> " = llvm.extractvalue %" <> scrutName <> "[" <> T.pack (show idx) <> "] : " <> structTy
-  pure ([extractOp], fieldName)
+  let extractOps = [ "%" <> idxName <> " = arith.constant " <> T.pack (show fieldIdx) <> " : i64"
+                   , "%" <> fieldName <> " = func.call @kk_field(%" <> scrutName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
+                   ]
+  pure (extractOps, fieldName)
 
 emitIfElse :: [Text] -> Text -> Expr -> Expr -> Emit ([Text], Text)
 emitIfElse condOps condName thenExpr elseExpr = do
@@ -811,10 +826,31 @@ compileToExecutable config prog = do
         ExitSuccess -> do
           writeFile llPath out2
 
-          -- clang: LLVM IR → executable
-          (ec3, _, err3) <- readProcessWithExitCode (ecClangPath config)
-            [llPath, "-x", "ir", "-o", ecOutputPath config,
-             "-O" ++ show (ecOptLevel config)] ""
-          case ec3 of
-            ExitFailure _ -> pure $ Left $ "clang failed: " <> T.pack err3
-            ExitSuccess -> pure $ Right $ ecOutputPath config
+          -- clang: LLVM IR + runtime → executable
+          -- We must compile the runtime C file separately, then link,
+          -- because -x ir would apply to all inputs.
+          case ecKokaRuntimePath config of
+            Just rtPath -> do
+              let rtObjPath = ecOutputPath config ++ ".rt.o"
+              -- Compile runtime C to .o
+              (ec3a, _, err3a) <- readProcessWithExitCode (ecClangPath config)
+                ["-c", rtPath, "-o", rtObjPath,
+                 "-O" ++ show (ecOptLevel config)] ""
+              case ec3a of
+                ExitFailure _ -> pure $ Left $ "clang (runtime) failed: " <> T.pack err3a
+                ExitSuccess -> do
+                  -- Link LLVM IR + runtime .o → executable
+                  (ec3b, _, err3b) <- readProcessWithExitCode (ecClangPath config)
+                    [llPath, "-x", "ir", rtObjPath,
+                     "-o", ecOutputPath config,
+                     "-O" ++ show (ecOptLevel config)] ""
+                  case ec3b of
+                    ExitFailure _ -> pure $ Left $ "clang (link) failed: " <> T.pack err3b
+                    ExitSuccess -> pure $ Right $ ecOutputPath config
+            Nothing -> do
+              (ec3, _, err3) <- readProcessWithExitCode (ecClangPath config)
+                [llPath, "-x", "ir", "-o", ecOutputPath config,
+                 "-O" ++ show (ecOptLevel config)] ""
+              case ec3 of
+                ExitFailure _ -> pure $ Left $ "clang failed: " <> T.pack err3
+                ExitSuccess -> pure $ Right $ ecOutputPath config

@@ -16,6 +16,7 @@ library
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus
+        Frankenstein.Core.Evidence
         Frankenstein.Core.Linker
         Frankenstein.GhcBridge.Driver
         Frankenstein.GhcBridge.CoreTranslate

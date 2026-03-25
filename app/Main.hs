@@ -2,6 +2,7 @@ module Main (main) where
 
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus)
+import Frankenstein.Core.Evidence (evidencePass)
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
@@ -170,8 +171,11 @@ compileOrganIR inputFile = do
 
 handleOutput :: Program -> Flags -> IO ()
 handleOutput prog0 flags = do
-  let prog = insertPerceus prog0
-      config = defaultEmitConfig { ecOutputPath = flagOutput flags }
+  let prog = insertPerceus (evidencePass prog0)
+      config = defaultEmitConfig
+        { ecOutputPath = flagOutput flags
+        , ecKokaRuntimePath = Just "runtime/kk_runtime.c"
+        }
   case () of
     _ | flagCompile flags -> do
           TIO.putStrLn "=== Compiling to native ==="

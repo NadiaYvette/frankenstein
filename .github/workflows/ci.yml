@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: NadiaYvette/organ-bank
+          path: organ-bank
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: '9.14.1'
+          cabal-version: '3.16.1.0'
+
+      - name: Cache cabal store and dist-newstyle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cabal/store
+            dist-newstyle
+          key: ${{ runner.os }}-ghc-9.14.1-${{ hashFiles('frankenstein.cabal', 'cabal.project') }}
+          restore-keys: |
+            ${{ runner.os }}-ghc-9.14.1-
+
+      - name: Configure cabal.project for CI
+        run: |
+          # Point organ-ir at the checked-out organ-bank
+          sed -i 's|../organ-bank/organ-ir|organ-bank/organ-ir|' cabal.project
+          # Replace local with-compiler path with the GHC from haskell-actions/setup
+          sed -i "s|with-compiler:.*|with-compiler: $(which ghc)|" cabal.project
+          echo "--- cabal.project ---"
+          cat cabal.project
+
+      - name: Update cabal package index
+        run: cabal update
+
+      - name: Build library and executable
+        run: cabal build all
+
+      - name: Run demo (factorial)
+        run: |
+          cabal -v0 run frankenstein -- --demo --emit-core
+          echo "---"
+          cabal -v0 run frankenstein -- --demo --emit-mlir
+
+      - name: Test OrganIR consumer path
+        run: |
+          cabal -v0 run frankenstein -- --from-json --emit-core < organ-bank/spec/examples/haskell.json
+
+      - name: Test MLIR compilation (if tools available)
+        continue-on-error: true
+        run: |
+          # Try to install MLIR tools
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mlir-tools lld clang 2>/dev/null || true
+
+          if command -v mlir-opt &> /dev/null && command -v mlir-translate &> /dev/null; then
+            echo "MLIR tools found, testing full compilation pipeline"
+            cabal -v0 run frankenstein -- --demo --compile -o factorial
+            ./factorial
+            RESULT=$(./factorial)
+            echo "factorial output: $RESULT"
+          else
+            echo "MLIR tools not available, skipping native compilation test"
+          fi

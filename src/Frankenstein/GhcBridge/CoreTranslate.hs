@@ -27,13 +27,20 @@ import GHC.Core
   ( CoreProgram, CoreBind, CoreExpr
   , Bind(..), Expr(..), Alt(..), AltCon(..)
   )
-import GHC.Types.Var (Var, varName, isTyVar)
-import GHC.Types.Name (getOccString, nameUnique)
+import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
+import GHC.Core.TyCon (TyCon, tyConName)
+import GHC.Types.Var
+  ( Var, varName, varType, isTyVar
+  , isInvisibleFunArg, binderVar, ForAllTyBinder
+  )
+import GHC.Types.Name (getOccString, nameUnique, nameModule_maybe)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Literal (Literal(..))
 import GHC.Types.Id (idDemandInfo)
 import GHC.Types.Demand (isStrictDmd, isAbsDmd)
 import GHC.Core.DataCon (dataConName)
+import GHC.Unit.Module (moduleNameString, moduleName)
+import GHC.Data.FastString (unpackFS)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -65,7 +72,7 @@ translateTopBind :: CoreBind -> [F.Def]
 translateTopBind (NonRec b e) =
   [ F.Def
       { F.defName       = qualifyName b
-      , F.defType       = anyType
+      , F.defType       = translateType (varType b)
       , F.defExpr       = decideLaziness b e
       , F.defSort       = classifyBind b
       , F.defVisibility = F.Public
@@ -74,7 +81,7 @@ translateTopBind (NonRec b e) =
 translateTopBind (Rec pairs) =
   [ F.Def
       { F.defName       = qualifyName b
-      , F.defType       = anyType
+      , F.defType       = translateType (varType b)
       , F.defExpr       = trExpr e
       , F.defSort       = F.DefFun
       , F.defVisibility = F.Public
@@ -91,8 +98,8 @@ trExpr (Var v) = F.EVar (translateName v)
 
 trExpr (Lit l) = F.ELit (translateLit l)
 
--- Type application: App f (Type _) => ETypeApp
-trExpr (App f (Type _)) = F.ETypeApp (trExpr f) [anyType]
+-- Type application: App f (Type t) => ETypeApp
+trExpr (App f (Type t)) = F.ETypeApp (trExpr f) [translateType t]
 
 -- Regular application: collect args into multi-arg EApp
 trExpr (App f a) =
@@ -102,7 +109,7 @@ trExpr (App f a) =
 -- Type lambda: skip type binders, recurse on body
 trExpr (Lam b e)
   | isTyVar b = F.ETypeLam [translateTyVar b] (trExpr e)
-  | otherwise  = F.ELam [(translateName b, anyType)] (trExpr e)
+  | otherwise  = F.ELam [(translateName b, translateType (varType b))] (trExpr e)
 
 -- Let: translate binding groups
 trExpr (Let bind body) =
@@ -144,7 +151,7 @@ translateBind :: CoreBind -> [F.BindGroup]
 translateBind (NonRec b e) =
   [[ F.Bind
       { F.bindName = translateName b
-      , F.bindType = anyType
+      , F.bindType = translateType (varType b)
       , F.bindExpr = decideLaziness b e
       , F.bindSort = classifyBind b
       }
@@ -152,7 +159,7 @@ translateBind (NonRec b e) =
 translateBind (Rec pairs) =
   [[ F.Bind
       { F.bindName = translateName b
-      , F.bindType = anyType
+      , F.bindType = translateType (varType b)
       , F.bindExpr = trExpr e
       , F.bindSort = F.DefFun
       }
@@ -176,7 +183,7 @@ translateAltCon (LitAlt lit) _ = F.PatLit (translateLit lit)
 translateAltCon (DataAlt dc) bndrs =
   F.PatCon
     (F.QName T.empty (F.Name (T.pack (getOccString (dataConName dc))) 0))
-    (map (\b -> F.PatVar (translateName b) anyType) (filter (not . isTyVar) bndrs))
+    (map (\b -> F.PatVar (translateName b) (translateType (varType b))) (filter (not . isTyVar) bndrs))
 
 -------------------------------------------------------------------------------
 -- Literals
@@ -210,8 +217,107 @@ translateTyVar v = F.TypeVar
 qualifyName :: Var -> F.QName
 qualifyName v = F.QName T.empty (translateName v)
 
--- | Generic "any" type placeholder.
--- All types map to this until we implement proper type translation.
+-------------------------------------------------------------------------------
+-- Type translation
+-------------------------------------------------------------------------------
+
+-- | Translate a GHC Type to Frankenstein Core Type.
+translateType :: Type -> F.Type
+
+-- Function type: skip invisible (dictionary/constraint) arguments
+translateType (FunTy flag _mult arg res)
+  | isInvisibleFunArg flag = translateType res
+  | otherwise =
+      case translateType res of
+        -- Accumulate consecutive function args into a single TFun
+        F.TFun args eff retTy ->
+          F.TFun ((F.Many, translateType arg) : args) eff retTy
+        resTy ->
+          F.TFun [(F.Many, translateType arg)] F.EffectRowEmpty resTy
+
+-- Type constructor with no arguments
+translateType (TyConApp tc []) =
+  F.TCon $ F.TypeCon
+    { F.tcName = tyConQName tc
+    , F.tcKind = F.KindStar
+    }
+
+-- Type constructor applied to arguments
+translateType (TyConApp tc args) =
+  foldl F.TApp
+    (F.TCon $ F.TypeCon { F.tcName = tyConQName tc, F.tcKind = F.KindStar })
+    (map translateType args)
+
+-- Type variable
+translateType (TyVarTy v) =
+  F.TVar $ F.TypeVar
+    { F.tvName         = translateName v
+    , F.tvKind         = F.KindStar
+    , F.tvMultiplicity = F.Many
+    }
+
+-- Forall: collect consecutive foralls into one TForall
+translateType (ForAllTy bndr ty) =
+  let (bndrs, innerTy) = collectForAlls ty
+      allBndrs = bndr : bndrs
+      tvs = map forAllBndrToTypeVar allBndrs
+  in F.TForall tvs (translateType innerTy)
+
+-- Type application
+translateType (AppTy f a) =
+  F.TApp (translateType f) (translateType a)
+
+-- Literal types: use string representation as a TCon
+translateType (LitTy (NumTyLit n)) =
+  F.TCon $ F.TypeCon
+    { F.tcName = F.QName T.empty (F.Name (T.pack (show n)) 0)
+    , F.tcKind = F.KindStar
+    }
+translateType (LitTy (StrTyLit fs)) =
+  F.TCon $ F.TypeCon
+    { F.tcName = F.QName T.empty (F.Name (T.pack (unpackFS fs)) 0)
+    , F.tcKind = F.KindStar
+    }
+translateType (LitTy (CharTyLit c)) =
+  F.TCon $ F.TypeCon
+    { F.tcName = F.QName T.empty (F.Name (T.pack [c]) 0)
+    , F.tcKind = F.KindStar
+    }
+
+-- Cast: ignore coercion, recurse on inner type
+translateType (CastTy ty _) = translateType ty
+
+-- Coercion type: fallback to anyType
+translateType (CoercionTy _) = anyType
+
+-- | Collect consecutive ForAllTy binders.
+collectForAlls :: Type -> ([ForAllTyBinder], Type)
+collectForAlls (ForAllTy b t) =
+  let (bs, inner) = collectForAlls t
+  in (b : bs, inner)
+collectForAlls t = ([], t)
+
+-- | Convert a ForAllTyBinder to a Frankenstein TypeVar.
+forAllBndrToTypeVar :: ForAllTyBinder -> F.TypeVar
+forAllBndrToTypeVar bndr =
+  let tv = binderVar bndr
+  in F.TypeVar
+    { F.tvName         = translateName tv
+    , F.tvKind         = F.KindStar
+    , F.tvMultiplicity = F.Many
+    }
+
+-- | Build a QName from a GHC TyCon.
+tyConQName :: TyCon -> F.QName
+tyConQName tc =
+  let n = tyConName tc
+      nameT = T.pack (getOccString n)
+      modPfx = case nameModule_maybe n of
+                 Just m  -> T.pack (moduleNameString (moduleName m))
+                 Nothing -> ""
+  in F.QName modPfx (F.Name nameT 0)
+
+-- | Generic "any" type placeholder (fallback for CoercionTy).
 anyType :: F.Type
 anyType = F.TCon $ F.TypeCon
   { F.tcName = F.QName T.empty (F.Name "any" 0)

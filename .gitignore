@@ -35,5 +35,8 @@ search.o
 test/haskell/*.hi
 test/haskell/*.o
 
+# === K Framework compiled definitions ===
+k-specs/*-kompiled/
+
 # === Output directories ===
 result/

@@ -221,23 +221,52 @@ endmodule
 
 // =================================================================
 // Module 3: PERCEUS — reference counting rewrite theory
+//
+// Specifies the Perceus algorithm as K rewrite rules.
+// The algorithm transforms Core expressions by inserting:
+//   - EDrop:   for bindings/params unused in their scope (non-linear)
+//   - ERetain: for each additional use of a `many` variable beyond the first
+//   - EReuse:  for reusing allocations when a value is uniquely owned
+//
+// Scope is modeled as a Map from Name to Multiplicity.
+// The key invariant:
+//   For every heap-allocated value v at any program point:
+//     refcount(v) == number of live references to v
+//
+// This mirrors src/Frankenstein/Core/Perceus.hs exactly.
 // =================================================================
 
 module PERCEUS
   imports ORGAN-IR-SYNTAX
   imports SET
   imports MAP
+  imports LIST
   imports INT
   imports BOOL
 
-  // --- Free variable analysis ---
+  // ---------------------------------------------------------------
+  // Free variable analysis
+  //
+  // Mirrors Perceus.hs freeVars :: Expr -> Set Name
+  // ---------------------------------------------------------------
+
   syntax Set ::= freeVars(Expr)          [function, symbol(freeVars)]
+               | freeVarsExprs(ExprList)  [function, symbol(freeVarsExprs)]
+               | freeVarsBranches(BranchList) [function, symbol(freeVarsBranches)]
+               | patternNames(Pattern)    [function, symbol(patternNames)]
+               | patternNamesL(PatternList) [function, symbol(patternNamesL)]
   syntax Bool ::= isFree(Name, Expr)     [function, symbol(isFree)]
   syntax Int  ::= usageCount(Name, Expr) [function, symbol(usageCount)]
+               |  usageCountExprs(Name, ExprList) [function, symbol(usageCountExprs)]
+               |  usageCountMax(Name, BranchList) [function, symbol(usageCountMax)]
 
+  // Atomic expressions
   rule freeVars(EVar(N))          => SetItem(N)
   rule freeVars(ELit(_))          => .Set
   rule freeVars(ECon(_))          => .Set
+
+  // Compound expressions
+  rule freeVars(EApp(F, Es))      => freeVars(F) |Set freeVarsExprs(Es)
   rule freeVars(ERetain(E))       => freeVars(E)
   rule freeVars(ERelease(E))      => freeVars(E)
   rule freeVars(EDrop(E))         => freeVars(E)
@@ -247,67 +276,395 @@ module PERCEUS
   rule freeVars(ETypeLam(_, E))   => freeVars(E)
   rule freeVars(EHandle(_, H, B)) => freeVars(H) |Set freeVars(B)
   rule freeVars(EReuse(A, B))     => freeVars(A) |Set freeVars(B)
+  rule freeVars(EPerform(_, Es))  => freeVarsExprs(Es)
+
+  // Lambda: body minus parameter names
+  rule freeVars(ELam(.ParamList, Body))
+    => freeVars(Body)
+  rule freeVars(ELam(param(N, _) , Ps:ParamList, Body))
+    => freeVars(ELam(Ps, Body)) -Set SetItem(N)
+
+  // Let: (rhs fvs + body fvs) minus bound names
+  rule freeVars(ELet(.BGList, Body))
+    => freeVars(Body)
+  rule freeVars(ELet((bind(N, _, Rhs, _) , .BindGroup) ;; Bgs:BGList, Body))
+    => (freeVars(Rhs) |Set freeVars(ELet(Bgs, Body))) -Set SetItem(N)
+
+  // Case: scrutinee fvs + branch fvs
+  rule freeVars(ECase(S, Bs))
+    => freeVars(S) |Set freeVarsBranches(Bs)
+
+  // Free vars in expression lists
+  rule freeVarsExprs(.ExprList) => .Set
+  rule freeVarsExprs(E:Expr , Es:ExprList)
+    => freeVars(E) |Set freeVarsExprs(Es)
+
+  // Free vars in branches: body fvs minus pattern-bound names
+  rule freeVarsBranches(.BranchList) => .Set
+  rule freeVarsBranches(branch(P, noGuard, Body) ; Bs)
+    => (freeVars(Body) -Set patternNames(P)) |Set freeVarsBranches(Bs)
+  rule freeVarsBranches(branch(P, guard(G), Body) ; Bs)
+    => ((freeVars(Body) |Set freeVars(G)) -Set patternNames(P))
+       |Set freeVarsBranches(Bs)
+
+  // Pattern-bound names
+  rule patternNames(PatVar(N, _))    => SetItem(N)
+  rule patternNames(PatWild(_))      => .Set
+  rule patternNames(PatLit(_))       => .Set
+  rule patternNames(PatCon(_, Ps))   => patternNamesL(Ps)
+  rule patternNamesL(.PatternList)   => .Set
+  rule patternNamesL(P:Pattern , Ps:PatternList)
+    => patternNames(P) |Set patternNamesL(Ps)
 
   rule isFree(N, E) => N in freeVars(E)
 
-  // --- Usage counting ---
+  // ---------------------------------------------------------------
+  // Usage counting
+  //
+  // Mirrors Perceus.hs analyzeUsage :: Expr -> Map Name Int
+  // Simplified to count for a single variable.
+  //
+  // For App: sum over subexpressions (each use is a separate reference)
+  // For Case: max over branches (only one branch executes)
+  // ---------------------------------------------------------------
+
   rule usageCount(N, EVar(N))     => 1
   rule usageCount(_, EVar(_))     => 0  [owise]
   rule usageCount(_, ELit(_))     => 0
   rule usageCount(_, ECon(_))     => 0
+  rule usageCount(N, EApp(F, Es)) => usageCount(N, F) +Int usageCountExprs(N, Es)
   rule usageCount(N, ERetain(E))  => usageCount(N, E)
   rule usageCount(N, EDrop(E))    => usageCount(N, E)
   rule usageCount(N, ERelease(E)) => usageCount(N, E)
   rule usageCount(N, EDelay(E))   => usageCount(N, E)
   rule usageCount(N, EForce(E))   => usageCount(N, E)
+  rule usageCount(N, ETypeApp(E, _))  => usageCount(N, E)
+  rule usageCount(N, ETypeLam(_, E))  => usageCount(N, E)
+  rule usageCount(N, EHandle(_, H, B))
+    => usageCount(N, H) +Int usageCount(N, B)
+  rule usageCount(N, EReuse(A, B))
+    => usageCount(N, A) +Int usageCount(N, B)
+  rule usageCount(N, EPerform(_, Es)) => usageCountExprs(N, Es)
 
-  // --- Perceus transformation (as a function) ---
-  syntax Expr ::= perceus(Expr) [function, symbol(perceus)]
+  // Lambda: count in body
+  rule usageCount(N, ELam(_, Body)) => usageCount(N, Body)
 
-  // Atoms: no transformation needed
-  rule perceus(EVar(N))  => EVar(N)
-  rule perceus(ELit(L))  => ELit(L)
-  rule perceus(ECon(QN)) => ECon(QN)
+  // Let: count in rhs + count in body
+  rule usageCount(N, ELet(.BGList, Body)) => usageCount(N, Body)
+  rule usageCount(N, ELet((bind(_, _, Rhs, _), .BindGroup) ;; Bgs:BGList, Body))
+    => usageCount(N, Rhs) +Int usageCount(N, ELet(Bgs, Body))
 
-  // Application: recurse into subexpressions
-  rule perceus(EApp(F, Es)) => EApp(perceus(F), perceusExprs(Es))
+  // Case: scrutinee count + max over branches (only one arm executes)
+  rule usageCount(N, ECase(S, Bs))
+    => usageCount(N, S) +Int usageCountMax(N, Bs)
 
-  // Lambda: recurse into body
-  // (Drop insertion for unused params handled at let-binding level)
-  rule perceus(ELam(Ps, Body)) => ELam(Ps, perceus(Body))
+  // Expression list: sum
+  rule usageCountExprs(_, .ExprList) => 0
+  rule usageCountExprs(N, E:Expr , Es:ExprList)
+    => usageCount(N, E) +Int usageCountExprs(N, Es)
 
-  // Case: recurse into scrutinee and branches
-  rule perceus(ECase(S, Bs)) => ECase(perceus(S), perceusBranches(Bs))
+  // Branch list: max (conservative — only one branch executes)
+  rule usageCountMax(_, .BranchList) => 0
+  rule usageCountMax(N, branch(_, _, Body) ; Bs)
+    => maxInt(usageCount(N, Body), usageCountMax(N, Bs))
 
-  // Already-present Perceus ops: recurse
-  rule perceus(ERetain(E))   => ERetain(perceus(E))
-  rule perceus(ERelease(E))  => ERelease(perceus(E))
-  rule perceus(EDrop(E))     => EDrop(perceus(E))
-  rule perceus(EReuse(A, B)) => EReuse(perceus(A), perceus(B))
+  // ---------------------------------------------------------------
+  // Perceus transformation
+  //
+  // perceusS : scoped transformation carrying a Map Name Multiplicity
+  //            (the "scope" tracking which variables are in scope and
+  //             their substructural annotations)
+  //
+  // perceus : convenience wrapper starting with empty scope
+  // ---------------------------------------------------------------
 
+  syntax Expr ::= perceus(Expr)            [function, symbol(perceus)]
+                 | perceusS(Map, Expr)      [function, symbol(perceusS)]
+  syntax ExprList ::= perceusExprsS(Map, ExprList)
+                                            [function, symbol(perceusExprsS)]
+  syntax BranchList ::= perceusBranchesS(Map, BranchList)
+                                            [function, symbol(perceusBranchesS)]
+
+  // Helper: wrap an expression with drops for a list of names
+  syntax Expr ::= wrapDrops(Set, Expr)     [function, symbol(wrapDrops)]
+
+  // Helper: wrap an expression with retains for N-1 extra uses
+  syntax Expr ::= wrapRetains(Name, Int, Expr) [function, symbol(wrapRetains)]
+
+  // Helper: get multiplicity from scope, default many
+  syntax Multiplicity ::= lookupMul(Name, Map) [function, symbol(lookupMul)]
+
+  // Helper: collect bound names from a single bind group
+  syntax Set ::= bindGroupNames(BindGroup) [function, symbol(bindGroupNames)]
+
+  // Helper: extend scope with param multiplicities (all default to many)
+  syntax Map ::= extendScopeParams(Map, ParamList)  [function, symbol(extendScopeParams)]
+  syntax Map ::= extendScopeBind(Map, BindGroup)     [function, symbol(extendScopeBind)]
+  syntax Map ::= extendScopePattern(Map, Pattern)     [function, symbol(extendScopePattern)]
+  syntax Map ::= extendScopePatterns(Map, PatternList) [function, symbol(extendScopePatterns)]
+
+  // Helper: find unused non-linear names from a set, given a body
+  syntax Set ::= unusedNonLinear(Set, Map, Expr)  [function, symbol(unusedNonLinear)]
+
+  // Helper: find names used >1 times with `many` multiplicity
+  syntax Map ::= retainCandidates(Set, Map, Expr) [function, symbol(retainCandidates)]
+
+  // ---------------------------------------------------------------
+  // perceus(e) = perceusS(.Map, e)
+  // ---------------------------------------------------------------
+
+  rule perceus(E) => perceusS(.Map, E)
+
+  // ---------------------------------------------------------------
+  // Atoms: no transformation
+  // ---------------------------------------------------------------
+
+  rule perceusS(_, EVar(N))  => EVar(N)
+  rule perceusS(_, ELit(L))  => ELit(L)
+  rule perceusS(_, ECon(QN)) => ECon(QN)
+
+  // ---------------------------------------------------------------
+  // Application: recurse
+  // ---------------------------------------------------------------
+
+  rule perceusS(Scope, EApp(F, Es))
+    => EApp(perceusS(Scope, F), perceusExprsS(Scope, Es))
+
+  // ---------------------------------------------------------------
+  // Lambda: drop unused non-linear params
+  //
+  // Perceus rule: for each param P not free in body with mul != linear,
+  // insert EDrop(EVar(P)) before the body.
+  //
+  // Mirrors Perceus.hs lines 77-88
+  // ---------------------------------------------------------------
+
+  rule perceusS(Scope, ELam(Ps, Body))
+    => ELam(Ps,
+         wrapDrops(
+           unusedNonLinear(paramNames(Ps), extendScopeParams(Scope, Ps), Body),
+           perceusS(extendScopeParams(Scope, Ps), Body)
+         )
+       )
+
+  syntax Set ::= paramNames(ParamList) [function, symbol(paramNames)]
+  rule paramNames(.ParamList) => .Set
+  rule paramNames(param(N, _) , Ps:ParamList)
+    => SetItem(N) |Set paramNames(Ps)
+
+  // ---------------------------------------------------------------
+  // Let: drop unused bindings, insert retains for multi-use
+  //
+  // For each binding x = rhs where x is NOT free in body
+  // and mul(x) != linear:
+  //   insert let _ = drop(x) in ... after the binding
+  //
+  // For each binding x = rhs where x is used N > 1 times in body
+  // and mul(x) == many:
+  //   insert (N-1) retains of x
+  //
+  // Mirrors Perceus.hs lines 91-106
+  // ---------------------------------------------------------------
+
+  // Single-binding let (the common case and the one where
+  // Perceus insertion happens)
+  rule perceusS(Scope,
+    ELet((bind(X, T, Rhs, S) , .BindGroup) ;; .BGList, Body)
+  ) =>
+    ELet(
+      (bind(X, T, perceusS(Scope, Rhs), S) , .BindGroup) ;; .BGList,
+      wrapRetains(X, usageCount(X, Body),
+        wrapDrops(
+          unusedNonLinear(SetItem(X), Scope [ X <- lookupMulFromType(T) ], Body),
+          perceusS(Scope [ X <- lookupMulFromType(T) ], Body)
+        )
+      )
+    )
+
+  // Helper: infer multiplicity from binding type
+  syntax Multiplicity ::= lookupMulFromType(Type) [function, symbol(lookupMulFromType)]
+  rule lookupMulFromType(TFun(multype(M, _) , _, _, _)) => M
+  rule lookupMulFromType(_) => many  [owise]
+
+  // Empty let: just transform body
+  rule perceusS(Scope, ELet(.BGList, Body))
+    => perceusS(Scope, Body)
+
+  // Multi-binding let: recurse by nesting
+  // let {x = a; y = b} in body  ==>  let x = a in let y = b in body
+  rule perceusS(Scope,
+    ELet((bind(X, T, Rhs, S) , .BindGroup) ;; (Bg2:BindGroup ;; Bgs:BGList), Body)
+  ) =>
+    perceusS(Scope,
+      ELet((bind(X, T, Rhs, S) , .BindGroup) ;; .BGList,
+        ELet(Bg2 ;; Bgs, Body)
+      )
+    )
+
+  // ---------------------------------------------------------------
+  // Case: recurse into scrutinee, transform each branch
+  //
+  // Each branch extends scope with pattern-bound variables.
+  // Unused pattern bindings get drops inserted.
+  //
+  // Mirrors Perceus.hs lines 109-112, 137-141
+  // ---------------------------------------------------------------
+
+  rule perceusS(Scope, ECase(S, Bs))
+    => ECase(perceusS(Scope, S), perceusBranchesS(Scope, Bs))
+
+  // ---------------------------------------------------------------
+  // Perceus ops already present: recurse
+  // ---------------------------------------------------------------
+
+  rule perceusS(Scope, ERetain(E))   => ERetain(perceusS(Scope, E))
+  rule perceusS(Scope, ERelease(E))  => ERelease(perceusS(Scope, E))
+  rule perceusS(Scope, EDrop(E))     => EDrop(perceusS(Scope, E))
+  rule perceusS(Scope, EReuse(A, B))
+    => EReuse(perceusS(Scope, A), perceusS(Scope, B))
+
+  // ---------------------------------------------------------------
   // Effect ops: recurse
-  rule perceus(EHandle(Eff, H, B)) => EHandle(Eff, perceus(H), perceus(B))
-  rule perceus(EPerform(QN, Es))   => EPerform(QN, perceusExprs(Es))
+  // ---------------------------------------------------------------
 
+  rule perceusS(Scope, EHandle(Eff, H, B))
+    => EHandle(Eff, perceusS(Scope, H), perceusS(Scope, B))
+  rule perceusS(Scope, EPerform(QN, Es))
+    => EPerform(QN, perceusExprsS(Scope, Es))
+
+  // ---------------------------------------------------------------
   // Laziness: recurse
-  rule perceus(EDelay(E)) => EDelay(perceus(E))
-  rule perceus(EForce(E)) => EForce(perceus(E))
+  // ---------------------------------------------------------------
 
-  // Type ops: recurse
-  rule perceus(ETypeApp(E, Ts))  => ETypeApp(perceus(E), Ts)
-  rule perceus(ETypeLam(Tvs, E)) => ETypeLam(Tvs, perceus(E))
+  rule perceusS(Scope, EDelay(E)) => EDelay(perceusS(Scope, E))
+  rule perceusS(Scope, EForce(E)) => EForce(perceusS(Scope, E))
 
-  // --- Helper: transform expression lists ---
-  syntax ExprList ::= perceusExprs(ExprList) [function, symbol(perceusExprs)]
-  rule perceusExprs(.ExprList) => .ExprList
-  rule perceusExprs(E:Expr , Es:ExprList)
-    => perceus(E) , perceusExprs(Es)
+  // ---------------------------------------------------------------
+  // Type ops: recurse (types are erased, no Perceus needed)
+  // ---------------------------------------------------------------
 
-  // --- Helper: transform branch lists ---
-  syntax BranchList ::= perceusBranches(BranchList) [function, symbol(perceusBranches)]
-  rule perceusBranches(.BranchList) => .BranchList
-  rule perceusBranches(branch(P, G, Body) ; Bs)
-    => branch(P, G, perceus(Body)) ; perceusBranches(Bs)
+  rule perceusS(Scope, ETypeApp(E, Ts))  => ETypeApp(perceusS(Scope, E), Ts)
+  rule perceusS(Scope, ETypeLam(Tvs, E)) => ETypeLam(Tvs, perceusS(Scope, E))
+
+  // ---------------------------------------------------------------
+  // Expression list helper
+  // ---------------------------------------------------------------
+
+  rule perceusExprsS(_, .ExprList) => .ExprList
+  rule perceusExprsS(Scope, E:Expr , Es:ExprList)
+    => perceusS(Scope, E) , perceusExprsS(Scope, Es)
+
+  // ---------------------------------------------------------------
+  // Branch list helper: extend scope with pattern vars, drop unused
+  // ---------------------------------------------------------------
+
+  rule perceusBranchesS(_, .BranchList) => .BranchList
+  rule perceusBranchesS(Scope, branch(P, G, Body) ; Bs)
+    => branch(P, G,
+         wrapDrops(
+           unusedNonLinear(patternNames(P), extendScopePattern(Scope, P), Body),
+           perceusS(extendScopePattern(Scope, P), Body)
+         )
+       ) ; perceusBranchesS(Scope, Bs)
+
+  // ---------------------------------------------------------------
+  // wrapDrops: insert let _ = drop(x) for each name in the set
+  //
+  // wrapDrops({x, y}, body)
+  //   = let _ = drop(x) in let _ = drop(y) in body
+  // wrapDrops({}, body) = body
+  // ---------------------------------------------------------------
+
+  // Unit type for drop/retain binding types
+  syntax Type ::= perceusUnitType() [function, symbol(perceusUnitType)]
+  rule perceusUnitType()
+    => TCon(typecon(qname("std/core/types", name("unit", 0)), KValue))
+
+  rule wrapDrops(.Set, Body) => Body
+  rule wrapDrops(SetItem(N:Name) Rest:Set, Body)
+    => ELet(
+         (bind(name("_drop", 0), perceusUnitType(), EDrop(EVar(N)), defVal) , .BindGroup) ;; .BGList,
+         wrapDrops(Rest, Body)
+       )
+
+  // ---------------------------------------------------------------
+  // wrapRetains: if usage > 1 and multiplicity is many,
+  // insert (N-1) retains before the expression.
+  //
+  // wrapRetains(x, 3, body) = let _ = retain(x) in
+  //                           let _ = retain(x) in body
+  // wrapRetains(x, 1, body) = body   (single use, no retain)
+  // wrapRetains(x, 0, body) = body   (unused, handled by drop)
+  // ---------------------------------------------------------------
+
+  rule wrapRetains(_, Count, Body) => Body
+    requires Count <=Int 1
+
+  rule wrapRetains(N, Count, Body)
+    => ELet(
+         (bind(name("_retain", 0), perceusUnitType(), ERetain(EVar(N)), defVal) , .BindGroup) ;; .BGList,
+         wrapRetains(N, Count -Int 1, Body)
+       )
+    requires Count >Int 1
+
+  // ---------------------------------------------------------------
+  // unusedNonLinear: from a set of names, return those that are
+  // NOT free in the body AND have non-linear multiplicity in scope.
+  //
+  // This is the set of names that need EDrop insertion.
+  // Linear values must be used exactly once — if unused, that's
+  // a linearity violation (error), not a drop.
+  // ---------------------------------------------------------------
+
+  syntax Set ::= unusedNonLinearHelper(List, Map, Set)
+                                        [function, symbol(unusedNonLinearHelper)]
+  syntax List ::= setToList(Set)        [function, symbol(setToList)]
+
+  rule unusedNonLinear(Names, Scope, Body)
+    => unusedNonLinearHelper(setToList(Names), Scope, freeVars(Body))
+
+  rule setToList(.Set) => .List
+  rule setToList(SetItem(N) Rest:Set) => ListItem(N) setToList(Rest)
+
+  syntax Bool ::= isLinear(Multiplicity)  [function, symbol(isLinear)]
+  rule isLinear(linear) => true
+  rule isLinear(many)   => false
+  rule isLinear(affine) => false
+
+  rule unusedNonLinearHelper(.List, _, _) => .Set
+  rule unusedNonLinearHelper(ListItem(N:Name) Rest:List, Scope, BodyFV)
+    => ( SetItem(N) |Set unusedNonLinearHelper(Rest, Scope, BodyFV) )
+    requires (notBool (N in BodyFV))
+     andBool (notBool isLinear(lookupMul(N, Scope)))
+  rule unusedNonLinearHelper(ListItem(_:Name) Rest:List, Scope, BodyFV)
+    => unusedNonLinearHelper(Rest, Scope, BodyFV)
+    [owise]
+
+  // ---------------------------------------------------------------
+  // Scope management helpers
+  // ---------------------------------------------------------------
+
+  rule lookupMul(N, (N |-> M:Multiplicity) _) => M
+  rule lookupMul(_, _) => many  [owise]
+
+  rule extendScopeParams(Scope, .ParamList) => Scope
+  rule extendScopeParams(Scope, param(N, _) , Ps:ParamList)
+    => extendScopeParams(Scope [ N <- many ], Ps)
+
+  rule extendScopeBind(Scope, .BindGroup) => Scope
+  rule extendScopeBind(Scope, bind(N, T, _, _) , Bs:BindGroup)
+    => extendScopeBind(Scope [ N <- lookupMulFromType(T) ], Bs)
+
+  rule extendScopePattern(Scope, PatVar(N, _))
+    => Scope [ N <- many ]
+  rule extendScopePattern(Scope, PatWild(_))     => Scope
+  rule extendScopePattern(Scope, PatLit(_))      => Scope
+  rule extendScopePattern(Scope, PatCon(_, Ps))
+    => extendScopePatterns(Scope, Ps)
+
+  rule extendScopePatterns(Scope, .PatternList)  => Scope
+  rule extendScopePatterns(Scope, P:Pattern , Ps:PatternList)
+    => extendScopePatterns(extendScopePattern(Scope, P), Ps)
 
 endmodule
 

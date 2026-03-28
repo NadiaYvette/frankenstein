@@ -176,7 +176,15 @@ emitExpr (ELit (LitString s)) = do
 
 emitExpr (EVar n) = do
   -- Variable reference — assume it's already in scope as an SSA value
-  pure ([], sanitizeName (nameText n))
+  -- If the name contains "/" it's a qualified Koka stdlib reference that wasn't resolved;
+  -- emit a stub constant so MLIR doesn't reference an undeclared SSA value.
+  let sname = sanitizeName (nameText n)
+  if T.any (== '/') (nameText n)
+    then do
+      stubName <- freshName "v"
+      pure (["// unresolved external: " <> nameText n
+            , "%" <> stubName <> " = arith.constant 0 : i64"], stubName)
+    else pure ([], sname)
 
 -- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
@@ -259,18 +267,19 @@ emitExpr (EApp fn args) = do
   (fnOps, fnName) <- emitExpr fn
   argResults <- mapM emitExpr args
   let allArgOps = concatMap fst argResults
-      _argNames = map snd argResults
-  resultName <- freshName "v"
-  -- Indirect call through closure — extract function pointer from slot 0
-  fptrName <- freshName "v"
-  let closureTy = closureStructType (length args)
-      extractOps = [ "%" <> fptrName <> " = llvm.extractvalue %" <> fnName <> "[0] : " <> closureTy ]
-      callComment = "// indirect call via closure %" <> fnName
-  -- For now, fall back to a comment + constant (full indirect calls need llvm.call with function pointers)
-  pure (fnOps ++ allArgOps ++ extractOps ++
-        [ callComment
-        , "%" <> resultName <> " = arith.constant 0 : i64  // TODO: indirect closure call"
-        ], resultName)
+      argNames = map snd argResults
+  let callComment = "// indirect call via closure %" <> fnName <> " (stub: returning first arg)"
+  -- For now, return the first argument as the result (covers println-like stubs).
+  -- Full indirect calls need llvm.call with function pointers.
+  case argNames of
+    (firstArg:_) ->
+      pure (fnOps ++ allArgOps ++ [callComment], firstArg)
+    [] -> do
+      resultName <- freshName "v"
+      pure (fnOps ++ allArgOps ++
+            [ callComment
+            , "%" <> resultName <> " = arith.constant 0 : i64  // TODO: indirect closure call"
+            ], resultName)
 
 emitExpr (ECase scrut branches) = do
   -- Pattern matching
@@ -285,8 +294,12 @@ emitExpr (ECase scrut branches) = do
       emitMultiIntCase scrutOps scrutName litBranches defaultExpr
 
     -- Constructor case: extract tag and chain scf.if
-    ConCase conBranches mDefaultExpr ->
-      emitConCase scrutOps scrutName conBranches mDefaultExpr
+    ConCase conBranches mDefaultExpr
+      -- Koka Bool case: comparison results are i64 0/1, not boxed constructors
+      | isBoolConCase conBranches ->
+          emitBoolConCase scrutOps scrutName conBranches mDefaultExpr
+      | otherwise ->
+          emitConCase scrutOps scrutName conBranches mDefaultExpr
 
     -- PatVar: bind scrutinee to variable, emit body
     VarCase varName body -> do
@@ -445,17 +458,21 @@ emitCmpOp :: Text -> Expr -> Expr -> Emit ([Text], Text)
 emitCmpOp pred' a b = do
   (aOps, aName) <- emitExpr a
   (bOps, bName) <- emitExpr b
+  cmpName <- freshName "cmp"
   resultName <- freshName "v"
-  let cmpOp = "%" <> resultName <> " = arith.cmpi " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : i64"
-  pure (aOps ++ bOps ++ [cmpOp], resultName)
+  let cmpOp = "%" <> cmpName <> " = arith.cmpi " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : i64"
+      extOp = "%" <> resultName <> " = arith.extui %" <> cmpName <> " : i1 to i64"
+  pure (aOps ++ bOps ++ [cmpOp, extOp], resultName)
 
 emitFloatCmpOp :: Text -> Expr -> Expr -> Emit ([Text], Text)
 emitFloatCmpOp pred' a b = do
   (aOps, aName) <- emitExpr a
   (bOps, bName) <- emitExpr b
+  cmpName <- freshName "cmp"
   resultName <- freshName "v"
-  let cmpOp = "%" <> resultName <> " = arith.cmpf " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : f64"
-  pure (aOps ++ bOps ++ [cmpOp], resultName)
+  let cmpOp = "%" <> cmpName <> " = arith.cmpf " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : f64"
+      extOp = "%" <> resultName <> " = arith.extui %" <> cmpName <> " : i1 to i64"
+  pure (aOps ++ bOps ++ [cmpOp, extOp], resultName)
 
 emitIntCase :: [Text] -> Text -> Integer -> Expr -> Expr -> Emit ([Text], Text)
 emitIntCase scrutOps scrutName litVal thenExpr elseExpr = do
@@ -498,6 +515,28 @@ emitMultiIntCase scrutOps scrutName ((litVal, body):rest) defaultExpr = do
         , "}"
         ]
   pure (scrutOps ++ cmpOps ++ ifOps, resultName)
+
+-- | Detect Koka Bool constructor case (True/False branches)
+isBoolConCase :: [(QName, [Pattern], Expr)] -> Bool
+isBoolConCase branches =
+  let names = [nameText (qnameName qn) | (qn, _, _) <- branches]
+  in any (`elem` ["True", "False"]) names
+
+-- | Emit a Bool constructor case: scrutinee is i64 0 (False) or 1 (True),
+--   not a boxed constructor, so skip kk_tag and compare directly.
+emitBoolConCase :: [Text] -> Text -> [(QName, [Pattern], Expr)] -> Expr -> Emit ([Text], Text)
+emitBoolConCase scrutOps scrutName conBranches defaultExpr = do
+  -- Find which branch is True and which is False
+  let findBranch nm = [e | (qn, _, e) <- conBranches, nameText (qnameName qn) == nm]
+      trueBranch  = case findBranch "True"  of { (e:_) -> e; [] -> defaultExpr }
+      falseBranch = case findBranch "False" of { (e:_) -> e; [] -> defaultExpr }
+  -- scrutName is i64: 1 = True, 0 = False. Compare != 0 to get i1.
+  zeroName <- freshName "v"
+  cmpName <- freshName "cmp"
+  let toI1 = [ "%" <> zeroName <> " = arith.constant 0 : i64"
+             , "%" <> cmpName <> " = arith.cmpi ne, %" <> scrutName <> ", %" <> zeroName <> " : i64"
+             ]
+  emitScfIf (scrutOps ++ toI1) cmpName trueBranch falseBranch
 
 -- | Emit constructor case: extract tag via kk_tag, chain scf.if on tag values
 emitConCase :: [Text] -> Text -> [(QName, [Pattern], Expr)] -> Expr -> Emit ([Text], Text)

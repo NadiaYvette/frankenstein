@@ -155,5 +155,264 @@ checkFull "lambda: used param, no drop" \
   'EVar ( name ( "x" , 0 ) )'
 
 echo ""
+echo "============================================================"
+echo "=== Bridge Translation Properties ==="
+echo "============================================================"
+
+# Bridge properties use a separate kompiled definition
+BDEF="${BDEF:-$(cd "$(dirname "$0")/.." && pwd)/bridge-properties-kompiled}"
+
+# Helper that uses the bridge-properties definition
+checkBridge() {
+  local desc="$1" input="$2" expected="$3"
+  local output actual
+  output=$($KRUN --definition "$BDEF" -cPGM="$input" 2>&1)
+  actual=$(echo "$output" | grep '<k>' -A1 | tail -1 | sed 's/^ *//')
+  if echo "$actual" | grep -qF "$expected"; then
+    echo "  PASS: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $desc"
+    echo "    expected substring: $expected"
+    echo "    actual k-cell line: $actual"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+echo ""
+echo "--- GHC Bridge Properties ---"
+
+checkBridge "ghc: strict binding has no EDelay" \
+  'checkGhcStrictNoDelay(ELit(litInt(42)))' \
+  'true'
+
+checkBridge "ghc: strict binding rejects EDelay" \
+  'checkGhcStrictNoDelay(EDelay(ELit(litInt(42))))' \
+  'false'
+
+checkBridge "ghc: lazy binding is delayed" \
+  'checkGhcLazyIsDelayed(EDelay(EVar(name("x",0))))' \
+  'true'
+
+checkBridge "ghc: non-delayed fails lazy check" \
+  'checkGhcLazyIsDelayed(EVar(name("x",0)))' \
+  'false'
+
+checkBridge "ghc: absent binding is dead (lit 0)" \
+  'checkGhcAbsentIsDead(ELit(litInt(0)))' \
+  'true'
+
+checkBridge "ghc: absent binding rejects non-zero" \
+  'checkGhcAbsentIsDead(ELit(litInt(7)))' \
+  'false'
+
+checkBridge "ghc: absent binding rejects EDelay" \
+  'checkGhcAbsentIsDead(EDelay(ELit(litInt(0))))' \
+  'false'
+
+# ForAllTy with KStar and Many multiplicity
+checkBridge "ghc: forall has KStar and Many" \
+  'checkGhcForallKind(TForall(typevar(name("a",0), KStar, many), TCon(typecon(qname("std",name("int",0)), KValue))))' \
+  'true'
+
+# ForAllTy with wrong kind should fail
+checkBridge "ghc: forall with KEffect fails" \
+  'checkGhcForallKind(TForall(typevar(name("a",0), KEffect, many), TCon(typecon(qname("std",name("int",0)), KValue))))' \
+  'false'
+
+# TFun with all Many args (as GHC bridge produces)
+checkBridge "ghc: fun args all Many" \
+  'checkGhcAllArgsMany(TFun(multype(many, TCon(typecon(qname("s",name("i",0)),KValue))), multype(many, TCon(typecon(qname("s",name("j",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'true'
+
+# TFun with a linear arg should fail for GHC bridge
+checkBridge "ghc: fun arg linear fails all-Many check" \
+  'checkGhcAllArgsMany(TFun(multype(linear, TCon(typecon(qname("s",name("i",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'false'
+
+echo ""
+echo "--- Rust Bridge Properties ---"
+
+checkBridge "rust: affine multiplicity is valid" \
+  'checkRustAffine(affine)' \
+  'true'
+
+checkBridge "rust: linear multiplicity is valid" \
+  'checkRustAffine(linear)' \
+  'true'
+
+checkBridge "rust: many multiplicity is invalid for owned types" \
+  'checkRustAffine(many)' \
+  'false'
+
+# Rust fun args should all be affine
+checkBridge "rust: fun args all affine" \
+  'checkRustFunArgsAffine(TFun(multype(affine, TCon(typecon(qname("s",name("i",0)),KValue))), multype(affine, TCon(typecon(qname("s",name("j",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'true'
+
+checkBridge "rust: fun arg many fails affine check" \
+  'checkRustFunArgsAffine(TFun(multype(many, TCon(typecon(qname("s",name("i",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'false'
+
+# Move: used once, no retain
+checkBridge "rust: moved var (used once) has no retain" \
+  'checkRustMoveNoRetain(name("x",0), EVar(name("x",0)))' \
+  'true'
+
+# Move: unused, no retain
+checkBridge "rust: unused var has no retain" \
+  'checkRustMoveNoRetain(name("x",0), ELit(litInt(7)))' \
+  'true'
+
+# Copy: ERetain(EVar(_)) is correct
+checkBridge "rust: copy produces retain" \
+  'checkRustCopyHasRetain(ERetain(EVar(name("x",0))))' \
+  'true'
+
+# Copy: bare EVar is wrong
+checkBridge "rust: bare var fails copy check" \
+  'checkRustCopyHasRetain(EVar(name("x",0)))' \
+  'false'
+
+# Drop on unused: either used or has drop
+checkBridge "rust: unused var with drop passes" \
+  'checkRustDropOnUnused(name("x",0), EDrop(EVar(name("x",0))))' \
+  'true'
+
+checkBridge "rust: used var passes (no drop needed)" \
+  'checkRustDropOnUnused(name("x",0), EVar(name("x",0)))' \
+  'true'
+
+# IO effect check
+checkBridge "rust: function has io effect" \
+  'checkRustHasIoEffect(TFun(multype(affine, TCon(typecon(qname("s",name("i",0)),KValue))), effectExtend(qname("std",name("io",0)), effectEmpty), TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'true'
+
+checkBridge "rust: pure function fails io check" \
+  'checkRustHasIoEffect(TFun(multype(affine, TCon(typecon(qname("s",name("i",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'false'
+
+echo ""
+echo "--- Mercury Bridge Properties ---"
+
+checkBridge "mercury: det has pure effect (empty row)" \
+  'checkMercuryDetPure(effectEmpty)' \
+  'true'
+
+checkBridge "mercury: det rejects non-empty row" \
+  'checkMercuryDetPure(effectExtend(qname("mercury",name("exn",0)), effectEmpty))' \
+  'false'
+
+checkBridge "mercury: det type has empty effect" \
+  'checkMercuryDetType(TFun(multype(many, TCon(typecon(qname("s",name("i",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'true'
+
+checkBridge "mercury: semidet has exn effect" \
+  'checkMercurySemidetExn(effectExtend(qname("mercury",name("exn",0)), effectEmpty))' \
+  'true'
+
+checkBridge "mercury: semidet exact: exn+empty" \
+  'checkMercurySemidetExact(effectExtend(qname("mercury",name("exn",0)), effectEmpty))' \
+  'true'
+
+checkBridge "mercury: semidet rejects empty" \
+  'checkMercurySemidetExn(effectEmpty)' \
+  'false'
+
+checkBridge "mercury: multi has choice effect" \
+  'checkMercuryMultiChoice(effectExtend(qname("mercury",name("choice",0)), effectEmpty))' \
+  'true'
+
+checkBridge "mercury: nondet has both exn and choice" \
+  'checkMercuryNondetBoth(effectExtend(qname("mercury",name("exn",0)), effectExtend(qname("mercury",name("choice",0)), effectEmpty)))' \
+  'true'
+
+checkBridge "mercury: nondet fails if only exn" \
+  'checkMercuryNondetBoth(effectExtend(qname("mercury",name("exn",0)), effectEmpty))' \
+  'false'
+
+checkBridge "mercury: di mode is linear" \
+  'checkMercuryDiLinear(linear)' \
+  'true'
+
+checkBridge "mercury: di mode rejects many" \
+  'checkMercuryDiLinear(many)' \
+  'false'
+
+checkBridge "mercury: in mode is many" \
+  'checkMercuryInMany(many)' \
+  'true'
+
+checkBridge "mercury: in mode rejects linear" \
+  'checkMercuryInMany(linear)' \
+  'false'
+
+echo ""
+echo "--- Koka Bridge Properties ---"
+
+checkBridge "koka: pure effect is empty" \
+  'checkKokaPureIsEmpty(effectEmpty)' \
+  'true'
+
+checkBridge "koka: non-empty is not pure" \
+  'checkKokaPureIsEmpty(effectExtend(qname("std",name("io",0)), effectEmpty))' \
+  'false'
+
+checkBridge "koka: effect row length 0 for empty" \
+  'checkKokaEffectLength(effectEmpty, 0)' \
+  'true'
+
+checkBridge "koka: effect row length 1" \
+  'checkKokaEffectLength(effectExtend(qname("std",name("io",0)), effectEmpty), 1)' \
+  'true'
+
+checkBridge "koka: effect row length 2" \
+  'checkKokaEffectLength(effectExtend(qname("std",name("exn",0)), effectExtend(qname("std",name("io",0)), effectEmpty)), 2)' \
+  'true'
+
+checkBridge "koka: effect row length mismatch fails" \
+  'checkKokaEffectLength(effectExtend(qname("std",name("io",0)), effectEmpty), 2)' \
+  'false'
+
+# All multiplicities default to Many
+checkBridge "koka: fun args all Many" \
+  'checkKokaAllMulMany(TFun(multype(many, TCon(typecon(qname("s",name("i",0)),KValue))), multype(many, TCon(typecon(qname("s",name("j",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'true'
+
+checkBridge "koka: fun arg linear fails all-Many check" \
+  'checkKokaAllMulMany(TFun(multype(linear, TCon(typecon(qname("s",name("i",0)),KValue))), effectEmpty, TCon(typecon(qname("s",name("r",0)),KValue))))' \
+  'false'
+
+# Type variable Many check
+checkBridge "koka: type var has Many multiplicity" \
+  'checkKokaTypeVarMany(typevar(name("a",0), KStar, many))' \
+  'true'
+
+checkBridge "koka: type var linear fails Many check" \
+  'checkKokaTypeVarMany(typevar(name("a",0), KStar, linear))' \
+  'false'
+
+# TSyn expansion
+checkBridge "koka: TSyn with expanded body passes" \
+  'checkKokaSynExpansion(testSynExpanded())' \
+  'true'
+
+checkBridge "koka: nested TSyn fails expansion check" \
+  'checkKokaSynExpansion(testSynNested())' \
+  'false'
+
+checkBridge "koka: non-TSyn passes expansion trivially" \
+  'checkKokaSynExpansion(TCon(typecon(qname("std",name("int",0)), KValue)))' \
+  'true'
+
+checkBridge "koka: TSyn has body" \
+  'checkKokaSynHasBody(testSynHasBody())' \
+  'true'
+
+checkBridge "koka: non-TSyn fails has-body check" \
+  'checkKokaSynHasBody(TCon(typecon(qname("std",name("int",0)), KValue)))' \
+  'false'
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 exit $FAIL

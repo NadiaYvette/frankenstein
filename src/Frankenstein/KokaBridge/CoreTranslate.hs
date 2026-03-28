@@ -24,6 +24,8 @@ import Kind.Kind qualified as KK
 import Common.Name qualified as KN
 import Common.Syntax qualified as KS
 
+import Data.Maybe (mapMaybe)
+
 import Frankenstein.Core.Types qualified as F
 
 -- ============================================================================
@@ -34,7 +36,7 @@ translateProgram :: KC.Core -> Either Text F.Program
 translateProgram kcore = do
   defs <- mapM translateDef (KC.flattenDefGroups (KC.coreProgDefs kcore))
   dataDecls <- concat <$> mapM translateTypeDefGroup (KC.coreProgTypeDefs kcore)
-  let effects = []  -- TODO: extract effect declarations from type defs
+  let effects = concatMap extractEffectDecls (KC.coreProgTypeDefs kcore)
   pure F.Program
     { F.progName    = translateQName (KC.coreProgName kcore)
     , F.progDefs    = defs
@@ -277,18 +279,67 @@ translateTypeDefGroup (KC.TypeDefGroup tdefs) =
 
 translateTypeDef :: KC.TypeDef -> Either Text [F.DataDecl]
 translateTypeDef = \case
-  KC.Data dataInfo -> do
-    let conInfos = KT.dataInfoConstrs dataInfo
-    cons <- mapM translateConInfo conInfos
-    pure [ F.DataDecl
-      { F.dataName   = translateQName (KT.dataInfoName dataInfo)
-      , F.dataParams = map translateTypeVar (KT.dataInfoParams dataInfo)
-      , F.dataCons   = cons
-      , F.dataVis    = translateVisibility (KT.dataInfoVis dataInfo)
-      } ]
+  KC.Data dataInfo
+    | isEffectDataInfo dataInfo -> pure []  -- handled separately as EffectDecl
+    | otherwise -> do
+        let conInfos = KT.dataInfoConstrs dataInfo
+        cons <- mapM translateConInfo conInfos
+        pure [ F.DataDecl
+          { F.dataName   = translateQName (KT.dataInfoName dataInfo)
+          , F.dataParams = map translateTypeVar (KT.dataInfoParams dataInfo)
+          , F.dataCons   = cons
+          , F.dataVis    = translateVisibility (KT.dataInfoVis dataInfo)
+          } ]
   KC.Synonym _synInfo ->
     -- Type synonyms don't produce data declarations
     pure []
+
+-- ============================================================================
+-- Effect declaration extraction
+-- ============================================================================
+
+-- | Check if a DataInfo represents an effect type
+isEffectDataInfo :: KT.DataInfo -> Bool
+isEffectDataInfo di = case KT.dataInfoEffect di of
+  KS.DataNoEffect -> False
+  KS.DataEffect{} -> True
+
+-- | Extract effect declarations from a TypeDefGroup.
+--
+-- In Koka Core, effect declarations become data types with a special
+-- DataEffect marker in dataInfoEffect. Each constructor of the data type
+-- represents an effect operation. For example:
+--
+-- > effect ask<a>
+-- >   fun ask() : a
+--
+-- becomes a data type with one constructor "ask" whose type encodes
+-- the operation signature.
+extractEffectDecls :: KC.TypeDefGroup -> [F.EffectDecl]
+extractEffectDecls (KC.TypeDefGroup tdefs) =
+  mapMaybe extractEffectFromTypeDef tdefs
+
+extractEffectFromTypeDef :: KC.TypeDef -> Maybe F.EffectDecl
+extractEffectFromTypeDef (KC.Data dataInfo)
+  | isEffectDataInfo dataInfo =
+      let ops = map conInfoToOpDecl (KT.dataInfoConstrs dataInfo)
+      in Just F.EffectDecl
+        { F.effectName   = translateQName (KT.dataInfoName dataInfo)
+        , F.effectParams = map translateTypeVar (KT.dataInfoParams dataInfo)
+        , F.effectOps    = ops
+        }
+  | otherwise = Nothing
+extractEffectFromTypeDef (KC.Synonym _) = Nothing
+
+-- | Translate a constructor of an effect data type to an operation declaration.
+--
+-- In Koka, effect operations are encoded as constructors where
+-- conInfoType gives the full operation type (including foralls and function arrows).
+conInfoToOpDecl :: KT.ConInfo -> F.OpDecl
+conInfoToOpDecl ci = F.OpDecl
+  { F.opName = translateQName (KT.conInfoName ci)
+  , F.opType = translateTypeUnsafe (KT.conInfoType ci)
+  }
 
 translateConInfo :: KT.ConInfo -> Either Text F.ConDecl
 translateConInfo ci = do

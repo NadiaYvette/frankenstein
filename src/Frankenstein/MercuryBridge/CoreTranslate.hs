@@ -40,10 +40,11 @@ import qualified Data.Text as T
 translateHlds :: MercuryHLDS -> Either Text Program
 translateHlds hlds = do
   defs <- mapM translatePred (hldsPreds hlds)
+  let dataDecls = map (translateMercuryTypeDecl (hldsModule hlds)) (hldsTypes hlds)
   Right $ Program
     { progName = QName (hldsModule hlds) (Name "main" 0)
     , progDefs = defs
-    , progData = []      -- TODO: extract from HLDS type declarations
+    , progData = dataDecls
     , progEffects = mercuryEffects
     }
 
@@ -63,6 +64,24 @@ mercuryEffects =
                             (TFun [] EffectRowEmpty (TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)))]
       }
   ]
+
+-- | Translate a Mercury HLDS type declaration to a Frankenstein DataDecl.
+translateMercuryTypeDecl :: Text -> MercuryTypeDecl -> DataDecl
+translateMercuryTypeDecl modName td = DataDecl
+  { dataName   = QName modName (Name (typeDeclName td) 0)
+  , dataParams = [ TypeVar (Name p 0) KindStar Many | p <- typeDeclParams td ]
+  , dataCons   = [ ConDecl
+      { conName   = QName modName (Name ctorName 0)
+      , conFields = [ (Name ("field_" <> T.pack (show i)) 0,
+                       TCon (TypeCon (QName "std" (Name fieldTy 0)) KindValue))
+                     | (i, fieldTy) <- zip [(0 :: Int)..] fieldTys
+                     ]
+      , conVis    = Public
+      }
+    | (ctorName, fieldTys) <- typeDeclCtors td
+    ]
+  , dataVis    = Public
+  }
 
 -- | Translate a single Mercury predicate to a Frankenstein definition
 translatePred :: MercuryPred -> Either Text Def

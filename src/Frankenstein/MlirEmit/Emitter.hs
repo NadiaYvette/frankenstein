@@ -20,6 +20,8 @@ import Data.IORef
 import System.Process (readProcessWithExitCode, readProcess)
 import System.Exit (ExitCode(..))
 import Control.Monad.State
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -46,6 +48,8 @@ defaultEmitConfig = EmitConfig
 data EmitState = EmitState
   { esCounter   :: !Int
   , esLiftedFns :: ![Text]  -- accumulated lifted lambda functions
+  , esTypeEnv    :: !(Map Text Text)  -- SSA name -> MLIR type
+  , esStringLits :: ![(Text, Text)]   -- global name -> string content
   }
 
 type Emit a = State EmitState a
@@ -59,6 +63,25 @@ freshName prefix = do
 
 addLiftedFn :: Text -> Emit ()
 addLiftedFn fn = modify (\s -> s { esLiftedFns = fn : esLiftedFns s })
+
+-- | Record the MLIR type for an SSA name
+recordType :: Text -> Text -> Emit ()
+recordType name ty = modify (\s -> s { esTypeEnv = Map.insert name ty (esTypeEnv s) })
+
+-- | Look up the MLIR type for an SSA name (default: "i64")
+lookupType :: Text -> Emit Text
+lookupType name = do
+  env <- gets esTypeEnv
+  pure $ Map.findWithDefault "i64" name env
+
+-- | Collect a string literal, returning its global name
+addStringLit :: Text -> Emit Text
+addStringLit str = do
+  s <- get
+  let idx = length (esStringLits s)
+      globalName = "str_" <> T.pack (show idx)
+  put s { esStringLits = esStringLits s ++ [(globalName, str)] }
+  pure globalName
 
 -- | Emit a Frankenstein Core program as MLIR text
 emitProgram :: Program -> Text
@@ -74,9 +97,13 @@ emitProgramText prog =
                         then d { defName = QName "" (Name "_frankenstein_main" 99) }
                         else d) defs
         else defs
-      initState = EmitState 0 []
+      initState = EmitState 0 [] Map.empty []
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
+      stringGlobals = T.unlines
+        [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
+          <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
+        | (gn, s) <- esStringLits finalState ]
       mainWrapper = if hasMain
         then T.unlines
           [ "  func.func @main() -> i32 {"
@@ -95,6 +122,9 @@ emitProgramText prog =
     , "  llvm.func @printf(!llvm.ptr, ...) -> i32"
     , "  llvm.mlir.global internal constant @fmt_int(\"%ld\\n\\00\") {addr_space = 0 : i32}"
     , "  llvm.mlir.global internal constant @fmt_str(\"%s\\n\\00\") {addr_space = 0 : i32}"
+    , ""
+    , "  // String literals"
+    , stringGlobals
     , ""
     , "  // Perceus runtime declarations"
     , "  func.func private @kk_drop(i64) -> ()"
@@ -162,6 +192,7 @@ emitExpr (ELit (LitInt n)) = do
 
 emitExpr (ELit (LitFloat n)) = do
   name <- freshName "v"
+  recordType name "f64"
   pure (["%" <> name <> " = arith.constant " <> T.pack (show n) <> " : f64"], name)
 
 emitExpr (ELit (LitChar c)) = do
@@ -169,10 +200,10 @@ emitExpr (ELit (LitChar c)) = do
   pure (["%" <> name <> " = arith.constant " <> T.pack (show (fromEnum c)) <> " : i64"], name)
 
 emitExpr (ELit (LitString s)) = do
-  -- Strings are represented as i64 0 for now (would need llvm.mlir.global for real strings)
+  globalName <- addStringLit s
   name <- freshName "v"
-  pure (["// string literal: \"" <> s <> "\""
-        , "%" <> name <> " = arith.constant 0 : i64"], name)
+  recordType name "!llvm.ptr"
+  pure (["%" <> name <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"], name)
 
 emitExpr (EVar n) = do
   -- Variable reference — assume it's already in scope as an SSA value
@@ -256,7 +287,8 @@ emitExpr (EApp (EVar fn) args) = do
   let allOps = concatMap fst argResults
       argNames = map snd argResults
       argList = T.intercalate ", " ["%" <> n | n <- argNames]
-      argTypeList = T.intercalate ", " (replicate (length args) "i64")
+  argTypes <- mapM lookupType argNames
+  let argTypeList = T.intercalate ", " argTypes
   resultName <- freshName "v"
   let callOp = "%" <> resultName <> " = func.call @" <> sanitizeName (nameText fn)
                <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
@@ -268,18 +300,20 @@ emitExpr (EApp fn args) = do
   argResults <- mapM emitExpr args
   let allArgOps = concatMap fst argResults
       argNames = map snd argResults
-  let callComment = "// indirect call via closure %" <> fnName <> " (stub: returning first arg)"
-  -- For now, return the first argument as the result (covers println-like stubs).
-  -- Full indirect calls need llvm.call with function pointers.
-  case argNames of
-    (firstArg:_) ->
-      pure (fnOps ++ allArgOps ++ [callComment], firstArg)
-    [] -> do
-      resultName <- freshName "v"
-      pure (fnOps ++ allArgOps ++
-            [ callComment
-            , "%" <> resultName <> " = arith.constant 0 : i64  // TODO: indirect closure call"
-            ], resultName)
+      nArgs = length argNames
+      closTy = closureStructType nArgs
+      -- Function type for the indirect call: (closure_struct, args...) -> i64
+      argTys = replicate nArgs "i64"
+  -- Extract function pointer from closure struct slot 0
+  fptrName <- freshName "v"
+  let extractOp = "%" <> fptrName <> " = llvm.extractvalue %" <> fnName <> "[0] : " <> closTy
+  -- Build the indirect call
+  resultName <- freshName "v"
+  let argList = T.intercalate ", " ["%" <> n | n <- argNames]
+      argTypeList = T.intercalate ", " argTys
+      callOp = "%" <> resultName <> " = llvm.call %" <> fptrName
+               <> "(" <> argList <> ") : !llvm.ptr, (" <> argTypeList <> ") -> i64"
+  pure (fnOps ++ allArgOps ++ [extractOp, callOp], resultName)
 
 emitExpr (ECase scrut branches) = do
   -- Pattern matching
@@ -451,6 +485,7 @@ emitBinOp op ty a b = do
   (aOps, aName) <- emitExpr a
   (bOps, bName) <- emitExpr b
   resultName <- freshName "v"
+  recordType resultName ty
   let binOp = "%" <> resultName <> " = " <> op <> " %" <> aName <> ", %" <> bName <> " : " <> ty
   pure (aOps ++ bOps ++ [binOp], resultName)
 
@@ -458,9 +493,11 @@ emitCmpOp :: Text -> Expr -> Expr -> Emit ([Text], Text)
 emitCmpOp pred' a b = do
   (aOps, aName) <- emitExpr a
   (bOps, bName) <- emitExpr b
+  -- Use the tracked type of the left operand for the comparison
+  aTy <- lookupType aName
   cmpName <- freshName "cmp"
   resultName <- freshName "v"
-  let cmpOp = "%" <> cmpName <> " = arith.cmpi " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : i64"
+  let cmpOp = "%" <> cmpName <> " = arith.cmpi " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : " <> aTy
       extOp = "%" <> resultName <> " = arith.extui %" <> cmpName <> " : i1 to i64"
   pure (aOps ++ bOps ++ [cmpOp, extOp], resultName)
 
@@ -836,6 +873,17 @@ typeToMlir (TSyn _ _ expansion) = typeToMlir expansion
 -- Sanitize names for MLIR (replace special chars)
 sanitizeName :: Text -> Text
 sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~" :: [Char]) then '_' else c)
+
+-- | Escape a string for MLIR string literal (handle backslashes, quotes, newlines)
+escapeMLIRString :: Text -> Text
+escapeMLIRString = T.concatMap escChar
+  where
+    escChar '\\' = "\\\\"
+    escChar '"'  = "\\22"
+    escChar '\n' = "\\0A"
+    escChar '\r' = "\\0D"
+    escChar '\t' = "\\09"
+    escChar c    = T.singleton c
 
 -- | Full compilation pipeline
 compileToExecutable :: EmitConfig -> Program -> IO (Either Text FilePath)

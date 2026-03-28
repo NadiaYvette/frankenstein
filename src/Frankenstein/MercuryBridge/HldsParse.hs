@@ -6,6 +6,7 @@
 module Frankenstein.MercuryBridge.HldsParse
   ( MercuryHLDS(..)
   , MercuryPred(..)
+  , MercuryTypeDecl(..)
   , MercuryMode(..)
   , MercuryDet(..)
   , MercuryGoal(..)
@@ -58,9 +59,17 @@ data MercuryGoal
   | GoalUnparsed Text
   deriving (Show)
 
+-- A Mercury type declaration in HLDS
+data MercuryTypeDecl = MercuryTypeDecl
+  { typeDeclName   :: !Text
+  , typeDeclParams :: ![Text]
+  , typeDeclCtors  :: ![(Text, [Text])]  -- (ctor name, [field type strings])
+  } deriving (Show)
+
 data MercuryHLDS = MercuryHLDS
   { hldsModule :: !Text
   , hldsPreds  :: ![MercuryPred]
+  , hldsTypes  :: ![MercuryTypeDecl]
   } deriving (Show)
 
 -- | Invoke mmc to dump HLDS for a Mercury source file.
@@ -98,9 +107,12 @@ parseHldsDump dumpText = do
         [] -> "unknown"
       -- Split into predicate blocks at "% pred id" markers
       preds = extractPredicates ls
+      -- Extract type declarations from "% type ctor:" markers
+      types = extractTypeDecls ls
   Right $ MercuryHLDS
     { hldsModule = modName
     , hldsPreds = preds
+    , hldsTypes = types
     }
 
 extractPredicates :: [Text] -> [MercuryPred]
@@ -268,3 +280,105 @@ parseSingleGoal txt
       in GoalCall (T.strip name) args
   | otherwise = GoalUnparsed stripped
   where stripped = T.strip txt
+
+-------------------------------------------------------------------------------
+-- Type declaration extraction
+-------------------------------------------------------------------------------
+
+-- | Extract type declarations from HLDS dump lines.
+-- Looks for "% type ctor:" markers and the ":- type" declarations that
+-- follow in the type table section of the dump.
+extractTypeDecls :: [Text] -> [MercuryTypeDecl]
+extractTypeDecls [] = []
+extractTypeDecls (l:ls)
+  -- Match ":- type T(params) ---> ctor1 ; ctor2 ; ..."
+  -- The HLDS dump contains type definitions in the format:
+  --   :- type tree(T) ---> empty ; node(T, tree(T), tree(T)).
+  | ":- type " `T.isPrefixOf` T.stripStart l =
+      case parseTypeDecl (T.strip l) of
+        Just td -> td : extractTypeDecls ls
+        Nothing -> extractTypeDecls ls
+  -- Also look for "% type ctor:" markers in the HLDS
+  | "% type ctor: " `T.isPrefixOf` T.stripStart l =
+      case parseTypeCtorLine (T.strip l) ls of
+        (Just td, rest) -> td : extractTypeDecls rest
+        (Nothing, rest) -> extractTypeDecls rest
+  | otherwise = extractTypeDecls ls
+
+-- | Parse a ":- type T(params) ---> ctor1 ; ctor2." line
+parseTypeDecl :: Text -> Maybe MercuryTypeDecl
+parseTypeDecl line = do
+  let afterType = T.drop (T.length ":- type ") line
+      -- Split on "--->" to get the LHS (name + params) and RHS (constructors)
+      (lhs, rest) = T.breakOn "--->" afterType
+  if T.null rest
+    then Nothing  -- no "--->" found
+    else do
+      let rhs = T.drop (T.length "--->") rest
+          -- Parse LHS: name(Param1, Param2) or just name
+          lhsStripped = T.strip lhs
+          (typeName, params) = parseTypeLhs lhsStripped
+          -- Parse RHS: ctor1 ; ctor2(arg1, arg2) ; ...
+          ctorTexts = map T.strip $ T.splitOn ";" (T.dropWhileEnd (== '.') (T.strip rhs))
+          ctors = map parseCtorText ctorTexts
+      Just $ MercuryTypeDecl
+        { typeDeclName = typeName
+        , typeDeclParams = params
+        , typeDeclCtors = ctors
+        }
+
+-- | Parse the LHS of a type decl: "tree(T)" -> ("tree", ["T"])
+parseTypeLhs :: Text -> (Text, [Text])
+parseTypeLhs t
+  | "(" `T.isInfixOf` t =
+      let name = T.takeWhile (/= '(') t
+          paramsText = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') t
+          params = map T.strip $ T.splitOn "," paramsText
+      in (T.strip name, filter (not . T.null) params)
+  | otherwise = (T.strip t, [])
+
+-- | Parse a constructor text: "node(T, tree(T), tree(T))" -> ("node", ["T", "tree(T)", "tree(T)"])
+-- or "empty" -> ("empty", [])
+parseCtorText :: Text -> (Text, [Text])
+parseCtorText t
+  | "(" `T.isInfixOf` stripped =
+      let name = T.takeWhile (/= '(') stripped
+          argsText = T.dropEnd 1 $ T.drop 1 $ T.dropWhile (/= '(') stripped
+          -- Simple split on ", " — not perfect for nested parens but good enough
+          args = map T.strip $ splitCtorArgs argsText
+      in (T.strip name, filter (not . T.null) args)
+  | otherwise = (stripped, [])
+  where stripped = T.strip t
+
+-- | Split constructor arguments, respecting nested parentheses.
+splitCtorArgs :: Text -> [Text]
+splitCtorArgs t = go 0 T.empty (T.unpack t)
+  where
+    go :: Int -> Text -> String -> [Text]
+    go _ acc [] = [acc]
+    go depth acc ('(':rest) = go (depth + 1) (acc <> "(") rest
+    go depth acc (')':rest) = go (depth - 1) (acc <> ")") rest
+    go 0 acc (',':' ':rest) = acc : go 0 T.empty rest
+    go 0 acc (',':rest) = acc : go 0 T.empty rest
+    go depth acc (c:rest) = go depth (acc <> T.singleton c) rest
+
+-- | Parse a "% type ctor:" marker line and collect the subsequent type body.
+parseTypeCtorLine :: Text -> [Text] -> (Maybe MercuryTypeDecl, [Text])
+parseTypeCtorLine marker ls =
+  -- "% type ctor: module.typename/arity"
+  let afterMarker = T.drop (T.length "% type ctor: ") marker
+      -- Extract name: "module.typename/arity" -> "typename"
+      nameWithModule = T.takeWhile (/= '/') afterMarker
+      typeName = case T.breakOnEnd "." nameWithModule of
+                   ("", n) -> n
+                   (_, n)  -> n
+      -- Look ahead for constructor lines (indented, before the next % marker)
+      (bodyLines, rest) = span (\x -> not ("% type ctor:" `T.isPrefixOf` T.stripStart x)
+                                    && not ("% pred id" `T.isPrefixOf` T.stripStart x)) ls
+      -- Try to find ":- type" in bodyLines
+      typeLines = filter (":- type" `T.isInfixOf`) bodyLines
+  in case typeLines of
+    (tl:_) -> (parseTypeDecl (T.strip tl), rest)
+    [] ->
+      -- No ":- type" line found; create a stub with just the name
+      (Just $ MercuryTypeDecl typeName [] [], rest)

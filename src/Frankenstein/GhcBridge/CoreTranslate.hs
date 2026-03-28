@@ -19,6 +19,7 @@
 module Frankenstein.GhcBridge.CoreTranslate
   ( translateProgram
   , translateExpr
+  , translateTyCons
   ) where
 
 import qualified Frankenstein.Core.Types as F
@@ -28,7 +29,9 @@ import GHC.Core
   , Bind(..), Expr(..), Alt(..), AltCon(..)
   )
 import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
-import GHC.Core.TyCon (TyCon, tyConName)
+import GHC.Core.TyCon
+  ( TyCon, tyConName, isAlgTyCon, tyConTyVars, tyConDataCons
+  )
 import GHC.Types.Var
   ( Var, varName, varType, isTyVar
   , isInvisibleFunArg, binderVar, ForAllTyBinder
@@ -38,9 +41,12 @@ import GHC.Types.Unique (getKey)
 import GHC.Types.Literal (Literal(..))
 import GHC.Types.Id (idDemandInfo)
 import GHC.Types.Demand (isStrictDmd, isAbsDmd)
-import GHC.Core.DataCon (dataConName)
+import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys, dataConFieldLabels)
 import GHC.Unit.Module (moduleNameString, moduleName)
 import GHC.Data.FastString (unpackFS)
+import GHC.Types.FieldLabel (flLabel)
+import GHC.Core.TyCo.Rep (Scaled(..))
+import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -50,13 +56,15 @@ import qualified Data.Text as T
 -------------------------------------------------------------------------------
 
 -- | Translate a full GHC Core program to a Frankenstein Program.
-translateProgram :: Text -> CoreProgram -> Either Text F.Program
-translateProgram modName binds =
+-- Takes the module name, the Core bindings, and the module's TyCons.
+translateProgram :: Text -> CoreProgram -> [TyCon] -> Either Text F.Program
+translateProgram modName binds tyCons =
   let defs = concatMap translateTopBind binds
+      dataDecls = translateTyCons tyCons
   in Right $ F.Program
     { F.progName    = F.QName modName (F.Name modName 0)
     , F.progDefs    = defs
-    , F.progData    = []
+    , F.progData    = dataDecls
     , F.progEffects = []
     }
 
@@ -343,3 +351,45 @@ decideLaziness b e
   | isAbsDmd (idDemandInfo b)    = F.ELit (F.LitInt 0)  -- dead code
   | isStrictDmd (idDemandInfo b) = trExpr e              -- strict: no thunk
   | otherwise                     = F.EDelay (trExpr e)  -- lazy: wrap in thunk
+
+-------------------------------------------------------------------------------
+-- TyCon -> DataDecl translation
+-------------------------------------------------------------------------------
+
+-- | Translate a list of GHC TyCons to Frankenstein DataDecls.
+-- Only algebraic TyCons (data/newtype) are included; type synonyms,
+-- type families, primitive TyCons, etc. are filtered out.
+translateTyCons :: [TyCon] -> [F.DataDecl]
+translateTyCons = map translateTyCon . filter isAlgTyCon
+
+-- | Translate a single algebraic TyCon to a DataDecl.
+translateTyCon :: TyCon -> F.DataDecl
+translateTyCon tc = F.DataDecl
+  { F.dataName   = tyConQName tc
+  , F.dataParams = map translateTyVar (tyConTyVars tc)
+  , F.dataCons   = map translateDataCon (tyConDataCons tc)
+  , F.dataVis    = F.Public
+  }
+
+-- | Translate a GHC DataCon to a Frankenstein ConDecl.
+translateDataCon :: DataCon -> F.ConDecl
+translateDataCon dc =
+  let dcName = F.QName T.empty (F.Name (T.pack (getOccString (dataConName dc))) 0)
+      -- Field labels: if the constructor has record fields, use those names;
+      -- otherwise generate positional names (field_0, field_1, ...)
+      labels = dataConFieldLabels dc
+      argTys = dataConOrigArgTys dc
+      fields
+        | null labels =
+            [ (F.Name ("field_" <> T.pack (show i)) 0, translateType ty)
+            | (i, Scaled _ ty) <- zip [(0 :: Int)..] argTys
+            ]
+        | otherwise =
+            [ (F.Name (T.pack (unpackFS (field_label (flLabel fl)))) 0, translateType ty)
+            | (fl, Scaled _ ty) <- zip labels argTys
+            ]
+  in F.ConDecl
+    { F.conName   = dcName
+    , F.conFields = fields
+    , F.conVis    = F.Public
+    }

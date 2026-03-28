@@ -20,18 +20,28 @@ void kk_free(void* ptr) {
     free(ptr);
 }
 
+/* Check if a value is a heap pointer (vs an unboxed integer).
+ * Heap pointers from kk_alloc_con are 8-byte aligned, so the low 3 bits
+ * are zero and the value is above a reasonable threshold.
+ * Small integers and other non-pointer values are skipped. */
+static inline int kk_is_heap_ptr(int64_t ptr) {
+    /* Must be non-zero, 8-byte aligned, and in a plausible heap range.
+     * Values below 4096 are almost certainly not valid heap pointers. */
+    return ptr != 0 && (ptr & 7) == 0 && ptr > 4096;
+}
+
 /* Refcount helpers — pointer to refcount is at (ptr - 8) */
 static inline int64_t* kk_rc_ptr(int64_t ptr) {
     return (int64_t*)(ptr - 8);
 }
 
 void kk_retain(int64_t ptr) {
-    if (ptr == 0) return;
+    if (!kk_is_heap_ptr(ptr)) return;
     (*kk_rc_ptr(ptr))++;
 }
 
 void kk_drop(int64_t ptr) {
-    if (ptr == 0) return;
+    if (!kk_is_heap_ptr(ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
     if (--(*rc) <= 0) {
         /* Free the whole block. The malloc'd pointer is at (ptr - 8). */
@@ -44,7 +54,7 @@ void kk_release(int64_t ptr) {
 }
 
 int64_t kk_reuse(int64_t ptr) {
-    if (ptr == 0) return 0;
+    if (!kk_is_heap_ptr(ptr)) return 0;
     int64_t* rc = kk_rc_ptr(ptr);
     if (*rc == 1) {
         /* Sole owner — reuse the allocation */
@@ -57,13 +67,13 @@ int64_t kk_reuse(int64_t ptr) {
 
 /* Read the tag from a boxed value */
 int64_t kk_tag(int64_t ptr) {
-    if (ptr == 0) return 0;
+    if (!kk_is_heap_ptr(ptr)) return 0;
     return *(int64_t*)ptr;
 }
 
 /* Read field[idx] from a boxed value (fields start after the tag) */
 int64_t kk_field(int64_t ptr, int64_t idx) {
-    if (ptr == 0) return 0;
+    if (!kk_is_heap_ptr(ptr)) return 0;
     int64_t* fields = (int64_t*)(ptr + 8);
     return fields[idx];
 }
@@ -87,7 +97,7 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
 
 /* Write field[idx] of a boxed value */
 void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
-    if (ptr == 0) return;
+    if (!kk_is_heap_ptr(ptr)) return;
     int64_t* fields = (int64_t*)(ptr + 8);
     fields[idx] = value;
 }

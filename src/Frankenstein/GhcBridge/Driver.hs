@@ -71,14 +71,15 @@ runGhcCompile libdir inputPath = do
         typecked  <- typecheckModule parsed
         desugared <- desugarModule typecked
 
-        -- Extract the Core program from ModGuts
+        -- Extract the Core program and type constructors from ModGuts
         let modGuts  = dm_core_module desugared
             coreProg = mg_binds modGuts
+            tyCons   = mg_tcs modGuts
             modName  = moduleNameString (moduleName (ms_mod modSummary))
             modNameT = T.pack modName
 
-        -- Translate GHC Core -> Frankenstein Core
-        case translateProgram modNameT coreProg of
+        -- Translate GHC Core -> Frankenstein Core (including data types)
+        case translateProgram modNameT coreProg tyCons of
           Left err   -> pure $ Left $ "Core translation error: " <> err
           Right prog -> pure $ Right $ GhcCoreResult
             { gcrModuleName = modNameT

@@ -39,7 +39,9 @@ if [ ! -d "$HASKELL_DEF" ] || [ "$SOURCE" -nt "$HASKELL_DEF/timestamp" ] 2>/dev/
   echo "=== Compiling organ-ir.k with Haskell backend ==="
   echo "This may take several minutes on first run..."
   echo ""
-  "$KOMPILE" "$SOURCE" --backend haskell -d "$HASKELL_DEF"
+  "$KOMPILE" "$SOURCE" --backend haskell \
+    --main-module ORGAN-IR --syntax-module ORGAN-IR-SYNTAX \
+    -o "$HASKELL_DEF"
   echo "Compilation complete."
   echo ""
 else
@@ -62,9 +64,10 @@ else
   echo ""
   echo "=== SOME CLAIMS FAILED (exit code $RC) ==="
   echo ""
-  echo "To debug individual claims, try:"
-  echo "  $KPROVE $CLAIMS --definition $HASKELL_DEF --debugger"
+  echo "To run only concrete claims (skip symbolic Claims 1a-1e):"
+  echo "  $KPROVE $CLAIMS --definition $HASKELL_DEF --exclude claim-1a,claim-1b,claim-1c,claim-1d,claim-1e"
   echo ""
-  echo "Or verify claims one at a time by commenting out others."
+  echo "To debug individual claims:"
+  echo "  $KPROVE $CLAIMS --definition $HASKELL_DEF --debugger"
   exit $RC
 fi

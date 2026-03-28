@@ -34,13 +34,24 @@ import Data.List (find)
 import qualified Data.Set as Set
 
 -- | Translate a full MIR program to Frankenstein Core
+--
+-- Note: progData is left empty because MIR does not directly expose ADT
+-- declarations. By the time rustc emits MIR, data types have been lowered to
+-- layout information (field offsets, discriminant values, etc.) spread across
+-- individual MIR bodies. Recovering the original enum/struct declarations
+-- would require either:
+--   (a) Parsing the rustc_private TyKind::Adt from the rustc shim (preferred —
+--       the shim already has access to TyCtxt), or
+--   (b) Reconstructing ADTs from MIR aggregate rvalues and discriminant reads,
+--       which is lossy and fragile.
+-- TODO: extend rustc-shim to emit ADT definitions alongside MIR bodies.
 translateMir :: MirProgram -> Either Text Program
 translateMir prog = do
   defs <- mapM translateBody (mirBodies prog)
   Right $ Program
     { progName = QName "rust" (Name "main" 0)
     , progDefs = defs
-    , progData = []
+    , progData = []     -- See note above: MIR lacks direct ADT declarations
     , progEffects = []  -- Rust has no user-defined effects (IO is implicit)
     }
 

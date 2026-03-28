@@ -14,6 +14,7 @@
 module Frankenstein.Core.Perceus
   ( insertPerceus
   , analyzeUsage
+  , freeVars
   , UsageInfo(..)
   ) where
 
@@ -47,37 +48,39 @@ perceusDefTransform def = def
     -- Initial scope: function parameters
     scope0 = case defExpr def of
       ELam params _ -> Map.fromList
-        [ (n, paramMultiplicity n (defType def))
+        [ (n, paramMultiplicity n params (defType def))
         | (n, _) <- params ]
       _ -> Map.empty
 
--- | Look up the multiplicity of a parameter from the function type
-paramMultiplicity :: Name -> Type -> Multiplicity
-paramMultiplicity _ (TFun args _ _) =
-  case args of
-    ((m, _):_) -> m  -- simplified: use first arg's multiplicity
-    _ -> Many
-paramMultiplicity _ _ = Many
+-- | Look up the multiplicity of a parameter from the function type.
+-- Indexes into the MulType list by position.
+paramMultiplicity :: Name -> [(Name, Type)] -> Type -> Multiplicity
+paramMultiplicity n params (TFun args _ _) =
+  case lookup n (zip (map fst params) (map fst args)) of
+    Just m  -> m
+    Nothing -> Many
+paramMultiplicity _ _ _ = Many
 
 -- | Transform an expression, inserting retain/drop as needed.
 -- The scope maps variables to their multiplicity.
 perceusExpr :: Map Name Multiplicity -> Expr -> Expr
 perceusExpr scope expr = case expr of
-  -- Variable: check if it needs retain (used multiple times in parent)
-  EVar _ -> expr  -- retain/drop decisions happen at binding sites
+  -- Variable: retain/drop decisions happen at binding sites
+  EVar _ -> expr
 
   ELit _ -> expr
   ECon _ -> expr
 
-  -- Application: analyze argument usage
+  -- Application: recurse into subexpressions
   EApp fn args ->
     EApp (perceusExpr scope fn) (map (perceusExpr scope) args)
 
-  -- Lambda: extend scope with parameter multiplicities
+  -- Lambda: extend scope with parameter multiplicities, drop unused, retain multi-use
   ELam params body ->
     let scope' = foldl (\s (n, _) -> Map.insert n Many s) scope params
         -- Analyze which params are used in body
         bodyFree = freeVars body
+        usage = analyzeUsage body
         unusedParams = [ n | (n, _) <- params
                        , not (Set.member n bodyFree)
                        , Map.findWithDefault Many n scope' /= Linear ]
@@ -85,15 +88,25 @@ perceusExpr scope expr = case expr of
         -- Drop unused affine/many params
         droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
                             body' unusedParams
-    in ELam params droppedBody
+        -- Insert retains for Many-multiplicity params used more than once
+        retainedBody = foldr
+          (\(n, _) e ->
+            let m = Map.findWithDefault Many n scope'
+                count = Map.findWithDefault 0 n usage
+            in if m == Many && count > 1
+               then wrapRetains n count e
+               else e)
+          droppedBody params
+    in ELam params retainedBody
 
-  -- Let: insert drops for bindings that go out of scope
+  -- Let: insert drops for unused bindings, retains for multi-use bindings
   ELet bgs body ->
     let -- Collect all bound names with their multiplicities
         boundNames = [ (bindName b, bindMultiplicity b)
                      | bg <- bgs, b <- bg ]
         scope' = foldl (\s (n, m) -> Map.insert n m s) scope boundNames
         bodyFree = freeVars body
+        usage = analyzeUsage body
         -- Transform binding expressions
         bgs' = map (map (perceusBindGroup scope')) bgs
         body' = perceusExpr scope' body
@@ -103,7 +116,15 @@ perceusExpr scope expr = case expr of
                  , m /= Linear ]  -- linear values must be used exactly once (error if not)
         droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
                             body' toDrop
-    in ELet bgs' droppedBody
+        -- Insert retains for Many-multiplicity vars used more than once
+        retainedBody = foldr
+          (\(n, m) e ->
+            let count = Map.findWithDefault 0 n usage
+            in if m == Many && count > 1
+               then wrapRetains n count e
+               else e)
+          droppedBody boundNames
+    in ELet bgs' retainedBody
 
   -- Case: each branch may use the scrutinee differently
   ECase scrut branches ->
@@ -111,7 +132,7 @@ perceusExpr scope expr = case expr of
         branches' = map (perceusBranch scope) branches
     in ECase scrut' branches'
 
-  -- Retain/Drop/Release already present: leave as-is
+  -- Retain/Drop/Release already present: recurse
   ERetain e -> ERetain (perceusExpr scope e)
   ERelease e -> ERelease (perceusExpr scope e)
   EDrop e -> EDrop (perceusExpr scope e)
@@ -138,13 +159,31 @@ perceusBranch scope br =
   let -- Extend scope with pattern-bound variables
       patVars = patternVars (branchPattern br)
       scope' = foldl (\s (n, _) -> Map.insert n Many s) scope patVars
-  in br { branchBody = perceusExpr scope' (branchBody br) }
+      body = branchBody br
+      bodyFree = freeVars body
+      -- Drop unused non-linear pattern variables (K spec: unusedNonLinear)
+      unusedPats = [ n | (n, _) <- patVars
+                   , not (Set.member n bodyFree)
+                   , Map.findWithDefault Many n scope' /= Linear ]
+      body' = perceusExpr scope' body
+      droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
+                          body' unusedPats
+  in br { branchBody = droppedBody }
 
 -- | Extract multiplicity from a Bind's type
 bindMultiplicity :: Bind -> Multiplicity
 bindMultiplicity b = case bindType b of
   TFun ((m, _):_) _ _ -> m
   _ -> Many
+
+-- | Wrap an expression with (N-1) retain operations for a variable.
+-- Mirrors the K spec's wrapRetains(Name, Count, Expr).
+-- If count <= 1, no retains needed. Otherwise insert (count-1) retains.
+wrapRetains :: Name -> Int -> Expr -> Expr
+wrapRetains _ count body | count <= 1 = body
+wrapRetains n count body =
+  ELet [[Bind (Name "_retain" 0) unitType (ERetain (EVar n)) DefVal]]
+       (wrapRetains n (count - 1) body)
 
 -- | Collect free variables of an expression
 freeVars :: Expr -> Set Name
@@ -184,6 +223,8 @@ patternVars (PatLit _)      = []
 
 -- | Analyze usage of variables in an expression.
 -- Returns a map from variable name to usage count.
+-- For App/Let/Handle/Reuse: sum (each use is a separate reference).
+-- For Case: scrutinee count + max over branches (only one branch executes).
 analyzeUsage :: Expr -> Map Name Int
 analyzeUsage = go
   where
@@ -193,7 +234,8 @@ analyzeUsage = go
     go (EApp f args)    = Map.unionsWith (+) (go f : map go args)
     go (ELam _ body)    = go body
     go (ELet bgs body)  = Map.unionsWith (+) (go body : [go (bindExpr b) | bg <- bgs, b <- bg])
-    go (ECase s brs)    = Map.unionsWith max (go s : [go (branchBody br) | br <- brs])
+    go (ECase s brs)    = Map.unionWith (+) (go s)
+                            (Map.unionsWith max [go (branchBody br) | br <- brs])
     go (ERetain e)      = go e
     go (ERelease e)     = go e
     go (EDrop e)        = go e

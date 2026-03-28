@@ -45,6 +45,20 @@ library
     hs-source-dirs:   src
     default-language: GHC2024
 
+test-suite frankenstein-tests
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    build-depends:
+        base >= 4.17 && < 5,
+        frankenstein,
+        tasty,
+        tasty-hunit,
+        containers,
+        text
+    default-language: GHC2024
+
 executable frankenstein
     import:           warnings
     main-is:          Main.hs

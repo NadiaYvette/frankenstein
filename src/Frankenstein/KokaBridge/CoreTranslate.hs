@@ -24,6 +24,8 @@ import Kind.Kind qualified as KK
 import Common.Name qualified as KN
 import Common.Syntax qualified as KS
 
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 
 import Frankenstein.Core.Types qualified as F
@@ -35,14 +37,93 @@ import Frankenstein.Core.Types qualified as F
 translateProgram :: KC.Core -> Either Text F.Program
 translateProgram kcore = do
   defs <- mapM translateDef (KC.flattenDefGroups (KC.coreProgDefs kcore))
+  -- Build extern name mapping: @extern-fibonacci → fibonacci (C target name)
+  let externMap = buildExternMap (KC.coreProgExternals kcore)
+      -- Rewrite @extern- references in defs to use C function names
+      defs' = map (rewriteExternRefs externMap) defs
+      -- Remove wrapper defs that are now trivial pass-through to extern.
+      -- A def like fibonacci = fn(n) fibonacci(n) after rewriting is just
+      -- an identity wrapper that the linker can resolve directly.
+      defs'' = filter (not . isExternWrapper externMap) defs'
   dataDecls <- concat <$> mapM translateTypeDefGroup (KC.coreProgTypeDefs kcore)
   let effects = concatMap extractEffectDecls (KC.coreProgTypeDefs kcore)
   pure F.Program
     { F.progName    = translateQName (KC.coreProgName kcore)
-    , F.progDefs    = defs
+    , F.progDefs    = defs''
     , F.progData    = dataDecls
     , F.progEffects = effects
     }
+
+-- ============================================================================
+-- External (extern) declarations → name rewriting
+-- ============================================================================
+
+-- | Build a mapping from Koka's internal @extern- names to C function names.
+-- Koka generates wrapper defs that call @extern-fibonacci etc.
+-- We rewrite those references to the actual C function name so the linker
+-- can resolve them to cross-module definitions.
+buildExternMap :: [KC.External] -> Map Text Text
+buildExternMap exts = Map.fromList
+  [ (T.pack (KN.nameLocal (KC.externalName ext)), cName)
+  | ext@KC.External{} <- exts
+  , let baseName = T.pack (KN.nameStem (KC.externalName ext))
+        cName = findCTarget (KC.externalFormat ext) baseName
+  ]
+
+-- | Find the C target name from extern format list.
+-- Koka extern format strings use #1, #2 for parameters.
+-- We strip those and extract just the function name.
+findCTarget :: [(KS.Target, String)] -> Text -> Text
+findCTarget [] dflt = dflt
+findCTarget ((KS.C _, s):_) _ = extractCName (T.pack s)
+findCTarget ((KS.Default, s):_) _ = extractCName (T.pack s)
+findCTarget (_:rest) dflt = findCTarget rest dflt
+
+-- | Extract the C function name from a Koka extern format string.
+-- "fibonacci" → "fibonacci"
+-- "fibonacci(#1)" → "fibonacci"
+extractCName :: Text -> Text
+extractCName s =
+  let stripped = T.takeWhile (\c -> c /= '(' && c /= ' ') s
+  in if T.null stripped then s else stripped
+
+-- | Is this def a trivial extern wrapper?
+-- After rewriting, a def like `fibonacci = fn(n) fibonacci(n)` is just
+-- a pass-through to the extern function. We can remove it so the linker
+-- resolves calls directly to the cross-module definition.
+isExternWrapper :: Map Text Text -> F.Def -> Bool
+isExternWrapper externMap d =
+  let baseName = F.nameText (F.qnameName (F.defName d))
+  in any (\cName -> cName == baseName) (Map.elems externMap)
+
+-- | Rewrite @extern- references in a Def's expression tree.
+rewriteExternRefs :: Map Text Text -> F.Def -> F.Def
+rewriteExternRefs externMap d =
+  d { F.defExpr = rewriteExternExpr externMap (F.defExpr d) }
+
+rewriteExternExpr :: Map Text Text -> F.Expr -> F.Expr
+rewriteExternExpr m = go
+  where
+    go (F.EVar n) = case Map.lookup (F.nameText n) m of
+      Just cName -> F.EVar (n { F.nameText = cName })
+      Nothing    -> F.EVar n
+    go (F.EApp f args) = F.EApp (go f) (map go args)
+    go (F.ELam ps body) = F.ELam ps (go body)
+    go (F.ELet bgs body) = F.ELet (map (map goBind) bgs) (go body)
+    go (F.ECase s brs) = F.ECase (go s) (map goBranch brs)
+    go (F.ERetain e) = F.ERetain (go e)
+    go (F.EDrop e) = F.EDrop (go e)
+    go (F.ERelease e) = F.ERelease (go e)
+    go (F.EReuse a b) = F.EReuse (go a) (go b)
+    go (F.EDelay e) = F.EDelay (go e)
+    go (F.EForce e) = F.EForce (go e)
+    go (F.ETypeApp e ts) = F.ETypeApp (go e) ts
+    go (F.ETypeLam tvs e) = F.ETypeLam tvs (go e)
+    go (F.EPerform qn args) = F.EPerform qn (map go args)
+    go (F.EHandle eff h b) = F.EHandle eff (go h) (go b)
+    go e = e  -- ELit, ECon
+    goBind b = b { F.bindExpr = go (F.bindExpr b) }
+    goBranch br = br { F.branchBody = go (F.branchBody br) }
 
 -- ============================================================================
 -- Definition translation

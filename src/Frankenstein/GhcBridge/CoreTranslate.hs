@@ -61,7 +61,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 -- Takes the module name, the Core bindings, and the module's TyCons.
 translateProgram :: Text -> CoreProgram -> [TyCon] -> Either Text F.Program
 translateProgram modName binds tyCons =
-  let defs = concatMap translateTopBind binds
+  let defs = filter (not . isDictDef) (concatMap translateTopBind binds)
       dataDecls = translateTyCons tyCons
   in Right $ F.Program
     { F.progName    = F.QName modName (F.Name modName 0)
@@ -116,10 +116,16 @@ trExpr (App (Var v) (Lit (LitString bs)))
   | getOccString v `elem` ["unpackCString#", "unpackCStringUtf8#"] =
       F.ELit (F.LitString (TE.decodeUtf8With lenientDecode bs))
 
--- Regular application: collect args into multi-arg EApp
+-- Regular application: collect args, strip dictionaries, simplify I#
 trExpr (App f a) =
   case collectArgs (App f a) of
-    (fun, args) -> F.EApp (trExpr fun) (map trExpr args)
+    -- I#(literal) → just the literal (unbox)
+    (Var v, [Lit l])
+      | getOccString v == "I#" -> F.ELit (translateLit l)
+    -- General case: strip dictionary arguments
+    (fun, args) ->
+      let args' = filter (not . isDictArg) args
+      in F.EApp (trExpr fun) (map trExpr args')
 
 -- Type lambda: skip type binders, recurse on body
 trExpr (Lam b e)
@@ -157,6 +163,31 @@ collectArgs = go []
     go args (App f (Type _)) = go args f            -- skip type args
     go args (App f a)        = go (a : args) f       -- collect value args
     go args e                = (e, args)
+
+-- | Is this expression a typeclass dictionary argument?
+-- GHC desugars typeclasses to dictionary-passing: e.g. (<=) $fOrdInt x y
+-- We strip these since Frankenstein uses direct builtin operations.
+isDictArg :: CoreExpr -> Bool
+isDictArg (Var v) =
+  let name = getOccString v
+  in isPrefixOf "$f" name     -- $fOrdInt, $fNumInt, $fEqInt, etc.
+     || isPrefixOf "$d" name  -- $dOrd, $dNum, etc. (alternative naming)
+     || isPrefixOf "$c" name  -- $c==, etc. (method selectors)
+     || isPrefixOf "$W" name  -- $WI# etc. (wrappers)
+isDictArg _ = False
+
+isPrefixOf :: String -> String -> Bool
+isPrefixOf [] _ = True
+isPrefixOf _ [] = False
+isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
+
+-- | Is this a compiler-generated dictionary/module definition?
+-- These are GHC's desugared typeclass infrastructure and module metadata.
+isDictDef :: F.Def -> Bool
+isDictDef d =
+  let n = T.unpack (F.nameText (F.qnameName (F.defName d)))
+  in isPrefixOf "$f" n || isPrefixOf "$d" n || isPrefixOf "$c" n
+     || isPrefixOf "$tr" n || isPrefixOf "$W" n || isPrefixOf "$tc" n
 
 -------------------------------------------------------------------------------
 -- Binding groups

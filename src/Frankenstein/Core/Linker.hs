@@ -239,13 +239,16 @@ rewriteNames defs dataDecls =
       -- Mangle definition names themselves
       mangledDefs = map mangleDef defs
 
-      -- For each def, determine its home module, then rewrite its body
+      -- For each def, determine its home module, then rewrite its body.
+      -- Pass the definition's own unqualified name so the resolver
+      -- can avoid self-references (e.g., extern wrappers).
       (rewrittenDefs, allWarns, allErrs) =
         foldr rewriteOne ([], [], []) mangledDefs
 
       rewriteOne d (ds, ws, es) =
         let homeMod = qnameModule (defName d)
-            (expr', ws', es') = rewriteExpr homeMod symTab conTab (defExpr d)
+            selfName = nameText (qnameName (defName d))
+            (expr', ws', es') = rewriteExpr homeMod selfName symTab conTab (defExpr d)
             d' = d { defExpr = expr' }
         in (d' : ds, ws' ++ ws, es' ++ es)
 
@@ -280,33 +283,25 @@ mangleConDecl c =
 -- | Resolve an unqualified name against the symbol table.
 -- Prefers the entry from homeMod if there are multiple providers.
 -- Returns (resolved name, warnings, errors).
-resolveName :: Text -> SymbolTable -> Name
+resolveName :: Text -> Text -> SymbolTable -> Name
             -> (Name, [Text], [LinkError])
-resolveName homeMod table nm =
+resolveName homeMod _selfName table nm =
   let unqual = nameText nm
   in case Map.lookup unqual table of
     Nothing ->
-      -- Not a known definition -- could be a local variable,
-      -- a lambda parameter, a let binding, or a primitive/runtime name.
       (nm, [], [])
     Just [(_, mangled)] ->
-      -- Unique: rewrite unconditionally.
       (nm { nameText = mangled }, [], [])
     Just candidates ->
-      -- Multiple providers -- try to pick the one from our home module.
       case filter (\(m, _) -> m == homeMod) candidates of
         [(_,mangled)] -> (nm { nameText = mangled }, [], [])
         [] ->
-          -- None from home module.  If all candidates mangle to the
-          -- same text (same unqualified name, just re-exported), pick any.
           let mangledNames = nubTexts (map snd candidates)
           in case mangledNames of
             [m] -> (nm { nameText = m }, [], [])
             _   -> (nm, [],
                     [AmbiguousReference unqual (map fst candidates)])
         ((_,mangled):_) ->
-          -- Multiple definitions from the same module -- shouldn't happen
-          -- after duplicate checking, but be safe.
           (nm { nameText = mangled },
               ["Warning: multiple definitions of '" <> unqual
                 <> "' within module '" <> homeMod <> "'"],
@@ -352,11 +347,12 @@ resolveQName homeMod table qn =
           , [], [])
 
 -- | Rewrite all name references within an expression.
--- Takes the home module, symbol table for defs, symbol table for
+-- Takes the home module, the containing def's mangled name (to avoid
+-- self-reference), symbol table for defs, symbol table for
 -- constructors, and returns (rewritten expr, warnings, errors).
-rewriteExpr :: Text -> SymbolTable -> SymbolTable -> Expr
+rewriteExpr :: Text -> Text -> SymbolTable -> SymbolTable -> Expr
             -> (Expr, [Text], [LinkError])
-rewriteExpr homeMod symTab conTab = go Set.empty
+rewriteExpr homeMod selfName symTab conTab = go Set.empty
   where
     -- 'locals' tracks names bound by lambda/let/case that should NOT
     -- be rewritten (they shadow top-level definitions).
@@ -364,7 +360,7 @@ rewriteExpr homeMod symTab conTab = go Set.empty
       EVar n
         | Set.member (nameText n) locals -> (expr, [], [])
         | otherwise ->
-            let (n', ws, es) = resolveName homeMod symTab n
+            let (n', ws, es) = resolveName homeMod selfName symTab n
             in (EVar n', ws, es)
 
       ELit _ -> (expr, [], [])

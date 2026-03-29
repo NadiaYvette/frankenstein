@@ -155,6 +155,138 @@ checkFull "lambda: used param, no drop" \
   'EVar ( name ( "x" , 0 ) )'
 
 echo ""
+echo "=== Evaluation (ORGAN-IR-EVAL) ==="
+
+# --- Literal evaluation ---
+check "eval: int literal" \
+  'eval(ELit(litInt(42)))' \
+  '#val ( vlit ( litInt ( 42 ) ) )'
+
+check "eval: string literal" \
+  'eval(ELit(litString("hello")))' \
+  '#val ( vlit ( litString ( "hello" ) ) )'
+
+# --- Lambda (closure creation) ---
+checkFull "eval: lambda creates closure" \
+  "eval(ELam(param(name(\"x\",0), $T), EVar(name(\"x\",0))))" \
+  'closure ('
+
+# --- Lambda application (beta reduction) ---
+# (\x -> x) 42  =>  42
+check "eval: identity application" \
+  "eval(EApp(ELam(param(name(\"x\",0), $T), EVar(name(\"x\",0))), ELit(litInt(42))))" \
+  '#val ( vlit ( litInt ( 42 ) ) )'
+
+# (\x -> \y -> x) 1 2  =>  1  (first arg returned)
+check "eval: two-arg function returns first" \
+  "eval(EApp(EApp(ELam(param(name(\"x\",0), $T), ELam(param(name(\"y\",0), $T), EVar(name(\"x\",0)))), ELit(litInt(1))), ELit(litInt(2))))" \
+  '#val ( vlit ( litInt ( 1 ) ) )'
+
+# --- Let binding ---
+# let x = 42 in x  =>  42
+check "eval: let binding" \
+  "eval(ELet(bind(name(\"x\",0), $T, ELit(litInt(42)), defVal), EVar(name(\"x\",0))))" \
+  '#val ( vlit ( litInt ( 42 ) ) )'
+
+# --- Nested let + application ---
+# let f = \x -> x in let y = 7 in f(y)  =>  7
+check "eval: nested let + application" \
+  "eval(ELet(bind(name(\"f\",0), $T, ELam(param(name(\"x\",0), $T), EVar(name(\"x\",0))), defFun), ELet(bind(name(\"y\",0), $T, ELit(litInt(7)), defVal), EApp(EVar(name(\"f\",0)), EVar(name(\"y\",0))))))" \
+  '#val ( vlit ( litInt ( 7 ) ) )'
+
+# --- Case on literals ---
+# case 1 of { 0 -> 10 ; 1 -> 20 ; _ -> 30 }  =>  20
+check "eval: case on literal (match second branch)" \
+  "eval(ECase(ELit(litInt(1)), branch(PatLit(litInt(0)), noGuard, ELit(litInt(10))) ; branch(PatLit(litInt(1)), noGuard, ELit(litInt(20))) ; branch(PatWild($T), noGuard, ELit(litInt(30)))))" \
+  '#val ( vlit ( litInt ( 20 ) ) )'
+
+# case 99 of { 0 -> 10 ; _ -> 30 }  =>  30  (wildcard)
+check "eval: case wildcard fallthrough" \
+  "eval(ECase(ELit(litInt(99)), branch(PatLit(litInt(0)), noGuard, ELit(litInt(10))) ; branch(PatWild($T), noGuard, ELit(litInt(30)))))" \
+  '#val ( vlit ( litInt ( 30 ) ) )'
+
+# --- Case on constructors ---
+# let v = Con("T","Just",0)(42) in case v of { Just(x) -> x ; Nothing() -> 0 }  =>  42
+JUST='qname("std",name("Just",0))'
+NOTHING='qname("std",name("Nothing",0))'
+check "eval: case on constructor (Just)" \
+  "eval(ELet(bind(name(\"v\",0), $T, EApp(ECon($JUST), ELit(litInt(42))), defVal), ECase(EVar(name(\"v\",0)), branch(PatCon($JUST, PatVar(name(\"x\",0), $T)), noGuard, EVar(name(\"x\",0))) ; branch(PatCon($NOTHING, PatWild($T)), noGuard, ELit(litInt(0))))))" \
+  '#val ( vlit ( litInt ( 42 ) ) )'
+
+# --- Arithmetic builtins ---
+# (+) 3 4  =>  7
+PLUS='qname("builtin",name("+",0))'
+check "eval: addition 3+4=7" \
+  "eval(EApp(ECon($PLUS), ELit(litInt(3)), ELit(litInt(4))))" \
+  '#val ( vlit ( litInt ( 7 ) ) )'
+
+TIMES='qname("builtin",name("*",0))'
+check "eval: multiplication 5*6=30" \
+  "eval(EApp(ECon($TIMES), ELit(litInt(5)), ELit(litInt(6))))" \
+  '#val ( vlit ( litInt ( 30 ) ) )'
+
+MINUS='qname("builtin",name("-",0))'
+check "eval: subtraction 10-3=7" \
+  "eval(EApp(ECon($MINUS), ELit(litInt(10)), ELit(litInt(3))))" \
+  '#val ( vlit ( litInt ( 7 ) ) )'
+
+# --- String concatenation ---
+CONCAT='qname("builtin",name("++",0))'
+check "eval: string concatenation" \
+  "eval(EApp(ECon($CONCAT), ELit(litString(\"hello \")), ELit(litString(\"world\"))))" \
+  '#val ( vlit ( litString ( "hello world" ) ) )'
+
+# --- EDelay / EForce ---
+# delay(42) is a thunk; force(delay(42)) => 42
+checkFull "eval: delay creates thunk" \
+  'eval(EDelay(ELit(litInt(42))))' \
+  'thunk ('
+
+check "eval: force of delay evaluates" \
+  'eval(EForce(EDelay(ELit(litInt(42)))))' \
+  '#val ( vlit ( litInt ( 42 ) ) )'
+
+# force(99) on a non-thunk is identity
+check "eval: force of non-thunk is identity" \
+  'eval(EForce(ELit(litInt(99))))' \
+  '#val ( vlit ( litInt ( 99 ) ) )'
+
+# --- Type erasure ---
+check "eval: type application is erased" \
+  "eval(ETypeApp(ELit(litInt(5)), $T))" \
+  '#val ( vlit ( litInt ( 5 ) ) )'
+
+check "eval: type lambda is erased" \
+  "eval(ETypeLam(typevar(name(\"a\",0), KValue, many), ELit(litInt(5))))" \
+  '#val ( vlit ( litInt ( 5 ) ) )'
+
+# --- Perceus ops at runtime ---
+check "eval: retain is identity at runtime" \
+  'eval(ERetain(ELit(litInt(7))))' \
+  '#val ( vlit ( litInt ( 7 ) ) )'
+
+checkFull "eval: drop returns unit" \
+  'eval(EDrop(ELit(litInt(7))))' \
+  'unitVal'
+
+# --- Recursion: factorial via letrec-style (self-application) ---
+# We encode factorial using the fixpoint combinator approach:
+# let fact = \self -> \n ->
+#   case n of
+#     0 -> 1
+#     _ -> n * self(self)(n - 1)
+# in fact(fact)(5)  =>  120
+#
+# This is a complex test, so we use a multi-line variable for clarity.
+FACT_BODY="ECase(EVar(name(\"n\",0)), branch(PatLit(litInt(0)), noGuard, ELit(litInt(1))) ; branch(PatWild($T), noGuard, EApp(ECon($TIMES), EVar(name(\"n\",0)), EApp(EApp(EVar(name(\"self\",0)), EVar(name(\"self\",0))), EApp(ECon($MINUS), EVar(name(\"n\",0)), ELit(litInt(1)))))))"
+FACT_LAM="ELam(param(name(\"self\",0), $T), ELam(param(name(\"n\",0), $T), $FACT_BODY))"
+FACT_PROG="eval(ELet(bind(name(\"fact\",0), $T, $FACT_LAM, defFun), EApp(EApp(EVar(name(\"fact\",0)), EVar(name(\"fact\",0))), ELit(litInt(5)))))"
+
+check "eval: factorial(5) = 120 via self-application" \
+  "$FACT_PROG" \
+  '#val ( vlit ( litInt ( 120 ) ) )'
+
+echo ""
 echo "============================================================"
 echo "=== Bridge Translation Properties ==="
 echo "============================================================"

@@ -4,10 +4,12 @@
 // 1. Abstract syntax (mirrors src/Frankenstein/Core/Types.hs)
 // 2. Typing rules
 // 3. Perceus reference counting rewrite theory
+// 4. Operational semantics / reference interpreter (ORGAN-IR-EVAL)
 //
 // Usage:
 //   kompile organ-ir.k --backend llvm
 //   krun -cPGM='typeOf(ELit(litInt(42)))' --definition organ-ir-kompiled
+//   krun -cPGM='eval(ELit(litInt(42)))' --definition organ-ir-kompiled
 
 // =================================================================
 // Module 1: SYNTAX — sorts and productions for the IR
@@ -141,9 +143,22 @@ module ORGAN-IR-TYPING
   imports ORGAN-IR-SYNTAX
   imports MAP
   imports SET
+  imports LIST
   imports BOOL
   imports INT
+  imports FLOAT
   imports STRING
+
+  // --- Configuration (shared by TYPING and EVAL) ---
+  configuration
+    <k> $PGM:KItem </k>
+    <typeEnv> .Map </typeEnv>
+    <conEnv>  .Map </conEnv>
+    <currentEffect> effectEmpty </currentEffect>
+    <store> .Map </store>
+    <heap> .Map </heap>
+    <nextAddr> 0 </nextAddr>
+    <effectStack> .List </effectStack>
 
   // --- Typing judgment ---
   syntax KItem ::= typeOf(Expr)              [symbol(typeOf)]
@@ -151,13 +166,6 @@ module ORGAN-IR-TYPING
                   | "#ok"                      [symbol(ok)]
                   | "#error" "(" String ")"    [symbol(typeError)]
                   | "#dropResult"              [symbol(dropResult)]
-
-  // --- Configuration ---
-  configuration
-    <k> $PGM:KItem </k>
-    <typeEnv> .Map </typeEnv>
-    <conEnv>  .Map </conEnv>
-    <currentEffect> effectEmpty </currentEffect>
 
   // --- Well-known type names ---
   syntax QName ::= intQName()    [function, symbol(intQName)]
@@ -669,10 +677,406 @@ module PERCEUS
 endmodule
 
 // =================================================================
-// Module 4: MAIN — the top-level module that ties everything together
+// Module 4: EVAL — operational semantics (reference interpreter)
+//
+// Store-based (environment) approach: variable bindings live in a
+// <store> cell, heap-allocated constructed values live in a <heap>
+// cell with reference counts, and algebraic effect handlers live in
+// an <effectStack> cell.
+//
+// Evaluation is strict in function position and arguments (call-by-value),
+// except EDelay which suspends evaluation and EForce which resumes it.
+//
+// Entry point: eval(Expr) — wraps an expression for evaluation.
+// =================================================================
+
+module ORGAN-IR-EVAL
+  imports ORGAN-IR-TYPING
+  imports LIST
+
+  // ---------------------------------------------------------------
+  // Values — normal forms of evaluation
+  // ---------------------------------------------------------------
+
+  syntax Value ::= vlit(Lit)                           [symbol(vlit)]
+                  | vcon(QName)                          [symbol(vcon)]
+                  | closure(Map, ParamList, Expr)         [symbol(closure)]
+                  | thunk(Expr, Map)                      [symbol(thunk)]
+                  | thunkVal(Value)                       [symbol(thunkVal)]
+                  | conVal(QName, ValueList)               [symbol(conVal)]
+                  | unitVal()                              [symbol(unitVal)]
+
+  syntax ValueList ::= List{Value, ":"}
+
+  // ---------------------------------------------------------------
+  // Evaluation entry point and result wrapper
+  // ---------------------------------------------------------------
+
+  syntax KItem ::= eval(Expr)      [symbol(eval)]
+                  | "#val" "(" Value ")" [symbol(valResult)]
+
+  // ---------------------------------------------------------------
+  // Continuations — frames pushed onto K to sequence evaluation
+  // ---------------------------------------------------------------
+
+  syntax KItem ::= evalAndApply(ExprList, Map)                     [symbol(evalAndApply)]
+                  | applyTo(ValueList, ExprList, Map)               [symbol(applyTo)]
+                  | argDone(ValueList, ExprList, Map)                [symbol(argDone)]
+                  | doApplyFun(Value)                                [symbol(doApplyFun)]
+                  | doApply2(Value, ValueList)                       [symbol(doApply2)]
+                  | evalLetBind(Name, BGList, Expr, Map)             [symbol(evalLetBind)]
+                  | evalCase(BranchList, Map)                        [symbol(evalCase)]
+                  | evalForce(Map)                                   [symbol(evalForce)]
+                  | evalRetainK()                                    [symbol(evalRetainK)]
+                  | evalDropK()                                      [symbol(evalDropK)]
+                  | evalReleaseK()                                   [symbol(evalReleaseK)]
+                  | evalReuseK(Expr, Map)                            [symbol(evalReuseK)]
+                  | evalHandlerDone(EffectRow, Expr, Map)             [symbol(evalHandlerDone)]
+                  | evalBodyDone(EffectRow, Map)                     [symbol(evalBodyDone)]
+                  | matchBranches(Value, BranchList, Map)            [symbol(matchBranches)]
+
+  // ---------------------------------------------------------------
+  // 1. Literal evaluation — already a value
+  // ---------------------------------------------------------------
+
+  rule <k> eval(ELit(L)) => #val(vlit(L)) ...</k>
+
+  // ---------------------------------------------------------------
+  // 2. Variable lookup
+  // ---------------------------------------------------------------
+
+  rule <k> eval(EVar(N)) => #val(V) ...</k>
+       <store>... N |-> V:Value ...</store>
+
+  // ---------------------------------------------------------------
+  // 3. Constructor — unapplied constructor is a value
+  // ---------------------------------------------------------------
+
+  rule <k> eval(ECon(QN)) => #val(vcon(QN)) ...</k>
+
+  // ---------------------------------------------------------------
+  // 4. Lambda — capture current store as closure
+  // ---------------------------------------------------------------
+
+  rule <k> eval(ELam(Ps, Body)) => #val(closure(Store, Ps, Body)) ...</k>
+       <store> Store </store>
+
+  // ---------------------------------------------------------------
+  // 5. Application — evaluate function, then args left-to-right
+  //
+  // eval(EApp(F, Args))
+  //   → eval(F) ~> evalAndApply(Args, SavedEnv)
+  //
+  // #val(FunVal) ~> evalAndApply(Args, Env)
+  //   → applyTo(.ValueList, Args, Env) ~> doApplyFun(FunVal)
+  //
+  // applyTo collects evaluated args into a ValueList.
+  // When done, doApplyFun dispatches to doApply2(FunVal, Vs).
+  // ---------------------------------------------------------------
+
+  rule <k> eval(EApp(Fun, Args))
+           => eval(Fun) ~> evalAndApply(Args, Store) ...</k>
+       <store> Store </store>
+
+  // Function value ready: begin evaluating arguments
+  rule <k> #val(FunVal) ~> evalAndApply(Args, Env)
+           => applyTo(.ValueList, Args, Env) ~> doApplyFun(FunVal) ...</k>
+       <store> _ => Env </store>
+
+  // All arguments evaluated: dispatch
+  rule <k> applyTo(Vs, .ExprList, _Env) ~> doApplyFun(FunVal)
+           => doApply2(FunVal, Vs) ...</k>
+
+  // More arguments: evaluate next one
+  rule <k> applyTo(Vs, (E:Expr , Es:ExprList), Env)
+           => eval(E) ~> argDone(Vs, Es, Env) ...</k>
+       <store> _ => Env </store>
+
+  // Argument evaluated: append to value list, continue with rest
+  rule <k> #val(V) ~> argDone(Vs, Es, Env)
+           => applyTo(appendValue(Vs, V), Es, Env) ...</k>
+       <store> _ => Env </store>
+
+  // ---------------------------------------------------------------
+  // Function application dispatch
+  // ---------------------------------------------------------------
+
+  // Apply closure: bind params, evaluate body
+  rule <k> doApply2(closure(CEnv, Ps, Body), Vs)
+           => eval(Body) ...</k>
+       <store> _ => bindParams(Ps, Vs, CEnv) </store>
+
+  // Apply builtin: dispatch to applyBuiltin (must precede general vcon rule)
+  rule <k> doApply2(vcon(qname("builtin", name(Op, 0))), Vs)
+           => #val(applyBuiltin(Op, Vs)) ...</k>
+
+  // Apply constructor: build constructed value
+  rule <k> doApply2(vcon(QN), Vs) => #val(conVal(QN, Vs)) ...</k>
+    [owise]
+
+  // No-arg application: just return the function value
+  rule <k> doApply2(V, .ValueList) => #val(V) ...</k>
+    requires notBool isClosureF(V) andBool notBool isVconF(V)
+
+  syntax Bool ::= isClosureF(Value) [function, symbol(isClosureF)]
+  rule isClosureF(closure(_, _, _)) => true
+  rule isClosureF(_) => false [owise]
+
+  syntax Bool ::= isVconF(Value) [function, symbol(isVconF)]
+  rule isVconF(vcon(_)) => true
+  rule isVconF(_) => false [owise]
+
+  // ---------------------------------------------------------------
+  // 6. Let bindings
+  //
+  // eval(ELet((bind(X,T,Rhs,S)) ;; Bgs, Body))
+  //   → eval(Rhs) ~> evalLetBind(X, Bgs, Body, SavedEnv)
+  //
+  // #val(V) ~> evalLetBind(X, .BGList, Body, Env)
+  //   → eval(Body) with Env[X <- V]
+  //
+  // #val(V) ~> evalLetBind(X, MoreBgs, Body, Env)
+  //   → eval(ELet(MoreBgs, Body)) with Env[X <- V]
+  // ---------------------------------------------------------------
+
+  rule <k> eval(ELet( (bind(X, _T, Rhs, _S) , .BindGroup) ;; Bgs:BGList, Body))
+           => eval(Rhs) ~> evalLetBind(X, Bgs, Body, Store) ...</k>
+       <store> Store </store>
+
+  rule <k> #val(V) ~> evalLetBind(X, .BGList, Body, Env)
+           => eval(Body) ...</k>
+       <store> _ => Env [ X <- V ] </store>
+
+  rule <k> #val(V) ~> evalLetBind(X, (Bg2:BindGroup ;; Bgs:BGList), Body, Env)
+           => eval(ELet(Bg2 ;; Bgs, Body)) ...</k>
+       <store> _ => Env [ X <- V ] </store>
+
+  rule <k> eval(ELet(.BGList, Body)) => eval(Body) ...</k>
+
+  // ---------------------------------------------------------------
+  // 7. Case expressions — evaluate scrutinee then pattern-match
+  // ---------------------------------------------------------------
+
+  rule <k> eval(ECase(Scrut, Branches))
+           => eval(Scrut) ~> evalCase(Branches, Store) ...</k>
+       <store> Store </store>
+
+  rule <k> #val(V) ~> evalCase(Branches, Env)
+           => matchBranches(V, Branches, Env) ...</k>
+
+  // --- PatLit: match literal equality ---
+  rule <k> matchBranches(vlit(L), (branch(PatLit(L), noGuard, Body) ; _Bs), Env)
+           => eval(Body) ...</k>
+       <store> _ => Env </store>
+
+  // PatLit: no match, try next
+  rule <k> matchBranches(vlit(L1), (branch(PatLit(_L2), _G, _Body) ; Bs), Env)
+           => matchBranches(vlit(L1), Bs, Env) ...</k>
+    [owise]
+
+  // --- PatVar: always matches, binds variable ---
+  rule <k> matchBranches(V:Value, (branch(PatVar(N, _T), noGuard, Body) ; _Bs), Env)
+           => eval(Body) ...</k>
+       <store> _ => Env [ N <- V ] </store>
+
+  // --- PatWild: always matches, no binding ---
+  rule <k> matchBranches(_V:Value, (branch(PatWild(_T), noGuard, Body) ; _Bs), Env)
+           => eval(Body) ...</k>
+       <store> _ => Env </store>
+
+  // --- PatCon: match constructor tag, bind fields ---
+  rule <k> matchBranches(conVal(QN, Vs), (branch(PatCon(QN, Pats), noGuard, Body) ; _Bs), Env)
+           => eval(Body) ...</k>
+       <store> _ => bindPatterns(Pats, Vs, Env) </store>
+
+  // PatCon: wrong constructor
+  rule <k> matchBranches(conVal(QN1, Vs), (branch(PatCon(_QN2, _Pats), _G, _Body) ; Bs), Env)
+           => matchBranches(conVal(QN1, Vs), Bs, Env) ...</k>
+    [owise]
+
+  // PatCon on non-constructor: skip
+  rule <k> matchBranches(V:Value, (branch(PatCon(_, _), _G, _Body) ; Bs), Env)
+           => matchBranches(V, Bs, Env) ...</k>
+    requires notBool isConValF(V)
+
+  // PatLit on non-literal: skip
+  rule <k> matchBranches(V:Value, (branch(PatLit(_), _G, _Body) ; Bs), Env)
+           => matchBranches(V, Bs, Env) ...</k>
+    requires notBool isVlitF(V)
+
+  syntax Bool ::= isConValF(Value) [function, symbol(isConValF)]
+  rule isConValF(conVal(_, _)) => true
+  rule isConValF(_) => false [owise]
+
+  syntax Bool ::= isVlitF(Value) [function, symbol(isVlitF)]
+  rule isVlitF(vlit(_)) => true
+  rule isVlitF(_) => false [owise]
+
+  // ---------------------------------------------------------------
+  // 8. EDelay / EForce — thunk semantics
+  // ---------------------------------------------------------------
+
+  // EDelay: capture expression + environment as a thunk (do NOT evaluate)
+  rule <k> eval(EDelay(E)) => #val(thunk(E, Store)) ...</k>
+       <store> Store </store>
+
+  // EForce: evaluate the inner expression, then inspect result
+  rule <k> eval(EForce(E)) => eval(E) ~> evalForce(Store) ...</k>
+       <store> Store </store>
+
+  // Force a thunk: evaluate the suspended expression in its captured env
+  rule <k> #val(thunk(E, ThunkEnv)) ~> evalForce(_Env)
+           => eval(E) ...</k>
+       <store> _ => ThunkEnv </store>
+
+  // Force an already-memoized thunk value
+  rule <k> #val(thunkVal(V)) ~> evalForce(_Env) => #val(V) ...</k>
+
+  // Force a non-thunk: identity (strict value forced is itself)
+  rule <k> #val(V) ~> evalForce(Env) => #val(V) ...</k>
+       <store> _ => Env </store>
+    requires notBool isThunkF(V) andBool notBool isThunkValF(V)
+
+  syntax Bool ::= isThunkF(Value) [function, symbol(isThunkF)]
+  rule isThunkF(thunk(_, _)) => true
+  rule isThunkF(_) => false [owise]
+
+  syntax Bool ::= isThunkValF(Value) [function, symbol(isThunkValF)]
+  rule isThunkValF(thunkVal(_)) => true
+  rule isThunkValF(_) => false [owise]
+
+  // ---------------------------------------------------------------
+  // 9. Type erasure — runtime ignores types
+  // ---------------------------------------------------------------
+
+  rule <k> eval(ETypeApp(E, _Ts)) => eval(E) ...</k>
+  rule <k> eval(ETypeLam(_Tvs, E)) => eval(E) ...</k>
+
+  // ---------------------------------------------------------------
+  // 10. Perceus operations at runtime
+  //
+  // In the reference interpreter, refcount ops are no-ops:
+  //   retain(e) → eval e, return same value
+  //   drop(e)   → eval e, return unitVal
+  //   release(e)→ eval e, return unitVal
+  //   reuse(e1,e2) → eval both, return e2's value
+  // ---------------------------------------------------------------
+
+  rule <k> eval(ERetain(E)) => eval(E) ~> evalRetainK() ...</k>
+  rule <k> #val(V) ~> evalRetainK() => #val(V) ...</k>
+
+  rule <k> eval(EDrop(E)) => eval(E) ~> evalDropK() ...</k>
+  rule <k> #val(_V) ~> evalDropK() => #val(unitVal()) ...</k>
+
+  rule <k> eval(ERelease(E)) => eval(E) ~> evalReleaseK() ...</k>
+  rule <k> #val(_V) ~> evalReleaseK() => #val(unitVal()) ...</k>
+
+  rule <k> eval(EReuse(E1, E2)) => eval(E1) ~> evalReuseK(E2, Store) ...</k>
+       <store> Store </store>
+  rule <k> #val(_V1) ~> evalReuseK(E2, Env)
+           => eval(E2) ...</k>
+       <store> _ => Env </store>
+
+  // ---------------------------------------------------------------
+  // 11. Effect operations (simplified)
+  //
+  // EHandle: push handler onto stack, evaluate body, pop on return.
+  // EPerform: placeholder — full delimited continuation capture
+  //           requires CPS, which is Phase 2c work.
+  // ---------------------------------------------------------------
+
+  rule <k> eval(EHandle(Eff, Handler, Body))
+           => eval(Handler) ~> evalHandlerDone(Eff, Body, Store) ...</k>
+       <store> Store </store>
+
+  // Handler evaluated to a value; push it onto effect stack, evaluate body
+  rule <k> #val(HandlerVal) ~> evalHandlerDone(Eff, Body, Env)
+           => eval(Body) ~> evalBodyDone(Eff, Env) ...</k>
+       <store> _ => Env </store>
+       <effectStack> ES => ListItem(HandlerVal) ES </effectStack>
+
+  // Body returns: pop handler, return value
+  rule <k> #val(V) ~> evalBodyDone(_Eff, Env) => #val(V) ...</k>
+       <store> _ => Env </store>
+       <effectStack> ListItem(_) ES => ES </effectStack>
+
+  // EPerform: stub — returns unit
+  rule <k> eval(EPerform(_QN, _Args)) => #val(unitVal()) ...</k>
+
+  // ---------------------------------------------------------------
+  // 12. Builtin arithmetic and string operations
+  //
+  // Builtins are triggered by applying a constructor with the
+  // special module "builtin":
+  //   EApp(ECon(qname("builtin", name("+", 0))), Args)
+  // ---------------------------------------------------------------
+
+  syntax Value ::= applyBuiltin(String, ValueList) [function, symbol(applyBuiltin)]
+
+  rule applyBuiltin("+", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => vlit(litInt(A +Int B))
+  rule applyBuiltin("-", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => vlit(litInt(A -Int B))
+  rule applyBuiltin("*", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => vlit(litInt(A *Int B))
+  rule applyBuiltin("/", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => vlit(litInt(A /Int B))
+    requires B =/=Int 0
+  rule applyBuiltin("mod", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => vlit(litInt(A modInt B))
+    requires B =/=Int 0
+  rule applyBuiltin("==", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => conVal(boolQN(A ==Int B), .ValueList)
+  rule applyBuiltin("<", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => conVal(boolQN(A <Int B), .ValueList)
+  rule applyBuiltin(">", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => conVal(boolQN(A >Int B), .ValueList)
+  rule applyBuiltin("<=", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => conVal(boolQN(A <=Int B), .ValueList)
+  rule applyBuiltin(">=", vlit(litInt(A)) : vlit(litInt(B)) : .ValueList)
+    => conVal(boolQN(A >=Int B), .ValueList)
+  rule applyBuiltin("negate", vlit(litInt(A)) : .ValueList)
+    => vlit(litInt(0 -Int A))
+  rule applyBuiltin("++", vlit(litString(A)) : vlit(litString(B)) : .ValueList)
+    => vlit(litString(A +String B))
+
+  syntax QName ::= boolQN(Bool) [function, symbol(boolQN)]
+  rule boolQN(true)  => qname("std/core/types", name("True", 0))
+  rule boolQN(false) => qname("std/core/types", name("False", 0))
+
+  // ---------------------------------------------------------------
+  // Helper functions
+  // ---------------------------------------------------------------
+
+  // Bind parameters to values, extending an environment
+  syntax Map ::= bindParams(ParamList, ValueList, Map) [function, symbol(bindParams)]
+  rule bindParams(.ParamList, _, Env) => Env
+  rule bindParams((param(N, _T) , Ps:ParamList), (V:Value : Vs:ValueList), Env)
+    => bindParams(Ps, Vs, Env [ N <- V ])
+  rule bindParams(_, .ValueList, Env) => Env
+
+  // Bind pattern variables to constructor fields
+  syntax Map ::= bindPatterns(PatternList, ValueList, Map) [function, symbol(bindPatterns)]
+  rule bindPatterns(.PatternList, _, Env) => Env
+  rule bindPatterns((PatVar(N, _T) , Ps:PatternList), (V:Value : Vs:ValueList), Env)
+    => bindPatterns(Ps, Vs, Env [ N <- V ])
+  rule bindPatterns((PatWild(_T) , Ps:PatternList), (_V:Value : Vs:ValueList), Env)
+    => bindPatterns(Ps, Vs, Env)
+  rule bindPatterns(_, .ValueList, Env) => Env
+
+  // Append a value to the end of a ValueList
+  syntax ValueList ::= appendValue(ValueList, Value) [function, symbol(appendValue)]
+  rule appendValue(.ValueList, V) => V : .ValueList
+  rule appendValue((V1:Value : Vs:ValueList), V2) => V1 : appendValue(Vs, V2)
+
+endmodule
+
+// =================================================================
+// Module 5: MAIN — the top-level module that ties everything together
 // =================================================================
 
 module ORGAN-IR
   imports ORGAN-IR-TYPING
   imports PERCEUS
+  imports ORGAN-IR-EVAL
 endmodule

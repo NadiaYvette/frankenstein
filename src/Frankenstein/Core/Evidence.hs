@@ -20,6 +20,8 @@
 module Frankenstein.Core.Evidence
   ( evidencePass
   , evidencePassDef
+  , collectGlobalEffects
+  , evidencePassGlobal
   ) where
 
 import Frankenstein.Core.Types
@@ -51,12 +53,51 @@ insertEvidence eff evName s = s { scopeEvidence = Map.insert eff evName (scopeEv
 insertOp :: Text -> Text -> Name -> Scope -> Scope
 insertOp eff op opVarName s = s { scopeOps = Map.insert (eff, op) opVarName (scopeOps s) }
 
+-- | Build a global effect registry from all effect declarations in a program.
+-- This maps each effect's flattened name to its list of operation declarations,
+-- enabling cross-module effect resolution after the linker merges modules.
+collectGlobalEffects :: Program -> Map Text [OpDecl]
+collectGlobalEffects prog =
+  Map.fromList
+    [ (qnameModule (effectName ed) <> nameText (qnameName (effectName ed)), effectOps ed)
+    | ed <- progEffects prog
+    ]
+
 -- | Run the evidence-passing translation on an entire program.
 -- After this pass, EHandle and EPerform are eliminated.
 evidencePass :: Program -> Program
 evidencePass prog = prog
   { progDefs = map (evidencePassDef (progEffects prog)) (progDefs prog)
   }
+
+-- | Run the evidence-passing translation using a global effect registry.
+-- Use this after the linker has merged multiple programs, so that effects
+-- declared in one module can be handled/performed in another.
+evidencePassGlobal :: Map Text [OpDecl] -> Program -> Program
+evidencePassGlobal globalEffects prog =
+  let -- Convert the global registry back to [EffectDecl] for the existing machinery,
+      -- merging with any local effect declarations.
+      globalDecls =
+        [ EffectDecl
+            { effectName = QName "" (Name effName 0)
+            , effectParams = []
+            , effectOps = ops
+            }
+        | (effName, ops) <- Map.toList globalEffects
+        ]
+      -- Combine: global registry takes precedence, then local declarations
+      allEffects = globalDecls ++ progEffects prog
+      -- Deduplicate by flattened name (keep first occurrence = global)
+      seen = go Map.empty allEffects
+      go acc [] = acc
+      go acc (ed:rest) =
+        let n = qnameModule (effectName ed) <> nameText (qnameName (effectName ed))
+        in if Map.member n acc then go acc rest
+           else go (Map.insert n ed acc) rest
+      deduped = Map.elems seen
+  in prog
+    { progDefs = map (evidencePassDef deduped) (progDefs prog)
+    }
 
 -- | Transform a single definition
 evidencePassDef :: [EffectDecl] -> Def -> Def

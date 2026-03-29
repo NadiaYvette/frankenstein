@@ -46,10 +46,11 @@ defaultEmitConfig = EmitConfig
 
 -- Emission state: tracks SSA counter and collected top-level functions
 data EmitState = EmitState
-  { esCounter   :: !Int
-  , esLiftedFns :: ![Text]  -- accumulated lifted lambda functions
-  , esTypeEnv    :: !(Map Text Text)  -- SSA name -> MLIR type
-  , esStringLits :: ![(Text, Text)]   -- global name -> string content
+  { esCounter       :: !Int
+  , esLiftedFns     :: ![Text]  -- accumulated lifted lambda functions
+  , esTypeEnv       :: !(Map Text Text)  -- SSA name -> MLIR type
+  , esStringLits    :: ![(Text, Text)]   -- global name -> string content
+  , esEvidenceScope :: !(Map Text Text)  -- effect name -> evidence SSA variable name
   }
 
 type Emit a = State EmitState a
@@ -97,7 +98,7 @@ emitProgramText prog =
                         then d { defName = QName "" (Name "_frankenstein_main" 99) }
                         else d) defs
         else defs
-      initState = EmitState 0 [] Map.empty []
+      initState = EmitState 0 [] Map.empty [] Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -141,6 +142,12 @@ emitProgramText prog =
     , "  // Thunk runtime declarations (lazy evaluation)"
     , "  func.func private @kk_thunk_create(i64) -> i64"
     , "  func.func private @kk_thunk_force(i64) -> i64"
+    , ""
+    , "  // Evidence vector runtime declarations (algebraic effects)"
+    , "  func.func private @kk_evv_create(i64) -> i64"
+    , "  func.func private @kk_evv_set(i64, i64, i64) -> ()"
+    , "  func.func private @kk_evv_get(i64, i64) -> i64"
+    , "  func.func private @kk_unhandled_effect() -> i64"
     , ""
     , "  // Lifted functions"
     , liftedFns
@@ -284,6 +291,15 @@ emitExpr (EApp (EVar fn) [a, b])
   | nameText fn == ">" || nameText fn == "gt"  = emitCmpOp "sgt" a b
   | nameText fn == "<=" || nameText fn == "le" = emitCmpOp "sle" a b
   | nameText fn == ">=" || nameText fn == "ge" = emitCmpOp "sge" a b
+
+-- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)
+emitExpr (EApp (EVar fn) [evvArg, idxArg])
+  | nameText fn == "evv_select" = do
+      (evvOps, evvName) <- emitExpr evvArg
+      (idxOps, idxName) <- emitExpr idxArg
+      resultName <- freshName "v"
+      let callOp = "%" <> resultName <> " = func.call @kk_evv_get(%" <> evvName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
+      pure (evvOps ++ idxOps ++ [callOp], resultName)
 
 emitExpr (EApp (EVar fn) args) = do
   -- General function call
@@ -496,17 +512,52 @@ emitExpr (EForce e) = do
 emitExpr (ETypeApp e _) = emitExpr e
 emitExpr (ETypeLam _ e) = emitExpr e
 
--- Effect operations: emit as function call placeholder
+-- Effect operations: after the evidence pass, EPerform/EHandle should be
+-- desugared to plain ELet/EApp. These cases handle any residual nodes
+-- (e.g. if the evidence pass didn't fully desugar).
+
 emitExpr (EPerform qn args) = do
+  -- Check if we have evidence in scope for this effect
+  let effName = qnameModule qn
+  evScope <- gets esEvidenceScope
   argResults <- mapM emitExpr args
   let allOps = concatMap fst argResults
-  name <- freshName "v"
-  pure (allOps ++ ["// perform " <> nameText (qnameName qn),
-                    "%" <> name <> " = arith.constant 0 : i64  // effect operation stub"], name)
+      argNames = map snd argResults
+  case Map.lookup effName evScope of
+    Just evVarName -> do
+      -- Evidence is in scope: call indirectly through the evidence variable.
+      -- The evidence variable holds a function pointer (as i64).
+      fptrName <- freshName "v"
+      resultName <- freshName "v"
+      let argList = T.intercalate ", " ["%" <> n | n <- argNames]
+          argTys = T.intercalate ", " (replicate (length argNames) "i64")
+          -- Convert evidence i64 to function pointer, then call indirectly
+          ops = [ "// perform " <> nameText (qnameName qn) <> " via evidence"
+                , "%" <> fptrName <> " = llvm.inttoptr %" <> evVarName <> " : i64 to !llvm.ptr"
+                , "%" <> resultName <> " = llvm.call %" <> fptrName
+                    <> "(" <> argList <> ") : !llvm.ptr, (" <> argTys <> ") -> i64"
+                ]
+      pure (allOps ++ ops, resultName)
+    Nothing -> do
+      -- No handler in scope: call kk_unhandled_effect (abort)
+      resultName <- freshName "v"
+      pure (allOps ++
+            [ "// perform " <> nameText (qnameName qn) <> " -- no handler in scope"
+            , "%" <> resultName <> " = func.call @kk_unhandled_effect() : () -> i64"
+            ], resultName)
 
-emitExpr (EHandle _ _handler body) = do
-  -- For now, just emit the body (ignore handler)
-  emitExpr body
+emitExpr (EHandle effRow handler body) = do
+  -- 1. Emit the handler expression (a lambda or function reference)
+  (handlerOps, handlerName) <- emitExpr handler
+  -- 2. Register the handler as evidence for this effect
+  let effName = effectRowNameEmit effRow
+  oldScope <- gets esEvidenceScope
+  modify (\s -> s { esEvidenceScope = Map.insert effName handlerName (esEvidenceScope s) })
+  -- 3. Emit the body with evidence in scope
+  (bodyOps, bodyName) <- emitExpr body
+  -- 4. Restore the old evidence scope
+  modify (\s -> s { esEvidenceScope = oldScope })
+  pure (handlerOps ++ bodyOps, bodyName)
 
 -- Catch-all removed: all Expr constructors are handled above
 
@@ -918,6 +969,12 @@ typeToMlir (TForall _ body) = typeToMlir body
 typeToMlir (TApp _ _) = "i64"
 typeToMlir (TVar _) = "i64"
 typeToMlir (TSyn _ _ expansion) = typeToMlir expansion
+
+-- | Extract the primary effect name from an effect row (for emitter use).
+effectRowNameEmit :: EffectRow -> Text
+effectRowNameEmit (EffectRowExtend qn _) = qnameModule qn <> nameText (qnameName qn)
+effectRowNameEmit (EffectRowVar tv)       = nameText (tvName tv)
+effectRowNameEmit EffectRowEmpty          = "pure"
 
 -- Sanitize names for MLIR (replace special chars)
 sanitizeName :: Text -> Text

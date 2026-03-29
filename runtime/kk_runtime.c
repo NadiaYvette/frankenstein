@@ -102,6 +102,39 @@ void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     fields[idx] = value;
 }
 
+/* Evidence vector operations for algebraic effects
+ *
+ * An evidence vector holds function pointers (as i64) to handler
+ * operations for a particular effect.  It is allocated as a regular
+ * boxed constructor with tag 0xEVV0.
+ */
+
+#include <stdio.h>
+
+#define KK_EVV_TAG 0x45565630  /* "EVV0" */
+
+/* Create an evidence vector with nops operation slots */
+int64_t kk_evv_create(int64_t nops) {
+    return kk_alloc_con(KK_EVV_TAG, nops);
+}
+
+/* Set operation at index idx in the evidence vector */
+void kk_evv_set(int64_t evv, int64_t idx, int64_t handler_fn) {
+    kk_set_field(evv, idx, handler_fn);
+}
+
+/* Get the operation function pointer at index idx */
+int64_t kk_evv_get(int64_t evv, int64_t idx) {
+    return kk_field(evv, idx);
+}
+
+/* Default handler for unhandled effect operations -- abort with message */
+int64_t kk_unhandled_effect(void) {
+    fprintf(stderr, "frankenstein: unhandled effect operation\n");
+    exit(1);
+    return 0;
+}
+
 /* Thunk support for lazy evaluation (Haskell bridge)
  *
  * Thunk layout (using kk_alloc_con with tag=0xLAZY):

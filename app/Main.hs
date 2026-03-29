@@ -225,6 +225,9 @@ formatLinkError NoMainFunction =
   "Link error: no 'main' function found in any module"
 formatLinkError (MultipleMainFunctions ms) =
   "Link error: 'main' found in multiple modules: " <> T.intercalate ", " ms
+formatLinkError (AmbiguousReference name mods) =
+  "Link error: ambiguous reference '" <> name
+  <> "' defined in multiple modules: " <> T.intercalate ", " mods
 
 printHelp :: IO ()
 printHelp = do

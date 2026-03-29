@@ -50,6 +50,8 @@ import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Data.Text.Encoding.Error (lenientDecode)
 
 -------------------------------------------------------------------------------
 -- Public API
@@ -108,6 +110,11 @@ trExpr (Lit l) = F.ELit (translateLit l)
 
 -- Type application: App f (Type t) => ETypeApp
 trExpr (App f (Type t)) = F.ETypeApp (trExpr f) [translateType t]
+
+-- Detect unpackCString# applied to a string literal: extract the string directly
+trExpr (App (Var v) (Lit (LitString bs)))
+  | getOccString v `elem` ["unpackCString#", "unpackCStringUtf8#"] =
+      F.ELit (F.LitString (TE.decodeUtf8With lenientDecode bs))
 
 -- Regular application: collect args into multi-arg EApp
 trExpr (App f a) =
@@ -202,8 +209,10 @@ translateLit (LitChar c)       = F.LitChar c
 translateLit (LitNumber _ n)   = F.LitInt n
 translateLit (LitFloat r)      = F.LitFloat (fromRational r)
 translateLit (LitDouble r)     = F.LitFloat (fromRational r)
-translateLit (LitString _)     = F.LitString "<bytestring>"
-translateLit _                 = F.LitInt 0  -- LitNullAddr, LitRubbish, LitLabel
+translateLit (LitString bs)    = F.LitString (TE.decodeUtf8With lenientDecode bs)
+translateLit (LitLabel fs _)   = F.LitString (T.pack (unpackFS fs))
+translateLit LitNullAddr       = F.LitInt 0  -- null pointer
+translateLit (LitRubbish _ _)  = F.LitInt 0  -- undefined/bottom placeholder
 
 -------------------------------------------------------------------------------
 -- Names and type helpers

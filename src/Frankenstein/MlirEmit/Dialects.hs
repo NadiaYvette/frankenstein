@@ -20,6 +20,7 @@ module Frankenstein.MlirEmit.Dialects
   , renderModule
   , renderFunc
   , renderOp
+  , renderOps
   ) where
 
 import Data.Text (Text)
@@ -148,8 +149,28 @@ renderOp (KokaRelease v) = "func.call @kk_release(" <> valName v <> ") : (!llvm.
 renderOp (KokaDrop v) = "func.call @kk_drop(" <> valName v <> ") : (!llvm.ptr) -> ()"
 renderOp (KokaReuse ptr tag) = "func.call @kk_reuse(" <> valName ptr <> ", " <> valName tag <> ") : (!llvm.ptr, i32) -> !llvm.ptr"
 renderOp (KokaIsUnique v) = "func.call @kk_is_unique(" <> valName v <> ") : (!llvm.ptr) -> i1"
+renderOp (ScfIf cond thenOps elseOps ty) =
+  "scf.if " <> valName cond <> " -> " <> renderType ty <> " {\n" <>
+  T.unlines (map (\o -> "    " <> renderOp o) thenOps) <>
+  "  } else {\n" <>
+  T.unlines (map (\o -> "    " <> renderOp o) elseOps) <>
+  "  }"
+renderOp (ScfWhile beforeOps afterOps) =
+  "scf.while : () -> () {\n" <>
+  T.unlines (map (\o -> "    " <> renderOp o) beforeOps) <>
+  "  } do {\n" <>
+  T.unlines (map (\o -> "    " <> renderOp o) afterOps) <>
+  "  }"
+renderOp (KokaAlloc v) = "func.call @kk_alloc(" <> valName v <> ") : (i64) -> !llvm.ptr"
+renderOp EvvGet = "func.call @kk_evv_get() : () -> i64"
+renderOp (EvvPush v) = "func.call @kk_evv_push(" <> valName v <> ") : (i64) -> ()"
+renderOp EvvPop = "func.call @kk_evv_pop() : () -> ()"
+renderOp (EvvLookup v) = "func.call @kk_evv_lookup(" <> valName v <> ") : (i64) -> i64"
 renderOp (RawMlir t) = t
-renderOp op = "// TODO: " <> T.pack (show op)
+
+-- | Render a list of MLIR ops as indented lines (alternative to raw Text emission)
+renderOps :: [MlirOp] -> Text
+renderOps = T.unlines . map (\op -> "    " <> renderOp op)
 
 renderType :: MlirType -> Text
 renderType MlirI1 = "i1"

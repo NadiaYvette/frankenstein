@@ -152,11 +152,12 @@ perceusTests = testGroup "Perceus"
       in assertBool "output should contain EDrop for unused binding"
            (containsDrop (mkName "unused") resultExpr)
 
-  , testCase "insertPerceus: does not drop linear let-binding" $
-      -- Linear bindings (from TFun type) should NOT get drops even if unused
-      -- because linear values must be used exactly once (a type error, not a drop).
-      let linearType = TFun [(Linear, intType)] EffectRowEmpty intType
-          bind = Bind (mkName "x") linearType (ELit (LitInt 42)) DefVal
+  , testCase "insertPerceus: drops unused binding regardless of arg multiplicity" $
+      -- A binding with a linear-argument function type should still get dropped
+      -- if unused, because the binding's own multiplicity is Many (the Linear
+      -- only applies to the function's parameter, not the binding itself).
+      let linearArgType = TFun [(Linear, intType)] EffectRowEmpty intType
+          bind = Bind (mkName "x") linearArgType (ELit (LitInt 42)) DefVal
           body = ELit (LitInt 0)  -- does not reference "x"
           prog = mkProgram "test" "perceus"
             [ mkFunDef "test" "f"
@@ -165,8 +166,8 @@ perceusTests = testGroup "Perceus"
             ]
           result = insertPerceus prog
           resultExpr = defExpr (head (progDefs result))
-      in assertBool "linear let-binding should NOT get a drop"
-           (not (containsDrop (mkName "x") resultExpr))
+      in assertBool "unused binding should get a drop even with linear arg type"
+           (containsDrop (mkName "x") resultExpr)
 
   , testCase "insertPerceus: preserves used bindings" $
       let bind = Bind (mkName "y") intType (ELit (LitInt 5)) DefVal

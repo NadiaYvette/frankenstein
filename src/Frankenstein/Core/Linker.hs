@@ -9,6 +9,9 @@
 --   2. Cross-references between modules use qualified names
 --   3. Duplicate definitions (same QName) are flagged as errors
 --   4. A "main" function is located across all modules to serve as entry point
+--   5. After merging, all EVar/ECon references are rewritten so that
+--      unqualified call sites resolve to the correct module-qualified
+--      definition.  This makes multi-file compilation work end-to-end.
 --
 -- After merging, cross-module validation detects:
 --   - Undefined symbols (referenced but not defined or primitive)
@@ -37,6 +40,7 @@ data LinkError
   = DuplicateDefinition QName Text Text  -- ^ name, module1, module2
   | NoMainFunction                        -- ^ No 'main' found in any module
   | MultipleMainFunctions [Text]          -- ^ 'main' in multiple modules
+  | AmbiguousReference Text [Text]        -- ^ unqualified name, list of modules
   deriving (Show, Eq)
 
 -- | Result of linking
@@ -60,19 +64,26 @@ linkPrograms = linkProgramsWith True
 linkProgramsWith :: Bool -> [Program] -> Either [LinkError] LinkResult
 linkProgramsWith _requireMain [] = Left [NoMainFunction]
 linkProgramsWith requireMain [p] =
-  let valWarns = validateProgram p
-  in case findMain [p] of
-    Right mainMod -> Right LinkResult
-      { lrProgram = p
-      , lrWarnings = valWarns
-      , lrMainModule = mainMod
-      }
-    Left _ | not requireMain -> Right LinkResult
-      { lrProgram = p
-      , lrWarnings = "No main function found" : valWarns
-      , lrMainModule = qnameToText (progName p)
-      }
-    Left err -> Left [err]
+  -- Even for a single program, rewrite names for consistency so that
+  -- qualified definitions are reachable from unqualified EVar sites.
+  let (rwDefs, rwData, rwWarns, rwErrs) =
+        rewriteNames (progDefs p) (progData p)
+      rewritten = p { progDefs = rwDefs, progData = rwData }
+      valWarns = validateProgram rewritten
+  in case rwErrs of
+    (_:_) -> Left rwErrs
+    [] -> case findMain [p] of
+      Right mainMod -> Right LinkResult
+        { lrProgram = rewritten
+        , lrWarnings = rwWarns ++ valWarns
+        , lrMainModule = mainMod
+        }
+      Left _ | not requireMain -> Right LinkResult
+        { lrProgram = rewritten
+        , lrWarnings = "No main function found" : rwWarns ++ valWarns
+        , lrMainModule = qnameToText (progName p)
+        }
+      Left err -> Left [err]
 linkProgramsWith requireMain progs =
   let -- Collect and qualify all definitions
       allDefs = concatMap qualifyDefs progs
@@ -90,10 +101,15 @@ linkProgramsWith requireMain progs =
       unifiedName = QName "frankenstein"
                           (Name (T.intercalate "+" modNames) 0)
 
+      -- Rewrite cross-module name references so that EVar/ECon/PatCon
+      -- references match the qualified definition names.
+      (rewrittenDefs, rewrittenData, rewriteWarns, rewriteErrs) =
+        rewriteNames allDefs allData
+
       merged = Program
             { progName    = unifiedName
-            , progDefs    = allDefs
-            , progData    = allData
+            , progDefs    = rewrittenDefs
+            , progData    = rewrittenData
             , progEffects = allEffects
             }
 
@@ -105,10 +121,13 @@ linkProgramsWith requireMain progs =
         , lrMainModule = mainMod
         }
 
-  in case (dupes, mainResult) of
-    ([], Right mainMod) -> mkResult mainMod []
+      allErrors = dupes ++ rewriteErrs
+
+  in case (allErrors, mainResult) of
+    ([], Right mainMod) -> mkResult mainMod rewriteWarns
     ([], Left _) | not requireMain ->
-      mkResult (T.intercalate "+" modNames) ["No main function found"]
+      mkResult (T.intercalate "+" modNames)
+               ("No main function found" : rewriteWarns)
     ([], Left err) -> Left [err]
     (errs, Left err) -> Left (errs ++ [err])
     (errs, _) -> Left errs
@@ -163,6 +182,320 @@ qnameToText :: QName -> Text
 qnameToText qn
   | T.null (qnameModule qn) = nameText (qnameName qn)
   | otherwise = qnameModule qn <> "." <> nameText (qnameName qn)
+
+-------------------------------------------------------------------------------
+-- Cross-module name rewriting
+-------------------------------------------------------------------------------
+
+-- | Mangle a module-qualified name into a flat identifier.
+-- E.g. module "utils", name "helper" -> "utils_helper".
+-- "main" is never mangled (the MLIR emitter expects it verbatim).
+mangleName :: Text -> Text -> Text
+mangleName modName nameT
+  | nameT == "main" = "main"
+  | T.null modName  = nameT
+  | otherwise        = modName <> "_" <> nameT
+
+-- | Symbol table: unqualified name text -> list of (module, mangled-name).
+type SymbolTable = Map Text [(Text, Text)]
+
+-- | Build a symbol table from definitions.
+buildSymbolTable :: [Def] -> SymbolTable
+buildSymbolTable defs =
+  Map.fromListWith (++)
+    [ ( nameText (qnameName (defName d))
+      , [(qnameModule (defName d),
+          mangleName (qnameModule (defName d))
+                     (nameText (qnameName (defName d))))]
+      )
+    | d <- defs
+    ]
+
+-- | Build a constructor symbol table from data declarations.
+buildConTable :: [DataDecl] -> SymbolTable
+buildConTable decls =
+  Map.fromListWith (++)
+    [ ( nameText (qnameName (conName c))
+      , [(qnameModule (conName c),
+          mangleName (qnameModule (conName c))
+                     (nameText (qnameName (conName c))))]
+      )
+    | dd <- decls, c <- dataCons dd
+    ]
+
+-- | Rewrite all definitions so that:
+--   (a) Each definition's name is mangled to include its module prefix.
+--   (b) All EVar references inside expressions are rewritten to use the
+--       mangled name of the target definition.
+--   (c) All ECon/PatCon references are similarly qualified.
+--
+-- Returns (rewritten defs, rewritten data, warnings, errors).
+rewriteNames :: [Def] -> [DataDecl]
+             -> ([Def], [DataDecl], [Text], [LinkError])
+rewriteNames defs dataDecls =
+  let symTab  = buildSymbolTable defs
+      conTab  = buildConTable dataDecls
+
+      -- Mangle definition names themselves
+      mangledDefs = map mangleDef defs
+
+      -- For each def, determine its home module, then rewrite its body
+      (rewrittenDefs, allWarns, allErrs) =
+        foldr rewriteOne ([], [], []) mangledDefs
+
+      rewriteOne d (ds, ws, es) =
+        let homeMod = qnameModule (defName d)
+            (expr', ws', es') = rewriteExpr homeMod symTab conTab (defExpr d)
+            d' = d { defExpr = expr' }
+        in (d' : ds, ws' ++ ws, es' ++ es)
+
+      -- Mangle constructor QNames in data declarations
+      mangledData = map mangleDataDecl dataDecls
+
+  in (rewrittenDefs, mangledData, allWarns, allErrs)
+
+-- | Mangle a single definition's name by baking the module prefix into
+-- the nameText of qnameName.
+mangleDef :: Def -> Def
+mangleDef d =
+  let qn = defName d
+      modN = qnameModule qn
+      unqual = nameText (qnameName qn)
+      mangled = mangleName modN unqual
+  in d { defName = qn { qnameName = (qnameName qn) { nameText = mangled } } }
+
+-- | Mangle constructor names in a data declaration.
+mangleDataDecl :: DataDecl -> DataDecl
+mangleDataDecl dd =
+  dd { dataCons = map mangleConDecl (dataCons dd) }
+
+mangleConDecl :: ConDecl -> ConDecl
+mangleConDecl c =
+  let qn = conName c
+      modN = qnameModule qn
+      unqual = nameText (qnameName qn)
+      mangled = mangleName modN unqual
+  in c { conName = qn { qnameName = (qnameName qn) { nameText = mangled } } }
+
+-- | Resolve an unqualified name against the symbol table.
+-- Prefers the entry from homeMod if there are multiple providers.
+-- Returns (resolved name, warnings, errors).
+resolveName :: Text -> SymbolTable -> Name
+            -> (Name, [Text], [LinkError])
+resolveName homeMod table nm =
+  let unqual = nameText nm
+  in case Map.lookup unqual table of
+    Nothing ->
+      -- Not a known definition -- could be a local variable,
+      -- a lambda parameter, a let binding, or a primitive/runtime name.
+      (nm, [], [])
+    Just [(_, mangled)] ->
+      -- Unique: rewrite unconditionally.
+      (nm { nameText = mangled }, [], [])
+    Just candidates ->
+      -- Multiple providers -- try to pick the one from our home module.
+      case filter (\(m, _) -> m == homeMod) candidates of
+        [(_,mangled)] -> (nm { nameText = mangled }, [], [])
+        [] ->
+          -- None from home module.  If all candidates mangle to the
+          -- same text (same unqualified name, just re-exported), pick any.
+          let mangledNames = nubTexts (map snd candidates)
+          in case mangledNames of
+            [m] -> (nm { nameText = m }, [], [])
+            _   -> (nm, [],
+                    [AmbiguousReference unqual (map fst candidates)])
+        ((_,mangled):_) ->
+          -- Multiple definitions from the same module -- shouldn't happen
+          -- after duplicate checking, but be safe.
+          (nm { nameText = mangled },
+              ["Warning: multiple definitions of '" <> unqual
+                <> "' within module '" <> homeMod <> "'"],
+              [])
+
+-- | Resolve a QName against a symbol table (for ECon / PatCon).
+resolveQName :: Text -> SymbolTable -> QName -> (QName, [Text], [LinkError])
+resolveQName homeMod table qn =
+  let unqual = nameText (qnameName qn)
+  in case Map.lookup unqual table of
+    Nothing -> (qn, [], [])
+    Just [(modN, mangled)] ->
+      ( qn { qnameModule = modN
+           , qnameName = (qnameName qn) { nameText = mangled } }
+      , [], [])
+    Just candidates ->
+      -- Prefer the module already on the QName, then same-module.
+      let preferred
+            | not (T.null (qnameModule qn)) =
+                filter (\(m, _) -> m == qnameModule qn) candidates
+            | otherwise =
+                filter (\(m, _) -> m == homeMod) candidates
+      in case preferred of
+        [(modN, mangled)] ->
+          ( qn { qnameModule = modN
+               , qnameName = (qnameName qn) { nameText = mangled } }
+          , [], [])
+        [] ->
+          let mangledNames = nubTexts (map snd candidates)
+          in case mangledNames of
+            [_] ->
+              let (modN, mangled) = case candidates of
+                    (x:_) -> x
+                    []    -> ("", unqual)  -- unreachable
+              in ( qn { qnameModule = modN
+                       , qnameName = (qnameName qn) { nameText = mangled } }
+                 , [], [])
+            _ -> (qn, [],
+                  [AmbiguousReference unqual (map fst candidates)])
+        ((modN, mangled):_) ->
+          ( qn { qnameModule = modN
+               , qnameName = (qnameName qn) { nameText = mangled } }
+          , [], [])
+
+-- | Rewrite all name references within an expression.
+-- Takes the home module, symbol table for defs, symbol table for
+-- constructors, and returns (rewritten expr, warnings, errors).
+rewriteExpr :: Text -> SymbolTable -> SymbolTable -> Expr
+            -> (Expr, [Text], [LinkError])
+rewriteExpr homeMod symTab conTab = go Set.empty
+  where
+    -- 'locals' tracks names bound by lambda/let/case that should NOT
+    -- be rewritten (they shadow top-level definitions).
+    go locals expr = case expr of
+      EVar n
+        | Set.member (nameText n) locals -> (expr, [], [])
+        | otherwise ->
+            let (n', ws, es) = resolveName homeMod symTab n
+            in (EVar n', ws, es)
+
+      ELit _ -> (expr, [], [])
+
+      ECon qn ->
+        let (qn', ws, es) = resolveQName homeMod conTab qn
+        in (ECon qn', ws, es)
+
+      EApp f args ->
+        let (f', ws1, es1) = go locals f
+            (args', ws2, es2) = goList locals args
+        in (EApp f' args', ws1 ++ ws2, es1 ++ es2)
+
+      ELam params body ->
+        let bound = Set.fromList [nameText n | (n, _) <- params]
+            locals' = Set.union locals bound
+            (body', ws, es) = go locals' body
+        in (ELam params body', ws, es)
+
+      ELet bgs body ->
+        let -- All names bound in this let (visible in all groups + body)
+            bound = Set.fromList
+              [nameText (bindName b) | bg <- bgs, b <- bg]
+            locals' = Set.union locals bound
+            (bgs', ws1, es1) = goBindGroups locals' bgs
+            (body', ws2, es2) = go locals' body
+        in (ELet bgs' body', ws1 ++ ws2, es1 ++ es2)
+
+      ECase scrut branches ->
+        let (scrut', ws1, es1) = go locals scrut
+            (branches', ws2, es2) = goBranches locals branches
+        in (ECase scrut' branches', ws1 ++ ws2, es1 ++ es2)
+
+      ETypeApp e tys ->
+        let (e', ws, es) = go locals e
+        in (ETypeApp e' tys, ws, es)
+
+      ETypeLam tvs e ->
+        let (e', ws, es) = go locals e
+        in (ETypeLam tvs e', ws, es)
+
+      EPerform qn args ->
+        let (args', ws, es) = goList locals args
+        in (EPerform qn args', ws, es)
+
+      EHandle eff handler body ->
+        let (handler', ws1, es1) = go locals handler
+            (body', ws2, es2) = go locals body
+        in (EHandle eff handler' body', ws1 ++ ws2, es1 ++ es2)
+
+      ERetain e ->
+        let (e', ws, es) = go locals e in (ERetain e', ws, es)
+
+      ERelease e ->
+        let (e', ws, es) = go locals e in (ERelease e', ws, es)
+
+      EDrop e ->
+        let (e', ws, es) = go locals e in (EDrop e', ws, es)
+
+      EReuse e1 e2 ->
+        let (e1', ws1, es1) = go locals e1
+            (e2', ws2, es2) = go locals e2
+        in (EReuse e1' e2', ws1 ++ ws2, es1 ++ es2)
+
+      EDelay e ->
+        let (e', ws, es) = go locals e in (EDelay e', ws, es)
+
+      EForce e ->
+        let (e', ws, es) = go locals e in (EForce e', ws, es)
+
+    goList locals exprs =
+      let results = map (go locals) exprs
+      in ( map (\(e,_,_) -> e) results
+         , concatMap (\(_,w,_) -> w) results
+         , concatMap (\(_,_,e) -> e) results
+         )
+
+    goBindGroups locals bgs =
+      let results = map (goBindGroup locals) bgs
+      in ( map (\(bg,_,_) -> bg) results
+         , concatMap (\(_,w,_) -> w) results
+         , concatMap (\(_,_,e) -> e) results
+         )
+
+    goBindGroup locals bg =
+      let results = map (goBind locals) bg
+      in ( map (\(b,_,_) -> b) results
+         , concatMap (\(_,w,_) -> w) results
+         , concatMap (\(_,_,e) -> e) results
+         )
+
+    goBind locals bnd =
+      let (e', ws, es) = go locals (bindExpr bnd)
+      in (bnd { bindExpr = e' }, ws, es)
+
+    goBranches locals branches =
+      let results = map (goBranch locals) branches
+      in ( map (\(br,_,_) -> br) results
+         , concatMap (\(_,w,_) -> w) results
+         , concatMap (\(_,_,e) -> e) results
+         )
+
+    goBranch locals (Branch pat guard body) =
+      let bound = patternBinds pat
+          locals' = Set.union locals bound
+          (pat', ws1, es1) = rewritePattern pat
+          (guard', ws2, es2) = case guard of
+            Nothing -> (Nothing, [], [])
+            Just g  -> let (g', w, e) = go locals' g
+                       in (Just g', w, e)
+          (body', ws3, es3) = go locals' body
+      in (Branch pat' guard' body', ws1 ++ ws2 ++ ws3, es1 ++ es2 ++ es3)
+
+    patternBinds :: Pattern -> Set Text
+    patternBinds (PatCon _ pats) = Set.unions (map patternBinds pats)
+    patternBinds (PatVar n _) = Set.singleton (nameText n)
+    patternBinds (PatWild _) = Set.empty
+    patternBinds (PatLit _) = Set.empty
+
+    -- Rewrite constructor references inside patterns.
+    rewritePattern :: Pattern -> (Pattern, [Text], [LinkError])
+    rewritePattern (PatCon qn pats) =
+      let (qn', ws1, es1) = resolveQName homeMod conTab qn
+          results = map rewritePattern pats
+          pats' = map (\(p,_,_) -> p) results
+          ws2 = concatMap (\(_,w,_) -> w) results
+          es2 = concatMap (\(_,_,e) -> e) results
+      in (PatCon qn' pats', ws1 ++ ws2, es1 ++ es2)
+    rewritePattern p@(PatVar _ _) = (p, [], [])
+    rewritePattern p@(PatWild _) = (p, [], [])
+    rewritePattern p@(PatLit _) = (p, [], [])
 
 -------------------------------------------------------------------------------
 -- Cross-module validation

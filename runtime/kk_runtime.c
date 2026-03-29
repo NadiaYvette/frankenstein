@@ -101,3 +101,42 @@ void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     int64_t* fields = (int64_t*)(ptr + 8);
     fields[idx] = value;
 }
+
+/* Thunk support for lazy evaluation (Haskell bridge)
+ *
+ * Thunk layout (using kk_alloc_con with tag=0xLAZY):
+ *   [refcount] [tag=0x4C415A59] [evaluated_flag] [value_or_fn_ptr]
+ *
+ * evaluated_flag: 0 = unevaluated (value_or_fn_ptr is fn_ptr)
+ *                 1 = evaluated   (value_or_fn_ptr is cached result)
+ */
+
+#define KK_THUNK_TAG 0x4C415A59  /* "LAZY" */
+
+/* Create a thunk wrapping a zero-arg function pointer */
+int64_t kk_thunk_create(int64_t fn_ptr) {
+    int64_t thunk = kk_alloc_con(KK_THUNK_TAG, 2);
+    if (thunk == 0) return 0;
+    kk_set_field(thunk, 0, 0);        /* evaluated_flag = 0 */
+    kk_set_field(thunk, 1, fn_ptr);   /* the function pointer */
+    return thunk;
+}
+
+/* Force a thunk: if unevaluated, call the function and cache the result */
+int64_t kk_thunk_force(int64_t thunk) {
+    if (!kk_is_heap_ptr(thunk)) return thunk;  /* not a thunk, return as-is */
+    int64_t tag = kk_tag(thunk);
+    if (tag != KK_THUNK_TAG) return thunk;     /* not a thunk, return as-is */
+    int64_t evaluated = kk_field(thunk, 0);
+    if (evaluated) {
+        return kk_field(thunk, 1);             /* already forced */
+    }
+    /* Call the zero-arg function */
+    int64_t fn_ptr = kk_field(thunk, 1);
+    typedef int64_t (*thunk_fn_t)(void);
+    int64_t result = ((thunk_fn_t)fn_ptr)();
+    /* Cache the result */
+    kk_set_field(thunk, 0, 1);                /* mark as evaluated */
+    kk_set_field(thunk, 1, result);           /* store result */
+    return result;
+}

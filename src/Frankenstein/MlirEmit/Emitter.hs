@@ -138,6 +138,10 @@ emitProgramText prog =
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
     , ""
+    , "  // Thunk runtime declarations (lazy evaluation)"
+    , "  func.func private @kk_thunk_create(i64) -> i64"
+    , "  func.func private @kk_thunk_force(i64) -> i64"
+    , ""
     , "  // Lifted functions"
     , liftedFns
     , ""
@@ -350,11 +354,17 @@ emitExpr (ECase scrut branches) = do
     BoolCase thenExpr elseExpr ->
       emitIfElse scrutOps scrutName thenExpr elseExpr
 
-    -- Fallback
+    -- Char literal cases: convert to integer comparison
+    CharLitCase charBranches defaultExpr ->
+      emitMultiIntCase scrutOps scrutName
+        [(toInteger (fromEnum c), e) | (c, e) <- charBranches] defaultExpr
+
+    -- Fallback: emit unreachable to catch codegen bugs at runtime
     UnhandledCase -> do
       name <- freshName "v"
-      pure (scrutOps ++ ["// unhandled case with " <> T.pack (show (length branches)) <> " branches",
-                          "%" <> name <> " = arith.constant 0 : i64"], name)
+      pure (scrutOps ++ ["// unhandled case with " <> T.pack (show (length branches)) <> " branches"
+                         , "%" <> name <> " = arith.constant 0 : i64"
+                         , "llvm.unreachable"], name)
 
 emitExpr (ELet [binds] body) = do
   bindOps <- concat <$> mapM emitBind binds
@@ -410,8 +420,10 @@ emitExpr (ELam params body) = do
           closTy = "!llvm.struct<(i64" <> T.concat (replicate nCaptured ", i64") <> ")>"
       baseName <- freshName "v"
       fptrName <- freshName "v"
+      fptrAddrName <- freshName "v"
       let initOps = [ "// closure for @" <> liftedName <> " capturing " <> T.pack (show nCaptured) <> " vars"
-                     , "%" <> fptrName <> " = arith.constant 0 : i64  // function pointer placeholder for @" <> liftedName
+                     , "%" <> fptrAddrName <> " = llvm.mlir.addressof @" <> liftedName <> " : !llvm.ptr"
+                     , "%" <> fptrName <> " = llvm.ptrtoint %" <> fptrAddrName <> " : !llvm.ptr to i64"
                      , "%" <> baseName <> " = llvm.mlir.undef : " <> closTy
                      ]
       -- Insert function pointer at position 0
@@ -451,14 +463,34 @@ emitExpr (EReuse ref alloc) = do
         [ "%" <> resultName <> " = func.call @kk_reuse(%" <> refName <> ") : (i64) -> i64"
         ], resultName)
 
--- Laziness (thunks) — pass through for now
+-- Laziness (thunks) — lambda-lift the delayed expression and call kk_thunk_create
 emitExpr (EDelay e) = do
-  (eOps, eName) <- emitExpr e
-  pure (eOps ++ ["// delay (thunk) %" <> eName], eName)
+  -- Lambda-lift e to a zero-arg function
+  liftedName <- freshName "thunk_body"
+  let mlirRetTy = "i64"
+  (bodyOps, bodyResult) <- emitExpr e
+  let fnText = T.unlines $
+        [ "  func.func @" <> liftedName <> "() -> " <> mlirRetTy <> " {" ] ++
+        map ("    " <>) bodyOps ++
+        [ "    func.return %" <> bodyResult <> " : " <> mlirRetTy
+        , "  }" ]
+  addLiftedFn fnText
+  -- Get the function pointer and call kk_thunk_create
+  addrName <- freshName "v"
+  fptrName <- freshName "v"
+  resultName <- freshName "v"
+  pure ([ "// delay (thunk) -> @" <> liftedName
+        , "%" <> addrName <> " = llvm.mlir.addressof @" <> liftedName <> " : !llvm.ptr"
+        , "%" <> fptrName <> " = llvm.ptrtoint %" <> addrName <> " : !llvm.ptr to i64"
+        , "%" <> resultName <> " = func.call @kk_thunk_create(%" <> fptrName <> ") : (i64) -> i64"
+        ], resultName)
 
 emitExpr (EForce e) = do
   (eOps, eName) <- emitExpr e
-  pure (eOps ++ ["// force (thunk) %" <> eName], eName)
+  resultName <- freshName "v"
+  pure (eOps ++
+        [ "%" <> resultName <> " = func.call @kk_thunk_force(%" <> eName <> ") : (i64) -> i64"
+        ], resultName)
 
 -- Type application / abstraction: pass through to inner expr
 emitExpr (ETypeApp e _) = emitExpr e
@@ -715,6 +747,7 @@ data BranchClass
   | VarCase Name Expr                      -- single variable binding
   | SingleCase Expr                        -- single branch (wildcard or sole)
   | BoolCase Expr Expr                     -- two branches, truthy test
+  | CharLitCase [(Char, Expr)] Expr        -- char literal patterns + default
   | UnhandledCase
 
 classifyBranches :: [Branch] -> BranchClass
@@ -744,6 +777,18 @@ classifyBranches branches
     allIntLits = all (\b -> isIntLit (branchPattern b) || isDefaultPat (branchPattern b)) branches
                  && not (null intLitBranches)
 
+-- Char literal patterns
+classifyBranches branches
+  | not (null charBranches)
+  , all (\b -> isCharLit (branchPattern b) || isDefaultPat (branchPattern b)) branches =
+      let defaultBody = case [b | b <- branches, isDefaultPat (branchPattern b)] of
+            (b:_) -> branchBody b
+            []    -> branchBody (last branches)
+          charPairs = [(c, branchBody b) | b <- charBranches, PatLit (LitChar c) <- [branchPattern b]]
+      in CharLitCase charPairs defaultBody
+  where
+    charBranches = [b | b <- branches, isCharLit (branchPattern b)]
+
 classifyBranches [Branch (PatVar n _) _ body] = VarCase n body
 classifyBranches [Branch _ _ body] = SingleCase body
 classifyBranches [Branch _ _ thenExpr, Branch _ _ elseExpr] = BoolCase thenExpr elseExpr
@@ -752,6 +797,10 @@ classifyBranches _ = UnhandledCase
 isIntLit :: Pattern -> Bool
 isIntLit (PatLit (LitInt _)) = True
 isIntLit _ = False
+
+isCharLit :: Pattern -> Bool
+isCharLit (PatLit (LitChar _)) = True
+isCharLit _ = False
 
 isConPat :: Pattern -> Bool
 isConPat (PatCon _ _) = True

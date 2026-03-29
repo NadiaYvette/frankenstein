@@ -170,11 +170,12 @@ perceusBranch scope br =
                           body' unusedPats
   in br { branchBody = droppedBody }
 
--- | Extract multiplicity from a Bind's type
+-- | Extract multiplicity from a Bind.
+-- Always returns Many since Bind carries no explicit multiplicity field.
+-- Actual usage-based refcount decisions are handled by analyzeUsage/wrapRetains/wrapDrops.
+-- The old code incorrectly extracted the multiplicity of the first function *argument*.
 bindMultiplicity :: Bind -> Multiplicity
-bindMultiplicity b = case bindType b of
-  TFun ((m, _):_) _ _ -> m
-  _ -> Many
+bindMultiplicity _ = Many
 
 -- | Wrap an expression with (N-1) retain operations for a variable.
 -- Mirrors the K spec's wrapRetains(Name, Count, Expr).

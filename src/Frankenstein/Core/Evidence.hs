@@ -32,6 +32,25 @@ import qualified Data.Text as T
 -- | Evidence scope: maps effect names to evidence variable names
 type EvidenceScope = Map Text Name
 
+-- | For multi-op effects, maps (effect name, op name) to the bound
+-- variable name that holds that specific operation handler.
+type OpScope = Map (Text, Text) Name
+
+-- | Combined scope for evidence pass
+data Scope = Scope
+  { scopeEvidence :: !EvidenceScope
+  , scopeOps     :: !OpScope
+  } deriving (Show)
+
+emptyScope :: Scope
+emptyScope = Scope Map.empty Map.empty
+
+insertEvidence :: Text -> Name -> Scope -> Scope
+insertEvidence eff evName s = s { scopeEvidence = Map.insert eff evName (scopeEvidence s) }
+
+insertOp :: Text -> Text -> Name -> Scope -> Scope
+insertOp eff op opVarName s = s { scopeOps = Map.insert (eff, op) opVarName (scopeOps s) }
+
 -- | Run the evidence-passing translation on an entire program.
 -- After this pass, EHandle and EPerform are eliminated.
 evidencePass :: Program -> Program
@@ -42,7 +61,7 @@ evidencePass prog = prog
 -- | Transform a single definition
 evidencePassDef :: [EffectDecl] -> Def -> Def
 evidencePassDef effs def = def
-  { defExpr = evidenceExpr effs Map.empty (defExpr def)
+  { defExpr = evidenceExpr effs emptyScope (defExpr def)
   }
 
 -- | Transform an expression, replacing EHandle/EPerform with plain calls.
@@ -50,57 +69,101 @@ evidencePassDef effs def = def
 -- The strategy for EHandle:
 --   EHandle effRow handler body
 --   =>
---   let ev_exn = handler   -- the handler IS the evidence record
---   in body[perform exn/raise(args) => ev_exn(args)]
+--   For a single-op effect (like exn with only "raise"):
+--     let ev_exn = handler
+--     in body[perform exn/raise(args) => ev_exn(args)]
 --
--- The handler expression is expected to be a lambda that implements
--- the effect operations. For a single-operation effect like exn,
--- the handler itself is the operation implementation.
---
--- For multi-operation effects, the handler would be a record/struct
--- of lambdas (future work).
-evidenceExpr :: [EffectDecl] -> EvidenceScope -> Expr -> Expr
+--   For a multi-op effect (like console with "println"/"print"):
+--     let ev_console = handler
+--         ev_console_println = evv_select(ev_console, 0)
+--         ev_console_print   = evv_select(ev_console, 1)
+--     in body[perform console/println(args) => ev_console_println(args)]
+evidenceExpr :: [EffectDecl] -> Scope -> Expr -> Expr
 evidenceExpr effs scope expr = case expr of
   -- The key transformation: handle -> let-bind evidence, transform body
   EHandle effRow handler body ->
     let effName = effectRowName effRow
         evName  = Name ("ev_" <> effName) 0
-        scope'  = Map.insert effName evName scope
         -- Transform the handler (it may itself contain effects)
         handler' = evidenceExpr effs scope handler
-        -- Transform the body with the evidence in scope
-        body'    = evidenceExpr effs scope' body
-        -- Wrap: let ev_<eff> = handler in body
-        evBind   = Bind
-          { bindName = evName
-          , bindType = anyType  -- evidence records are untyped for now
-          , bindExpr = handler'
-          , bindSort = DefVal
-          }
-    in ELet [[evBind]] body'
+    in case lookupEffectDecl effs effName of
+      -- Multi-op effect: bind handler, then project each operation
+      Just ed | length (effectOps ed) > 1 ->
+        let -- Bind the evidence record
+            evBind = Bind
+              { bindName = evName
+              , bindType = anyType
+              , bindExpr = handler'
+              , bindSort = DefVal
+              }
+            -- Create a binding for each operation: ev_<eff>_<op> = evv_select(ev_<eff>, idx)
+            opBindsAndNames = zipWith (mkOpBind effName evName) [0..] (effectOps ed)
+            opBinds  = map fst opBindsAndNames
+            -- Build the new scope with all operation names
+            scope' = foldl (\s (opN, varN) -> insertOp effName opN varN s)
+                       (insertEvidence effName evName scope)
+                       (map snd opBindsAndNames)
+            -- Transform the body with the evidence + ops in scope
+            body' = evidenceExpr effs scope' body
+        in ELet [[evBind] ++ opBinds] body'
+
+      -- Single-op or unknown: the handler IS the evidence (simple case)
+      _ ->
+        let scope' = insertEvidence effName evName scope
+            -- For single-op with a known declaration, also register the operation in OpScope
+            scope'' = case lookupEffectDecl effs effName of
+              Just ed | [singleOp] <- effectOps ed ->
+                let opN = nameText (qnameName (opName singleOp))
+                in insertOp effName opN evName scope'
+              _ -> scope'
+            body' = evidenceExpr effs scope'' body
+            evBind = Bind
+              { bindName = evName
+              , bindType = anyType
+              , bindExpr = handler'
+              , bindSort = DefVal
+              }
+        in ELet [[evBind]] body'
 
   -- The key transformation: perform -> call through evidence
   EPerform qn args ->
     let effName = qnameModule qn
-        opName  = nameText (qnameName qn)
+        opN     = nameText (qnameName qn)
         args'   = map (evidenceExpr effs scope) args
-    in case Map.lookup effName scope of
-      Just evName ->
-        -- Found evidence in scope: call the evidence with args
-        -- For single-op effects (like exn/raise), the evidence IS the handler function
-        -- For multi-op effects, we'd need to project the right operation
-        if isSingleOpEffect effs effName
-          then EApp (EVar evName) args'
-          else -- Multi-op: evidence is a record, project the operation
-               -- For now, use a naming convention: ev_<eff>_<op>
-               let projName = Name ("ev_" <> effName <> "_" <> opName) 0
-               in EApp (EVar projName) args'
+    in case Map.lookup (effName, opN) (scopeOps scope) of
+      Just opVarName ->
+        -- Found a specific operation binding: call it directly
+        EApp (EVar opVarName) args'
       Nothing ->
-        -- No handler in scope — this is an unhandled effect.
-        -- Leave as a call to a "default" handler function.
-        -- For exn, this becomes a call to kk_exn_raise (runtime abort).
-        let defaultFn = Name ("kk_" <> effName <> "_" <> opName) 0
-        in EApp (EVar defaultFn) args'
+        case Map.lookup effName (scopeEvidence scope) of
+          Just evName ->
+            -- Evidence in scope but no specific op binding.
+            -- For single-op effects, call the evidence directly.
+            -- For multi-op effects, project by operation index.
+            if isSingleOpEffect effs effName
+              then EApp (EVar evName) args'
+              else -- Multi-op: project the operation by index
+                   let idx = lookupOpIndex effs effName opN
+                       projName = Name ("ev_" <> effName <> "_" <> opN) 0
+                       -- Generate: let ev_<eff>_<op> = evv_select(ev_<eff>, <idx>)
+                       --           in ev_<eff>_<op>(args)
+                       selectExpr = EApp (EVar (Name "evv_select" 0))
+                                      [ EVar evName
+                                      , ELit (LitInt (fromIntegral idx))
+                                      ]
+                       projBind = Bind
+                         { bindName = projName
+                         , bindType = anyType
+                         , bindExpr = selectExpr
+                         , bindSort = DefVal
+                         }
+                   in ELet [[projBind]] (EApp (EVar projName) args')
+          Nothing ->
+            -- No handler in scope -- unhandled effect.
+            -- Emit a call to a well-known default handler function.
+            -- Naming convention: <module>_<effect>_<op>
+            let defaultFn = Name (effName <> "_" <> opN) 0
+            in EApp (EVar defaultFn) args'
 
   -- Recurse through all other expression forms
   EVar _     -> expr
@@ -139,6 +202,25 @@ evidenceExpr effs scope expr = case expr of
   EForce e        -> EForce (evidenceExpr effs scope e)
 
 
+-- | Create a binding for a single operation extracted from an evidence record.
+-- @ev_<eff>_<op> = evv_select(ev_<eff>, <index>)@
+mkOpBind :: Text -> Name -> Int -> OpDecl -> (Bind, (Text, Name))
+mkOpBind effName evName idx op =
+  let opN     = nameText (qnameName (opName op))
+      varName = Name ("ev_" <> effName <> "_" <> opN) 0
+      selectExpr = EApp (EVar (Name "evv_select" 0))
+                     [ EVar evName
+                     , ELit (LitInt (fromIntegral idx))
+                     ]
+      b = Bind
+        { bindName = varName
+        , bindType = anyType
+        , bindExpr = selectExpr
+        , bindSort = DefVal
+        }
+  in (b, (opN, varName))
+
+
 -- | Extract the primary effect name from an effect row.
 -- For EffectRowExtend "exn" _, returns "exn".
 effectRowName :: EffectRow -> Text
@@ -146,16 +228,38 @@ effectRowName (EffectRowExtend qn _) = qnameModule qn <> nameText (qnameName qn)
 effectRowName (EffectRowVar tv)      = nameText (tvName tv)
 effectRowName EffectRowEmpty         = "pure"
 
--- | Check if an effect has exactly one operation (like exn has only "raise").
--- Single-op effects use the handler directly as the evidence;
--- multi-op effects need a record with named projections.
-isSingleOpEffect :: [EffectDecl] -> Text -> Bool
-isSingleOpEffect effs effName =
+-- | Look up an effect declaration by its (flattened) name.
+lookupEffectDecl :: [EffectDecl] -> Text -> Maybe EffectDecl
+lookupEffectDecl effs effName =
   case [ ed | ed <- effs
        , let n = qnameModule (effectName ed) <> nameText (qnameName (effectName ed))
        , n == effName ] of
-    [ed] -> length (effectOps ed) <= 1
-    _    -> True  -- unknown effect: assume single-op (safe default)
+    [ed] -> Just ed
+    _    -> Nothing
+
+-- | Check if an effect has exactly one operation (like exn has only "raise").
+-- Single-op effects use the handler directly as the evidence;
+-- multi-op effects need a record with named projections.
+-- Unknown effects default to False (multi-op) for safety, so they go
+-- through the record-projection path which generates correct dispatch.
+isSingleOpEffect :: [EffectDecl] -> Text -> Bool
+isSingleOpEffect effs effName =
+  case lookupEffectDecl effs effName of
+    Just ed -> length (effectOps ed) <= 1
+    Nothing -> False  -- unknown effect: assume multi-op (safe default)
+
+-- | Look up the index of an operation within its effect declaration.
+-- Returns 0 if the operation or effect is not found (fallback).
+lookupOpIndex :: [EffectDecl] -> Text -> Text -> Int
+lookupOpIndex effs effName opN =
+  case lookupEffectDecl effs effName of
+    Just ed -> go 0 (effectOps ed)
+    Nothing -> 0
+  where
+    go _ [] = 0
+    go i (op:ops)
+      | nameText (qnameName (opName op)) == opN = i
+      | otherwise = go (i + 1) ops
 
 -- | Placeholder type for evidence records
 anyType :: Type

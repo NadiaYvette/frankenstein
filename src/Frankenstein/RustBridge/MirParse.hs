@@ -809,8 +809,96 @@ parseBodyContents ls =
   let -- Local decls start with "let"
       localLines = filter (\l -> "let " `T.isPrefixOf` T.stripStart l) ls
       locals = zipWith parseLocalDecl [0..] localLines
-      blocks = []  -- TODO: parse basic block contents from text format
+      blocks = extractBlocks ls
   in (locals, blocks)
+
+-- | Extract basic blocks from MIR text format.
+-- Scans for "bbN: {" headers, collects lines until "}", builds MirBasicBlock.
+extractBlocks :: [Text] -> [MirBasicBlock]
+extractBlocks [] = []
+extractBlocks (l:rest)
+  | Just idx <- parseBbHeader l =
+      let (bodyLines, remaining) = collectBlockBody rest
+          (stmts, term) = classifyBlockLines bodyLines
+      in MirBasicBlock
+          { bbIndex = idx
+          , bbStatements = stmts
+          , bbTerminator = term
+          } : extractBlocks remaining
+  | otherwise = extractBlocks rest
+
+-- | Parse "bb0: {" or "    bb12: {" → Just 0 or Just 12
+parseBbHeader :: Text -> Maybe Int
+parseBbHeader line =
+  let stripped = T.stripStart line
+  in if "bb" `T.isPrefixOf` stripped
+     then let rest = T.drop 2 stripped
+              numStr = T.takeWhile (\c -> c >= '0' && c <= '9') rest
+              after = T.drop (T.length numStr) rest
+          in if not (T.null numStr) && ": {" `T.isPrefixOf` T.stripStart after
+             then case reads (T.unpack numStr) of
+                    [(n, "")] -> Just n
+                    _         -> Nothing
+             else Nothing
+     else Nothing
+
+-- | Collect lines inside a { ... } block until closing }
+collectBlockBody :: [Text] -> ([Text], [Text])
+collectBlockBody = go []
+  where
+    go acc [] = (reverse acc, [])
+    go acc (l:rest)
+      | T.stripStart l == "}" = (reverse acc, rest)
+      | otherwise = go (l : acc) rest
+
+-- | Separate block lines into statements and terminator.
+-- Skip StorageLive/StorageDead/debug/scope/nop lines.
+-- The last non-skip line is the terminator; the rest are statements.
+classifyBlockLines :: [Text] -> ([Text], Maybe Text)
+classifyBlockLines ls =
+  let meaningful = filter (not . isSkipLine) (map T.strip ls)
+  in case reverse meaningful of
+       [] -> ([], Nothing)
+       (lastLine : revRest)
+         | isTerminatorLine lastLine -> (reverse revRest, Just (convertTextLine lastLine))
+         | otherwise -> (map convertTextLine meaningful, Nothing)
+
+-- | Lines to skip (not semantically meaningful for our translation)
+isSkipLine :: Text -> Bool
+isSkipLine l =
+  let s = T.stripStart l
+  in T.null s
+     || "StorageLive" `T.isPrefixOf` s
+     || "StorageDead" `T.isPrefixOf` s
+     || "debug " `T.isPrefixOf` s
+     || "scope " `T.isPrefixOf` s
+     || s == "nop;"
+
+-- | Identify terminator lines
+isTerminatorLine :: Text -> Bool
+isTerminatorLine l =
+  let s = T.stripStart l
+  in "return;" `T.isPrefixOf` s
+     || "goto ->" `T.isPrefixOf` s
+     || "switchInt(" `T.isPrefixOf` s
+     || "unreachable;" `T.isPrefixOf` s
+     || "resume;" `T.isPrefixOf` s
+     || "assert(" `T.isPrefixOf` s
+     || ("-> [" `T.isInfixOf` s && not ("= " `T.isPrefixOf` s))
+
+-- | Convert a text-format MIR line to the string format that parseStmt/parseTerminator expect.
+-- For assignments like "_2 = Le(copy _1, const 0_i64);" → "Assign((_2, Le(copy _1, const 0_i64)))"
+-- For terminators, strip trailing semicolons and convert to expected format.
+convertTextLine :: Text -> Text
+convertTextLine line =
+  let s = T.strip line
+      -- Strip trailing semicolons
+      noSemi = if ";" `T.isSuffixOf` s then T.dropEnd 1 s else s
+  in if " = " `T.isInfixOf` noSemi
+     then let (lhs, rhs') = T.breakOn " = " noSemi
+              rhs = T.drop 3 rhs'  -- drop " = "
+          in "Assign((" <> lhs <> ", " <> rhs <> "))"
+     else noSemi
 
 parseLocalDecl :: Int -> Text -> MirLocalDecl
 parseLocalDecl idx line =

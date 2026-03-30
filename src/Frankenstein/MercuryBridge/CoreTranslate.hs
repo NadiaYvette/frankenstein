@@ -41,9 +41,20 @@ translateHlds :: MercuryHLDS -> Either Text Program
 translateHlds hlds = do
   defs <- mapM translatePred (hldsPreds hlds)
   let dataDecls = map (translateMercuryTypeDecl (hldsModule hlds)) (hldsTypes hlds)
+      -- Default handler for exn.fail: returns 0
+      -- Named "mercury_fail" with empty module to match the evidence pass's
+      -- unhandled effect naming convention (effName <> "_" <> opN).
+      failHandler = Def
+        { defName = QName "" (Name "mercury_fail" 0)
+        , defType = TFun [] EffectRowEmpty intT
+        , defExpr = ELit (LitInt 0)
+        , defSort = DefFun
+        , defVisibility = Public
+        }
+      intT = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
   Right $ Program
     { progName = QName (hldsModule hlds) (Name "main" 0)
-    , progDefs = defs
+    , progDefs = failHandler : defs
     , progData = dataDecls
     , progEffects = mercuryEffects
     }
@@ -90,24 +101,43 @@ translatePred pred' = do
       -- Separate input and output modes
       indexedModes = zip [0..] (predModes pred')
       inputModes  = [i | (i, m) <- indexedModes, m == ModeIn || m == ModeDi]
-      outputModes = [i | (i, m) <- indexedModes, m == ModeOut || m == ModeUo]
+      _outputModes = [i | (i, m) <- indexedModes, m == ModeOut || m == ModeUo]
 
       -- Build argument types with multiplicity
-      argTypes = [(modeToMult m, TCon (TypeCon (QName "std" (Name "any" 0)) KindValue))
+      argTypes = [(modeToMult m, TCon intType)
                  | m <- predModes pred', m == ModeIn || m == ModeDi]
 
       -- Build effect row from determinism
       effRow = detToEffectRow (predDet pred')
 
-      -- Return type: single out -> that type, multiple outs -> tuple
-      retType = TCon (TypeCon (QName "std" (Name "any" 0)) KindValue)
+      -- Return type
+      retType = TCon intType
 
       funType = TFun argTypes effRow retType
 
+      -- Build parameter list from argument names
+      inputArgNames = [predArgNames pred' !! i | i <- inputModes, i < length (predArgNames pred')]
+      params = [(Name argN 0, TCon intType)
+               | argN <- inputArgNames]
+
       -- Translate the goal body
-      body = case predGoal pred' of
+      rawGoalBody = case predGoal pred' of
         Just goal -> translateGoal goal
         Nothing   -> ELit (LitString "no body")
+
+      -- For semidet predicates: wrap in "if test then 1 else perform exn.fail"
+      goalBody = case predDet pred' of
+        Semidet ->
+          ECase rawGoalBody
+            [ Branch (PatLit (LitInt 1)) Nothing (ELit (LitInt 1))
+            , Branch (PatWild boolType) Nothing
+                (EPerform (QName "mercury" (Name "fail" 0)) [])
+            ]
+        _ -> rawGoalBody
+      boolType = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
+
+      body = if null params then goalBody
+             else ELam params goalBody
 
   Right $ Def
     { defName = name
@@ -116,6 +146,8 @@ translatePred pred' = do
     , defSort = DefFun
     , defVisibility = Public
     }
+  where
+    intType = TypeCon (QName "std" (Name "int" 0)) KindValue
 
 -- | Convert Mercury mode to multiplicity
 modeToMult :: MercuryMode -> Multiplicity
@@ -145,8 +177,19 @@ translateGoal (GoalUnify x y) =
   -- For now: just emit as a call to unify
   EApp (EVar (Name "unify" 0)) [EVar (Name x 0), EVar (Name y 0)]
 
-translateGoal (GoalCall predName' args) =
-  EApp (EVar (Name predName' 0)) (map (\a -> EVar (Name a 0)) args)
+translateGoal (GoalCall predName' args)
+  -- Mercury builtin comparison: "int.>" etc. → comparison that returns bool
+  -- For semidet, the caller wraps this so failure performs exn.fail
+  | Just op <- stripIntOp predName'
+  , [lhs, rhs] <- args
+  = EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
+  -- Mercury builtin arithmetic: "int.+" etc. → arithmetic
+  | otherwise
+  = EApp (EVar (Name predName' 0)) (map (\a -> EVar (Name a 0)) args)
+  where
+    stripIntOp n = case T.stripPrefix "int." n of
+      Just op -> Just op
+      Nothing -> Nothing
 
 translateGoal (GoalConj goals) =
   -- Conjunction: sequence goals with let-bindings

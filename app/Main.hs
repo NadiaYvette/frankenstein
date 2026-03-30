@@ -30,7 +30,10 @@ main = do
       handleOutput prog flags
     CompileFiles files flags -> do
       results <- mapM (compileFile (flagFromJson flags)) files
-      let (errs, progs) = partitionResults results
+      -- Run per-module evidence pass before linking, so that EPerform/EHandle
+      -- references are converted to plain function calls that the linker can resolve.
+      let (errs, rawProgs) = partitionResults results
+          progs = map evidencePass rawProgs
       if not (null errs) then
         mapM_ (\(f, e) -> TIO.putStrLn $ "Error [" <> T.pack f <> "]: " <> e) errs
       else do

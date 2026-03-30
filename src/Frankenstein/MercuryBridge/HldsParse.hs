@@ -17,10 +17,10 @@ module Frankenstein.MercuryBridge.HldsParse
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import System.Process (readProcessWithExitCode)
+import System.Process (readCreateProcessWithExitCode, proc, cwd)
 import System.Exit (ExitCode(..))
-import System.Directory (listDirectory, getCurrentDirectory)
-import System.FilePath (takeBaseName, (</>))
+import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile)
+import System.FilePath (takeBaseName, takeFileName, (</>))
 import Data.List (isPrefixOf, find)
 import Control.Exception (try, IOException)
 
@@ -42,6 +42,7 @@ data MercuryPred = MercuryPred
   , predModes      :: ![MercuryMode]
   , predArgTypes   :: ![Text]
   , predGoal       :: !(Maybe MercuryGoal)
+  , predArgNames   :: ![Text]
   } deriving (Show)
 
 -- HLDS goal representation
@@ -73,28 +74,33 @@ data MercuryHLDS = MercuryHLDS
   } deriving (Show)
 
 -- | Invoke mmc to dump HLDS for a Mercury source file.
+-- mmc dumps files into the current directory, so we copy the source into
+-- a temp directory, run mmc there, and look for the .hlds_dump file.
 dumpHlds :: FilePath -> IO (Either Text Text)
 dumpHlds inputPath = do
+  absPath <- makeAbsolute inputPath
   let moduleName = takeBaseName inputPath
-  -- mmc dumps to cwd, so run from a temp-like location
-  result <- try $ readProcessWithExitCode "mmc"
-    [ "--dump-hlds", "50"
-    , "--compile-only"
-    , inputPath
-    ] ""
+  tmpDir <- getTemporaryDirectory
+  let workDir = tmpDir </> "frankenstein-mercury-" ++ moduleName
+  createDirectoryIfMissing True workDir
+  -- Copy source file to temp working directory
+  copyFile absPath (workDir </> takeFileName inputPath)
+  result <- try $ readCreateProcessWithExitCode
+    (proc "mmc" [ "--dump-hlds", "50", "--compile-only", takeFileName inputPath ])
+      { cwd = Just workDir }
+    ""
   case result :: Either IOException (ExitCode, String, String) of
     Left exc -> pure $ Left $ T.pack $ "Failed to invoke mmc: " ++ show exc
     Right (ExitFailure code, _, stderr) ->
       pure $ Left $ T.pack $ "mmc failed (exit " ++ show code ++ "): " ++ stderr
     Right (ExitSuccess, _, _) -> do
-      -- Find the dump file
-      cwd <- getCurrentDirectory
-      files <- listDirectory cwd
+      -- Find the dump file in the work directory
+      files <- listDirectory workDir
       let dumpFile = find (\f -> (moduleName ++ ".hlds_dump") `isPrefixOf` f) files
       case dumpFile of
-        Nothing -> pure $ Left "HLDS dump file not found after mmc"
+        Nothing -> pure $ Left $ "HLDS dump file not found after mmc in " <> T.pack workDir
         Just f -> do
-          contents <- TIO.readFile (cwd </> f)
+          contents <- TIO.readFile (workDir </> f)
           pure $ Right contents
 
 -- | Parse a textual HLDS dump into structured form.
@@ -138,6 +144,9 @@ parsePredBlock headerLine bodyLines =
         (ml:_) -> parseModeDecl ml
         [] -> ([], Det)
 
+      -- Extract argument names from clause header: "module.name(Arg1, Arg2, ...) :-"
+      argNames = extractArgNames bodyLines
+
       -- Parse the goal body (everything after the ":-" in the clause)
       goalText = extractGoalText bodyLines
       goal = parseGoalText goalText
@@ -149,21 +158,26 @@ parsePredBlock headerLine bodyLines =
     , predModes = modes
     , predArgTypes = []
     , predGoal = Just goal
+    , predArgNames = argNames
     }
 
 extractNameArity :: Text -> (Text, Int)
 extractNameArity header =
   -- Look for `name'/N pattern
-  case T.breakOn "'" header of
+  case T.breakOn "`" header of
     (_, rest) | not (T.null rest) ->
-      let afterQuote = T.drop 1 rest  -- after opening quote
+      let afterQuote = T.drop 1 rest  -- after opening backtick
           name = T.takeWhile (/= '\'') afterQuote
+          -- Strip module prefix: "check.check_threshold" → "check_threshold"
+          baseName = case T.breakOnEnd "." name of
+            ("", n) -> n    -- no dot, use as-is
+            (_, n)  -> n    -- take part after last dot
           afterName = T.drop 1 $ T.dropWhile (/= '\'') afterQuote  -- after closing quote
           afterSlash = T.drop 1 $ T.dropWhile (/= '/') afterName
           arity = case reads (T.unpack (T.takeWhile (\c -> c >= '0' && c <= '9') afterSlash)) of
             [(n, _)] -> n
             _ -> 0
-      in (name, arity)
+      in (baseName, arity)
     _ -> ("unknown", 0)
 
 parseModeDecl :: Text -> ([MercuryMode], MercuryDet)
@@ -172,7 +186,7 @@ parseModeDecl line =
   let afterParen = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') line
       modes = map parseMode $ T.splitOn "," afterParen
       -- Extract determinism after "is"
-      afterIs = T.strip $ T.drop 1 $ snd $ T.breakOn " is " line
+      afterIs = T.strip $ T.drop 4 $ snd $ T.breakOn " is " line  -- drop " is "
       det = parseDet $ T.takeWhile (/= '.') afterIs
   in (modes, det)
 
@@ -197,12 +211,38 @@ parseDet t = case T.strip t of
   _           -> Det
 
 -- | Extract the goal body text from the HLDS block
+-- | Extract argument names from the clause header line.
+-- The clause head looks like "module.pred(Arg1, Arg2) :-"
+-- Must skip ":- mode" and ":- end_module" lines.
+extractArgNames :: [Text] -> [Text]
+extractArgNames ls =
+  -- Find the clause head: contains ":-" but doesn't start with ":-"
+  case filter isClauseHead ls of
+    (clauseHead:_) ->
+      let afterParen = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') clauseHead
+      in map T.strip $ T.splitOn "," afterParen
+    [] -> []
+  where
+    isClauseHead l =
+      let s = T.stripStart l
+      in T.isInfixOf ":-" s && not (":- " `T.isPrefixOf` s) && not ("%" `T.isPrefixOf` s)
+
 extractGoalText :: [Text] -> Text
 extractGoalText ls =
-  -- The goal starts after "module.pred(args) :-" and ends at ")."
-  let afterClauseHead = dropWhile (not . T.isInfixOf ":-") ls
+  -- The goal starts after the clause head line "module.pred(args) :-"
+  -- and ends before ":- end_module".
+  let isClauseHead l =
+        let s = T.stripStart l
+        in T.isInfixOf ":-" s && not (":- " `T.isPrefixOf` s) && not ("%" `T.isPrefixOf` s)
+      afterClauseHead = dropWhile (not . isClauseHead) ls
       goalLines = case afterClauseHead of
-        (_:rest) -> rest
+        (hd:rest) ->
+          -- If the clause head has content after ":-" on the same line, include it
+          let afterColonDash = T.strip $ snd $ T.breakOn ":-" hd
+              firstPart = T.drop 2 afterColonDash  -- drop ":-"
+              goalContent = if T.null (T.strip firstPart) then rest
+                           else firstPart : rest
+          in takeWhile (not . (":- end_module" `T.isPrefixOf`) . T.stripStart) goalContent
         [] -> []
   in T.unlines goalLines
 
@@ -265,7 +305,9 @@ extractSwitchArms (l:ls)
 parseSingleGoal :: Text -> MercuryGoal
 parseSingleGoal txt
   | T.null stripped = GoalUnparsed "(empty)"
-  -- Constructor: Var = module.functor[Args | Tail] or Var = module.functor(Args)
+  -- Mercury builtin: "int.(X op Y)" or "int.(X + Y)" — module-qualified operator
+  | Just builtinCall <- parseMercuryBuiltin stripped = builtinCall
+  -- Unification: Var = expr
   | " = " `T.isInfixOf` stripped =
       let (lhs, rhs) = T.breakOn " = " stripped
           rhs' = T.drop 3 rhs
@@ -280,6 +322,37 @@ parseSingleGoal txt
       in GoalCall (T.strip name) args
   | otherwise = GoalUnparsed stripped
   where stripped = T.strip txt
+
+-- | Parse Mercury builtin operations like "int.(X > Y)", "int.(X + Y)"
+-- These are module-qualified infix operations in the HLDS dump.
+parseMercuryBuiltin :: Text -> Maybe MercuryGoal
+parseMercuryBuiltin txt
+  -- Pattern: "module.(expr)" where expr contains an infix operator
+  | Just (modPart, inner) <- breakOnDotParen txt
+  , not (T.null inner)
+  , Just (lhs, op, rhs) <- parseInfixExpr inner
+  = Just $ GoalCall (modPart <> "." <> op) [lhs, rhs]
+  | otherwise = Nothing
+  where
+    -- Break "int.(X > Y)" or "int.(X > Y)." into ("int", "X > Y")
+    breakOnDotParen t =
+      let (before, after) = T.breakOn ".(" t
+      in if T.null after then Nothing
+         else let inner = T.drop 2 after  -- skip ".("
+                  -- Find matching closing paren
+                  content = T.takeWhile (/= ')') inner
+              in Just (before, content)
+
+    -- Parse "X > Y" into (X, ">", Y)
+    parseInfixExpr e =
+      let ops = [" > ", " < ", " >= ", " =< ", " + ", " - ", " * ", " / ", " mod ", " == "]
+          tryOp [] = Nothing
+          tryOp (op:rest') =
+            case T.breakOn op e of
+              (lhs, rhs') | not (T.null rhs') ->
+                Just (T.strip lhs, T.strip op, T.strip (T.drop (T.length op) rhs'))
+              _ -> tryOp rest'
+      in tryOp ops
 
 -------------------------------------------------------------------------------
 -- Type declaration extraction

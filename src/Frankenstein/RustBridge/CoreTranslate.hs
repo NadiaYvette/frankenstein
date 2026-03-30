@@ -58,7 +58,13 @@ translateMir prog = do
 -- | Translate a single MIR function body to a Frankenstein definition
 translateBody :: MirBody -> Either Text Def
 translateBody body = do
-  let name = QName "rust" (Name (mirName body) 0)
+  let rawName = mirName body
+      -- Strip crate name prefix if present (e.g. "double::double" → "double")
+      -- Also strip the module_ prefix that MIR sometimes adds
+      cleanName = case T.breakOnEnd "::" rawName of
+                    ("", n)  -> n    -- no :: found, use as-is
+                    (_, n)   -> n    -- take part after last ::
+      name = QName "rust" (Name cleanName 0)
 
       -- Build argument types from local declarations
       -- In MIR, _0 is the return place, _1.._N are arguments
@@ -215,9 +221,13 @@ translateRvalue body rv = case rv of
     ERetain (EVar (Name ("_" <> T.pack (show idx)) 0))
 
   RvFieldAccess baseIdx fieldIdx _ty ->
-    -- Field projection: translate as application of a field accessor
-    EApp (EVar (Name ("field_" <> T.pack (show fieldIdx)) 0))
-         [EVar (Name ("_" <> T.pack (show baseIdx)) 0)]
+    -- Field projection: for overflow tuples, .0 is the result value.
+    -- Simplify field_0 to just the base variable (since WithOverflow is
+    -- already translated as plain arithmetic).
+    if fieldIdx == 0
+    then EVar (Name ("_" <> T.pack (show baseIdx)) 0)
+    else EApp (EVar (Name ("field_" <> T.pack (show fieldIdx)) 0))
+              [EVar (Name ("_" <> T.pack (show baseIdx)) 0)]
 
   RvRaw t -> ELit (LitString t)
 
@@ -235,8 +245,10 @@ translateOperand _body op = case op of
   OpConst t -> parseConstLit t
 
   OpFieldAccess baseIdx fieldIdx _ty ->
-    EApp (EVar (Name ("field_" <> T.pack (show fieldIdx)) 0))
-         [EVar (Name ("_" <> T.pack (show baseIdx)) 0)]
+    if fieldIdx == 0
+    then EVar (Name ("_" <> T.pack (show baseIdx)) 0)
+    else EApp (EVar (Name ("field_" <> T.pack (show fieldIdx)) 0))
+              [EVar (Name ("_" <> T.pack (show baseIdx)) 0)]
 
   OpRef idx ->
     ERetain (EVar (Name ("_" <> T.pack (show idx)) 0))

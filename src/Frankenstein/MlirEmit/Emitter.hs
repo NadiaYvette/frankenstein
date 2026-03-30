@@ -51,6 +51,7 @@ data EmitState = EmitState
   , esTypeEnv       :: !(Map Text Text)  -- SSA name -> MLIR type
   , esStringLits    :: ![(Text, Text)]   -- global name -> string content
   , esEvidenceScope :: !(Map Text Text)  -- effect name -> evidence SSA variable name
+  , esAliases       :: !(Map Text Text)  -- name alias: let x = y → x maps to y
   }
 
 type Emit a = State EmitState a
@@ -98,7 +99,7 @@ emitProgramText prog =
                         then d { defName = QName "" (Name "_frankenstein_main" 99) }
                         else d) defs
         else defs
-      initState = EmitState 0 [] Map.empty [] Map.empty
+      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -226,7 +227,13 @@ emitExpr (EVar n) = do
       stubName <- freshName "v"
       pure (["// unresolved external: " <> nameText n
             , "%" <> stubName <> " = arith.constant 0 : i64"], stubName)
-    else pure ([], sname)
+    else do
+      -- Check alias map: if this name was bound to another SSA value, use that
+      aliases <- gets esAliases
+      let resolved = case Map.lookup sname aliases of
+                       Just target -> target
+                       Nothing     -> sname
+      pure ([], resolved)
 
 -- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
@@ -784,7 +791,10 @@ emitBind bnd = do
   let bname = sanitizeName (nameText (Frankenstein.Core.Types.bindName bnd))
   if bname == resultName
     then pure ops
-    else pure $ ops ++ ["// let " <> bname <> " = %" <> resultName]
+    else do
+      -- Register alias so subsequent references to bname resolve to resultName
+      modify (\s -> s { esAliases = Map.insert bname resultName (esAliases s) })
+      pure $ ops ++ ["// let " <> bname <> " = %" <> resultName]
 
 -------------------------------------------------------------------------------
 -- Branch classification

@@ -766,7 +766,9 @@ extractBodies :: [Text] -> [MirBody]
 extractBodies [] = []
 extractBodies (l:ls)
   | "fn " `T.isPrefixOf` T.stripStart l =
-      let (bodyLines, rest') = collectBlock 0 ls
+      -- The function header "fn name(...) {" already contains the opening brace,
+      -- so we start at depth 1 to match the closing "}" of the function body.
+      let (bodyLines, rest') = collectBlock 1 ls
           body = parseBody (T.stripStart l) bodyLines
       in body : extractBodies rest'
   | otherwise = extractBodies ls
@@ -789,20 +791,47 @@ parseBody headerLine bodyLines =
       nameEnd = T.takeWhile (/= '(') (T.drop 3 headerLine)
       name = T.strip nameEnd
 
-      -- Count arguments from the header
+      -- Parse arguments from header: "_1: T1, _2: T2, ..."
       argsPart = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') headerLine
-      argCount = if T.null argsPart then 0
-                 else length (T.splitOn "," argsPart)
+      argDecls = if T.null (T.strip argsPart) then []
+                 else map parseHeaderArg (T.splitOn "," argsPart)
+      argCount = length argDecls
 
       -- Parse local declarations and basic blocks
       (locals, blocks) = parseBodyContents bodyLines
 
+      -- Merge: args (_1.._N) are not in `let` declarations, so synthesize them.
+      -- Build a complete locals list sorted by index: _0 (return) from lets,
+      -- _1.._N from header, remaining from lets.
+      localMap = foldr (\l m -> insertIdx (localIndex l) l m) [] (argDecls ++ locals)
+
   in MirBody
     { mirName = name
     , mirArgCount = argCount
-    , mirLocals = locals
+    , mirLocals = localMap
     , mirBlocks = blocks
     }
+
+-- | Insert a local decl into a sorted-by-index list, skipping duplicates
+insertIdx :: Int -> MirLocalDecl -> [MirLocalDecl] -> [MirLocalDecl]
+insertIdx _ d [] = [d]
+insertIdx _ d (x:xs)
+  | localIndex d == localIndex x = x : xs  -- existing takes priority
+  | localIndex d < localIndex x  = d : x : xs
+  | otherwise                    = x : insertIdx (localIndex d) d xs
+
+-- | Parse a single header argument like "_1: i64" into a MirLocalDecl
+parseHeaderArg :: Text -> MirLocalDecl
+parseHeaderArg arg =
+  let stripped = T.strip arg
+      (varPart, rest) = T.breakOn ":" stripped
+      ty = T.strip (T.drop 1 rest)
+      idx = case T.stripPrefix "_" (T.strip varPart) of
+              Just numText -> case reads (T.unpack numText) of
+                ((n, ""):_) -> n
+                _           -> 0
+              Nothing       -> 0
+  in MirLocalDecl { localIndex = idx, localType = ty, localMutability = MirNot }
 
 parseBodyContents :: [Text] -> ([MirLocalDecl], [MirBasicBlock])
 parseBodyContents ls =
@@ -860,7 +889,7 @@ classifyBlockLines ls =
   in case reverse meaningful of
        [] -> ([], Nothing)
        (lastLine : revRest)
-         | isTerminatorLine lastLine -> (reverse revRest, Just (convertTextLine lastLine))
+         | isTerminatorLine lastLine -> (map convertTextLine (reverse revRest), Just (convertTextLine lastLine))
          | otherwise -> (map convertTextLine meaningful, Nothing)
 
 -- | Lines to skip (not semantically meaningful for our translation)
@@ -901,9 +930,18 @@ convertTextLine line =
      else noSemi
 
 parseLocalDecl :: Int -> Text -> MirLocalDecl
-parseLocalDecl idx line =
+parseLocalDecl fallbackIdx line =
   let stripped = T.stripStart line
       isMut = "let mut" `T.isPrefixOf` stripped
+      -- Extract actual index from "_N" in "let [mut] _N: Type;"
+      afterLet = if isMut then T.drop 8 stripped   -- "let mut "
+                 else T.drop 4 stripped             -- "let "
+      varName = T.takeWhile (/= ':') (T.strip afterLet)
+      idx = case T.stripPrefix "_" varName of
+              Just numText -> case reads (T.unpack numText) of
+                ((n, ""):_) -> n
+                _           -> fallbackIdx
+              Nothing       -> fallbackIdx
       -- Extract type from "let [mut] _N: Type;"
       afterColon = T.strip $ T.drop 1 $ T.dropWhile (/= ':') stripped
       ty = T.takeWhile (/= ';') afterColon

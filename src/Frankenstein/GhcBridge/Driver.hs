@@ -19,6 +19,7 @@ import GHC.Unit.Module.ModGuts (ModGuts(..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Process (readProcess)
+import System.Directory (doesFileExist)
 
 import Frankenstein.GhcBridge.CoreTranslate (translateProgram)
 import Frankenstein.Core.Types (Program)
@@ -30,9 +31,14 @@ data GhcCoreResult = GhcCoreResult
   } deriving (Show)
 
 -- | Detect the GHC library directory by running @ghc --print-libdir@.
+-- We try GHC 9.14.1 first (matches our build-depends constraint),
+-- then fall back to whatever 'ghc' is on PATH.
 detectLibDir :: IO FilePath
 detectLibDir = do
-  raw <- readProcess "ghc" ["--print-libdir"] ""
+  let ghc914 = "/usr/lib64/ghc-9.14.1/bin/ghc"
+  exists <- doesFileExist ghc914
+  let ghcCmd = if exists then ghc914 else "ghc"
+  raw <- readProcess ghcCmd ["--print-libdir"] ""
   pure (filter (/= '\n') raw)
 
 -- | Compile a Haskell file through GHC and get Core output.

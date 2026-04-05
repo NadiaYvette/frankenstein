@@ -79,7 +79,7 @@ parseArgs args
   | "--demo" `elem` args = DemoMode (parseFlags args)
   | otherwise =
       let flags = parseFlags args
-          (files, _flagArgs) = partition (not . isFlag) args
+          (files, _flagArgs) = partition (not . isFlag) (removeArgValues args)
       in if null files
          -- --from-json with no file argument means read stdin
          then if flagFromJson flags
@@ -89,7 +89,15 @@ parseArgs args
 
 isFlag :: String -> Bool
 isFlag ('-':'-':_) = True
+isFlag "-o" = True
 isFlag _ = False
+
+-- | Remove flag arguments (e.g. the path after -o or --output) from the list
+removeArgValues :: [String] -> [String]
+removeArgValues [] = []
+removeArgValues ("-o":_:rest) = removeArgValues rest
+removeArgValues ("--output":_:rest) = removeArgValues rest
+removeArgValues (x:rest) = x : removeArgValues rest
 
 parseFlags :: [String] -> Flags
 parseFlags args = Flags

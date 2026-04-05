@@ -121,6 +121,7 @@ rewriteExternExpr m = go
     go (F.ETypeLam tvs e) = F.ETypeLam tvs (go e)
     go (F.EPerform qn args) = F.EPerform qn (map go args)
     go (F.EHandle eff h b) = F.EHandle eff (go h) (go b)
+    go (F.EFunRef qn) = F.EFunRef qn
     go e = e  -- ELit, ECon
     goBind b = b { F.bindExpr = go (F.bindExpr b) }
     goBranch br = br { F.branchBody = go (F.branchBody br) }

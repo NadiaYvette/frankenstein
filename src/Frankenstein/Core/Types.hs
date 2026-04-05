@@ -151,6 +151,8 @@ data Expr
   -- Laziness (Haskell bridge)
   | EDelay   Expr                         -- ^ Create thunk (suspend computation)
   | EForce   Expr                         -- ^ Force thunk
+  -- First-class function reference (for passing function pointers)
+  | EFunRef  QName                        -- ^ Reference to a named function
   deriving (Show, Eq)
 
 -- Bindings

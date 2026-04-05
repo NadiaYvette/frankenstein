@@ -431,6 +431,8 @@ rewriteExpr homeMod selfName symTab conTab = go Set.empty
       EForce e ->
         let (e', ws, es) = go locals e in (EForce e', ws, es)
 
+      EFunRef qn -> (EFunRef qn, [], [])
+
     goList locals exprs =
       let results = map (go locals) exprs
       in ( map (\(e,_,_) -> e) results
@@ -610,6 +612,7 @@ collectVarNames = go
     go (EReuse e1 e2) = go e1 ++ go e2
     go (EDelay e) = go e
     go (EForce e) = go e
+    go (EFunRef _) = []
 
     goBranch (Branch pat guard body) =
       let bound = patternBinds pat
@@ -646,6 +649,7 @@ collectConQNames = go
     go (EReuse e1 e2) = go e1 ++ go e2
     go (EDelay e) = go e
     go (EForce e) = go e
+    go (EFunRef _) = []
 
     goBranch (Branch _ guard body) =
       maybe [] go guard ++ go body
@@ -715,6 +719,7 @@ collectAppArities = go
     go (EReuse e1 e2) = go e1 ++ go e2
     go (EDelay e) = go e
     go (EForce e) = go e
+    go (EFunRef _) = []
 
     goBranch (Branch _ guard body) =
       maybe [] go guard ++ go body

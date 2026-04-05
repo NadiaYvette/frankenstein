@@ -19,10 +19,10 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Process (readCreateProcessWithExitCode, proc, cwd)
 import System.Exit (ExitCode(..))
-import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile)
+import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile, removeDirectoryRecursive)
 import System.FilePath (takeBaseName, takeFileName, (</>))
 import Data.List (isPrefixOf, find)
-import Control.Exception (try, IOException)
+import Control.Exception (try, catch, IOException)
 
 -- Mercury determinism categories
 data MercuryDet
@@ -82,6 +82,8 @@ dumpHlds inputPath = do
   let moduleName = takeBaseName inputPath
   tmpDir <- getTemporaryDirectory
   let workDir = tmpDir </> "frankenstein-mercury-" ++ moduleName
+  -- Clean any stale files from previous runs (mmc reuses .o/.c files)
+  removeDirectoryRecursive workDir `catch` (\(_ :: IOException) -> pure ())
   createDirectoryIfMissing True workDir
   -- Copy source file to temp working directory
   copyFile absPath (workDir </> takeFileName inputPath)
@@ -91,17 +93,21 @@ dumpHlds inputPath = do
     ""
   case result :: Either IOException (ExitCode, String, String) of
     Left exc -> pure $ Left $ T.pack $ "Failed to invoke mmc: " ++ show exc
-    Right (ExitFailure code, _, stderr) ->
-      pure $ Left $ T.pack $ "mmc failed (exit " ++ show code ++ "): " ++ stderr
-    Right (ExitSuccess, _, _) -> do
-      -- Find the dump file in the work directory
+    Right (exitCode, _, stderr) -> do
+      -- Find the dump file in the work directory.
+      -- mmc may exit with failure (e.g. link error for library modules)
+      -- but still generate the HLDS dump file, which is all we need.
       files <- listDirectory workDir
       let dumpFile = find (\f -> (moduleName ++ ".hlds_dump") `isPrefixOf` f) files
       case dumpFile of
-        Nothing -> pure $ Left $ "HLDS dump file not found after mmc in " <> T.pack workDir
         Just f -> do
           contents <- TIO.readFile (workDir </> f)
           pure $ Right contents
+        Nothing -> case exitCode of
+          ExitFailure code ->
+            pure $ Left $ T.pack $ "mmc failed (exit " ++ show code ++ "): " ++ stderr
+          ExitSuccess ->
+            pure $ Left $ "HLDS dump file not found after mmc in " <> T.pack workDir
 
 -- | Parse a textual HLDS dump into structured form.
 parseHldsDump :: Text -> Either Text MercuryHLDS
@@ -265,8 +271,7 @@ parseGoalLines ls =
       | any ("% conjunction" `T.isInfixOf`) stripped &&
         length conjParts > 1 ->
           GoalConj (map parseGoalLines conjParts)
-      | any ("% disjunction" `T.isInfixOf`) stripped ||
-        (length disjParts > 1) ->
+      | length disjParts > 1 ->
           GoalDisj (map parseGoalLines disjParts)
       | otherwise -> parseSingleGoal (T.unlines (filter (not . isComment) stripped))
 

@@ -158,6 +158,10 @@ toKokaExpr = \case
     expr' <- toKokaExpr expr
     pure $ KC.App (KC.Var (KC.TName (KN.newQualified "std/core" "kk_thunk_force") anyKokaType) KC.InfoNone) [expr']
 
+  F.EFunRef qn ->
+    -- Function reference: emit as a variable reference to the qualified name
+    pure $ KC.Var (KC.TName (KN.newQualified (T.unpack (F.qnameModule qn)) (T.unpack (F.nameText (F.qnameName qn)))) anyKokaType) KC.InfoNone
+
 -- ============================================================================
 -- Branch/Pattern translation
 -- ============================================================================

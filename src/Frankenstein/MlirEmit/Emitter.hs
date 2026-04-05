@@ -150,6 +150,10 @@ emitProgramText prog =
     , "  func.func private @kk_evv_get(i64, i64) -> i64"
     , "  func.func private @kk_unhandled_effect() -> i64"
     , ""
+    , "  // Mercury choice effect runtime (multi-shot backtracking)"
+    , "  func.func private @mercury_choose() -> i64"
+    , "  func.func private @mercury_collect_choices(i64) -> i64"
+    , ""
     , "  // Lifted functions"
     , liftedFns
     , ""
@@ -518,6 +522,24 @@ emitExpr (EForce e) = do
 -- Type application / abstraction: pass through to inner expr
 emitExpr (ETypeApp e _) = emitExpr e
 emitExpr (ETypeLam _ e) = emitExpr e
+
+-- Function reference: get a function pointer as i64
+-- Uses func.constant to get a reference to a func.func-defined function,
+-- then converts to i64 via an intermediate unrealized_conversion_cast.
+emitExpr (EFunRef qn) = do
+  let fname = sanitizeName (nameText (qnameName qn))
+      qualName = if T.null (qnameModule qn) then fname
+                 else sanitizeName (qnameModule qn) <> "_" <> fname
+  refName <- freshName "v"
+  fptrName <- freshName "v"
+  -- func.constant produces a value of function type (() -> i64)
+  -- We cast it to !llvm.ptr then to i64 to pass as a regular argument.
+  ptrName <- freshName "v"
+  pure ([ "// funref @" <> qualName
+        , "%" <> refName <> " = func.constant @" <> qualName <> " : () -> i64"
+        , "%" <> ptrName <> " = builtin.unrealized_conversion_cast %" <> refName <> " : () -> i64 to !llvm.ptr"
+        , "%" <> fptrName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
+        ], fptrName)
 
 -- Effect operations: after the evidence pass, EPerform/EHandle should be
 -- desugared to plain ELet/EApp. These cases handle any residual nodes
@@ -926,6 +948,7 @@ freeVarsExpr (ETypeApp e _)   = freeVarsExpr e
 freeVarsExpr (ETypeLam _ e)   = freeVarsExpr e
 freeVarsExpr (EPerform _ args) = Set.unions (map freeVarsExpr args)
 freeVarsExpr (EHandle _ h b)  = freeVarsExpr h `Set.union` freeVarsExpr b
+freeVarsExpr (EFunRef _)      = Set.empty
 
 brFreeVars :: Branch -> Set Name
 brFreeVars br =

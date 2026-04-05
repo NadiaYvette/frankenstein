@@ -151,6 +151,8 @@ perceusExpr scope expr = case expr of
   EHandle eff handler body ->
     EHandle eff (perceusExpr scope handler) (perceusExpr scope body)
 
+  EFunRef _ -> expr
+
 perceusBindGroup :: Map Name Multiplicity -> Bind -> Bind
 perceusBindGroup scope b = b { bindExpr = perceusExpr scope (bindExpr b) }
 
@@ -208,6 +210,7 @@ freeVars (ETypeApp e _)   = freeVars e
 freeVars (ETypeLam _ e)   = freeVars e
 freeVars (EPerform _ args) = Set.unions (map freeVars args)
 freeVars (EHandle _ h b)  = freeVars h `Set.union` freeVars b
+freeVars (EFunRef _)      = Set.empty
 
 branchFreeVars :: Branch -> Set Name
 branchFreeVars br =
@@ -247,6 +250,7 @@ analyzeUsage = go
     go (ETypeLam _ e)   = go e
     go (EPerform _ args) = Map.unionsWith (+) (map go args)
     go (EHandle _ h b)  = Map.unionWith (+) (go h) (go b)
+    go (EFunRef _)      = Map.empty
 
 unitType :: Type
 unitType = TCon (TypeCon (QName "std" (Name "unit" 0)) KindValue)

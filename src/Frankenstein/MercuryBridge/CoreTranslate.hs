@@ -35,6 +35,7 @@ import Frankenstein.MercuryBridge.HldsParse
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import Text.Read (readMaybe)
 
 -- | Translate a full Mercury HLDS module to Frankenstein Core
 translateHlds :: MercuryHLDS -> Either Text Program
@@ -52,12 +53,37 @@ translateHlds hlds = do
         , defVisibility = Public
         }
       intT = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+      -- Generate _all wrappers for multi predicates
+      multiWrappers = concatMap (makeMultiWrapper (hldsModule hlds)) (hldsPreds hlds)
   Right $ Program
     { progName = QName (hldsModule hlds) (Name "main" 0)
-    , progDefs = failHandler : defs
+    , progDefs = failHandler : defs ++ multiWrappers
     , progData = dataDecls
     , progEffects = mercuryEffects
     }
+
+-- | Generate _all wrapper for multi predicates.
+-- For a multi predicate @pick@, generates @pick_all@ which calls
+-- @mercury_collect_choices@ with a function pointer to @pick@.
+-- This enumerates all choice-effect solutions and returns their sum.
+makeMultiWrapper :: Text -> MercuryPred -> [Def]
+makeMultiWrapper _modName pred'
+  | predDet pred' `elem` [Multi, Nondet, CCMulti, CCNondet] =
+      let rawName = predName pred'
+          -- The raw predicate's mangled name after evidence pass
+          mangledName = "mercury_" <> rawName
+          wrapperName = rawName <> "_all"
+          intT = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+      in [ Def
+             { defName = QName "" (Name wrapperName 0)
+             , defType = TFun [] EffectRowEmpty intT
+             , defExpr = EApp (EVar (Name "mercury_collect_choices" 0))
+                              [EFunRef (QName "mercury" (Name rawName 0))]
+             , defSort = DefFun
+             , defVisibility = Public
+             }
+         ]
+  | otherwise = []
 
 -- | Built-in effect declarations for Mercury's determinism system
 mercuryEffects :: [EffectDecl]
@@ -173,9 +199,12 @@ detToEffectRow CCNondet  = EffectRowExtend (QName "mercury" (Name "exn" 0))
 -- | Translate a Mercury goal to a Frankenstein expression
 translateGoal :: MercuryGoal -> Expr
 translateGoal (GoalUnify x y) =
-  -- Unification becomes equality check or assignment depending on mode
-  -- For now: just emit as a call to unify
-  EApp (EVar (Name "unify" 0)) [EVar (Name x 0), EVar (Name y 0)]
+  -- Unification: if one side is a numeric literal, return it directly
+  -- (output mode: assignment). Otherwise emit as equality/unify call.
+  case (readMaybe (T.unpack y) :: Maybe Integer, readMaybe (T.unpack x) :: Maybe Integer) of
+    (Just n, _) -> ELit (LitInt n)   -- X = 42  →  return 42
+    (_, Just n) -> ELit (LitInt n)   -- 42 = X  →  return 42
+    _           -> EApp (EVar (Name "unify" 0)) [EVar (Name x 0), EVar (Name y 0)]
 
 translateGoal (GoalCall predName' args)
   -- Mercury builtin comparison: "int.>" etc. → comparison that returns bool

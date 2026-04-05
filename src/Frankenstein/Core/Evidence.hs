@@ -242,6 +242,9 @@ evidenceExpr effs scope expr = case expr of
   EDelay e        -> EDelay (evidenceExpr effs scope e)
   EForce e        -> EForce (evidenceExpr effs scope e)
 
+  -- Function reference: pass through
+  EFunRef _       -> expr
+
 
 -- | Create a binding for a single operation extracted from an evidence record.
 -- @ev_<eff>_<op> = evv_select(ev_<eff>, <index>)@

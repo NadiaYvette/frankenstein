@@ -504,6 +504,7 @@ prettyExpr (EDelay e) = "delay(" <> prettyExpr e <> ")"
 prettyExpr (EForce e) = "force(" <> prettyExpr e <> ")"
 prettyExpr (EPerform eff args) =
   "perform " <> ppQName eff <> "(" <> T.intercalate ", " (map prettyExpr args) <> ")"
+prettyExpr (EFunRef qn) = "&" <> ppQName qn
 prettyExpr _ = "..."
 
 ppQName :: QName -> Text

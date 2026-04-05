@@ -135,6 +135,65 @@ int64_t kk_unhandled_effect(void) {
     return 0;
 }
 
+/* Mercury choice effect support — multi-shot effect via iterative path enumeration
+ *
+ * mercury_choose() returns 0 or 1 based on a global path variable.
+ * mercury_collect_choices(fn_ptr) runs the body for all binary choice paths,
+ * summing the results.  Each call to mercury_choose() reads one bit from
+ * the path, so N choices yield up to 2^N paths.
+ *
+ * Short paths (where the body makes fewer choices than the max depth)
+ * are deduplicated: a result is only counted when the unused high bits
+ * of the path are all zero.
+ */
+
+#include <string.h>
+
+static int64_t mercury_choice_decisions[64];
+static int64_t mercury_choice_pos = 0;
+
+int64_t mercury_choose(void) {
+    return mercury_choice_decisions[mercury_choice_pos++];
+}
+
+int64_t mercury_collect_choices(int64_t fn_ptr) {
+    typedef int64_t (*body_fn_t)(void);
+    body_fn_t body = (body_fn_t)fn_ptr;
+
+    /* Phase 1: discover max depth by running with all-0 decisions */
+    memset(mercury_choice_decisions, 0, sizeof(mercury_choice_decisions));
+    mercury_choice_pos = 0;
+    body();
+    int64_t max_depth = mercury_choice_pos;
+    if (max_depth == 0) {
+        /* No choices made — single deterministic result */
+        mercury_choice_pos = 0;
+        return body();
+    }
+
+    /* Phase 2: enumerate all 2^max_depth paths */
+    int64_t total_paths = 1LL << max_depth;
+    int64_t sum = 0;
+    for (int64_t path = 0; path < total_paths; path++) {
+        /* Set decisions from bits of path */
+        for (int64_t i = 0; i < max_depth; i++) {
+            mercury_choice_decisions[i] = (path >> i) & 1;
+        }
+        mercury_choice_pos = 0;
+        int64_t result = body();
+        int64_t depth = mercury_choice_pos;
+
+        /* Only count if unused bits (beyond depth) are all zero.
+         * This avoids double-counting short paths that are reached
+         * by multiple path prefixes. */
+        int64_t used_mask = (1LL << depth) - 1;
+        if ((path & used_mask) == path) {
+            sum += result;
+        }
+    }
+    return sum;
+}
+
 /* Thunk support for lazy evaluation (Haskell bridge)
  *
  * Thunk layout (using kk_alloc_con with tag=0xLAZY):

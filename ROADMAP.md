@@ -228,7 +228,7 @@ for its own compilation (though still using GHC as a frontend).
 
 ---
 
-## Current State (2026-03-29)
+## Current State (2026-04-05)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
@@ -239,12 +239,16 @@ for its own compilation (though still using GHC as a frontend).
 - **MLIR emitter**: func/arith/scf/llvm dialects, lambda lifting, closures with
   real function pointers, thunks, bool/char/int/float/string support
 - **Runtime**: Perceus RC (`kk_retain`/`kk_drop`), boxed values, thunks
-- **K specs**: OrganIR typing + Perceus (organ-ir.k), 73 krun tests, 47 bridge
-  property tests, 20 kprove-verified claims
-- **Test suite**: 28 cabal unit tests, K test oracle plan
-- **End-to-end**: `--demo --compile` → 3628800, `factorial.kk --compile` → 3628800
+- **K specs**: OrganIR typing + Perceus + full effect semantics (organ-ir.k),
+  104 krun tests (incl. 9 algebraic effect tests), 47 bridge property tests,
+  20 kprove-verified claims
+- **Effect semantics in K**: Full `EPerform`/`EHandle` with delimited continuation
+  capture, abort (exn) and resume (choice) patterns, nested handler support
+- **Test suite**: 28 cabal unit tests, 5 polyglot end-to-end tests, K test oracle
+- **End-to-end**: `--demo --compile` → 3628800, 4-language polyglot → 69/1/144
 
 ### Recent Commits
+- `ac1a533` — Phase 1b: polyglot test suite, Mercury choice effect (multi-shot)
 - `093f0ce` — Closures, thunks, MIR parsing, linker, evidence, strings
 - `95f43c8` — Perceus retains, MLIR improvements, data decls, tests, kprove
 - `3a447a8` — Bridge property K specs, kprove claims, MLIR boolean codegen fix

@@ -92,6 +92,7 @@ module ORGAN-IR-SYNTAX
 
   // --- Expressions ---
   syntax ExprList ::= List{Expr, ","}
+  syntax ExprList ::= "noArgs" [function, symbol(noArgs)]
 
   syntax Expr ::= EVar(Name)                          [symbol(EVar)]
                 | ELit(Lit)                            [symbol(ELit)]
@@ -159,6 +160,7 @@ module ORGAN-IR-TYPING
     <heap> .Map </heap>
     <nextAddr> 0 </nextAddr>
     <effectStack> .List </effectStack>
+    <kontAccum> .List </kontAccum>
 
   // --- Typing judgment ---
   syntax KItem ::= typeOf(Expr)              [symbol(typeOf)]
@@ -191,6 +193,9 @@ module ORGAN-IR-TYPING
   rule charType()   => TCon(typecon(charQName(),   KValue))
   rule stringType() => TCon(typecon(stringQName(), KValue))
   rule unitType()   => TCon(typecon(unitQName(),   KValue))
+
+  // --- Empty expression list helper ---
+  rule noArgs => .ExprList
 
   // --- Literal typing ---
   rule <k> typeOf(ELit(litInt(_)))    => #type(intType())    ...</k>
@@ -705,6 +710,9 @@ module ORGAN-IR-EVAL
                   | thunkVal(Value)                       [symbol(thunkVal)]
                   | conVal(QName, ValueList)               [symbol(conVal)]
                   | unitVal()                              [symbol(unitVal)]
+                  // Captured delimited continuation (for algebraic effects)
+                  // kontVal(Frames, PerfEnv, HandlerEff, HandlerVal, HandlerEnv)
+                  | kontVal(List, Map, EffectRow, Value, Map) [symbol(kontVal)]
 
   syntax ValueList ::= List{Value, ":"}
 
@@ -734,6 +742,12 @@ module ORGAN-IR-EVAL
                   | evalHandlerDone(EffectRow, Expr, Map)             [symbol(evalHandlerDone)]
                   | evalBodyDone(EffectRow, Map)                     [symbol(evalBodyDone)]
                   | matchBranches(Value, BranchList, Map)            [symbol(matchBranches)]
+                  // Effect operation continuations
+                  | evalPerfArgs(QName, ValueList, ExprList, Map)    [symbol(evalPerfArgs)]
+                  | evalPerfArgDone(QName, ValueList, ExprList, Map) [symbol(evalPerfArgDone)]
+                  | findHandler(QName, ValueList, Map)               [symbol(findHandler)]
+                  // Handler entry stored on the effect stack
+                  | handlerEntry(EffectRow, Value)                   [symbol(handlerEntry)]
 
   // ---------------------------------------------------------------
   // 1. Literal evaluation — already a value
@@ -814,9 +828,18 @@ module ORGAN-IR-EVAL
   rule <k> doApply2(vcon(QN), Vs) => #val(conVal(QN, Vs)) ...</k>
     [owise]
 
+  // Apply continuation (resume): restore ALL captured frames at once.
+  // The single argument V becomes the result of the original EPerform.
+  // listToK converts the frame list to a K sequence in one step, yielding:
+  //   #val(V) ~> frame1 ~> frame2 ~> ... ~> evalBodyDone(HEff, HEnv)
+  rule <k> doApply2(kontVal(Frames, PerfEnv, HEff, HVal, HEnv), (V:Value : .ValueList))
+           => #val(V) ~> listToK(reverseList(Frames)) ~> evalBodyDone(HEff, HEnv) ...</k>
+       <store> _ => PerfEnv </store>
+       <effectStack> ES => ListItem(handlerEntry(HEff, HVal)) ES </effectStack>
+
   // No-arg application: just return the function value
   rule <k> doApply2(V, .ValueList) => #val(V) ...</k>
-    requires notBool isClosureF(V) andBool notBool isVconF(V)
+    requires notBool isClosureF(V) andBool notBool isVconF(V) andBool notBool isKontValF(V)
 
   syntax Bool ::= isClosureF(Value) [function, symbol(isClosureF)]
   rule isClosureF(closure(_, _, _)) => true
@@ -978,30 +1001,154 @@ module ORGAN-IR-EVAL
        <store> _ => Env </store>
 
   // ---------------------------------------------------------------
-  // 11. Effect operations (simplified)
+  // 11. Algebraic Effect Operations
   //
-  // EHandle: push handler onto stack, evaluate body, pop on return.
-  // EPerform: placeholder — full delimited continuation capture
-  //           requires CPS, which is Phase 2c work.
+  // Full operational semantics for algebraic effects with delimited
+  // continuations. Supports both abort (non-resuming) and resume
+  // (tail-resumptive) handler patterns.
+  //
+  // EHandle(Eff, Handler, Body):
+  //   1. Evaluate Handler to a closure H
+  //   2. Push handlerEntry(Eff, H) onto effect stack
+  //   3. Evaluate Body
+  //   4. If body returns normally: pop handler, return value
+  //   5. If body performs an operation in Eff: see EPerform below
+  //
+  // EPerform(EffQN, Args):
+  //   1. Evaluate args to values
+  //   2. Search K cell for evalBodyDone matching EffQN
+  //   3. Capture intermediate frames as a delimited continuation
+  //   4. Call handler with (args..., continuation)
+  //   5. If handler returns without calling continuation: abort
+  //   6. If handler calls continuation with value V: resume, V
+  //      becomes the result of EPerform
+  //
+  // NOTE: EPerform takes the EFFECT name (e.g., qname("mercury",
+  // name("exn",0))), not the operation name. The evidence pass in
+  // the compiler resolves operations to effects; the K spec models
+  // the abstract semantics directly.
   // ---------------------------------------------------------------
 
+  // --- Helper: check if effect row contains a specific effect ---
+  syntax Bool ::= effectContains(EffectRow, QName) [function, symbol(effectContains)]
+  rule effectContains(effectExtend(QN, _), QN) => true
+  rule effectContains(effectExtend(_, Rest), QN) => effectContains(Rest, QN) [owise]
+  rule effectContains(effectEmpty, _) => false
+
+  // --- Helper: classify KItems during handler search ---
+  syntax Bool ::= isEvalBodyDone(KItem) [function, symbol(isEvalBodyDone)]
+  rule isEvalBodyDone(evalBodyDone(_, _)) => true
+  rule isEvalBodyDone(_) => false [owise]
+
+  syntax Bool ::= isKontValF(Value) [function, symbol(isKontValF)]
+  rule isKontValF(kontVal(_, _, _, _, _)) => true
+  rule isKontValF(_) => false [owise]
+
+  // --- Helper: reverse a K List (for restoring captured frames) ---
+  syntax List ::= reverseList(List) [function, symbol(reverseList)]
+  syntax List ::= reverseListAcc(List, List) [function, symbol(reverseListAcc)]
+  rule reverseList(L) => reverseListAcc(L, .List)
+  rule reverseListAcc(.List, Acc) => Acc
+  rule reverseListAcc(ListItem(X) Rest, Acc) => reverseListAcc(Rest, ListItem(X) Acc)
+
+  // -------------------------------------------
+  // EHandle: evaluate handler, install, run body
+  // -------------------------------------------
+
+  // Step 1: evaluate handler expression
   rule <k> eval(EHandle(Eff, Handler, Body))
            => eval(Handler) ~> evalHandlerDone(Eff, Body, Store) ...</k>
        <store> Store </store>
 
-  // Handler evaluated to a value; push it onto effect stack, evaluate body
+  // Step 2: handler value ready → push onto effect stack, evaluate body
   rule <k> #val(HandlerVal) ~> evalHandlerDone(Eff, Body, Env)
            => eval(Body) ~> evalBodyDone(Eff, Env) ...</k>
        <store> _ => Env </store>
-       <effectStack> ES => ListItem(HandlerVal) ES </effectStack>
+       <effectStack> ES => ListItem(handlerEntry(Eff, HandlerVal)) ES </effectStack>
 
-  // Body returns: pop handler, return value
+  // Step 3: body returns normally → pop handler, return value
   rule <k> #val(V) ~> evalBodyDone(_Eff, Env) => #val(V) ...</k>
        <store> _ => Env </store>
        <effectStack> ListItem(_) ES => ES </effectStack>
 
-  // EPerform: stub — returns unit
-  rule <k> eval(EPerform(_QN, _Args)) => #val(unitVal()) ...</k>
+  // -------------------------------------------
+  // EPerform: evaluate args, find handler, invoke
+  // -------------------------------------------
+
+  // Step 1: begin evaluating arguments
+  rule <k> eval(EPerform(EffQN, Args))
+           => evalPerfArgs(EffQN, .ValueList, Args, Store) ...</k>
+       <store> Store </store>
+
+  // No more args: proceed to handler search
+  rule <k> evalPerfArgs(EffQN, Vs, .ExprList, _Env)
+           => findHandler(EffQN, Vs, Store) ...</k>
+       <store> Store </store>
+
+  // More args: evaluate next one
+  rule <k> evalPerfArgs(EffQN, Vs, (E:Expr , Es:ExprList), Env)
+           => eval(E) ~> evalPerfArgDone(EffQN, Vs, Es, Env) ...</k>
+       <store> _ => Env </store>
+
+  // Arg evaluated: collect and continue
+  rule <k> #val(V) ~> evalPerfArgDone(EffQN, Vs, Es, Env)
+           => evalPerfArgs(EffQN, appendValue(Vs, V), Es, Env) ...</k>
+       <store> _ => Env </store>
+
+  // -------------------------------------------
+  // Handler search: pop K frames until matching evalBodyDone
+  //
+  // Frames between the perform point and the handler boundary
+  // are accumulated in <kontAccum> (prepended, then reversed
+  // when captured into kontVal).
+  // -------------------------------------------
+
+  // Pop non-evalBodyDone frame: accumulate it
+  rule <k> findHandler(EffQN, Vs, PerfEnv) ~> Frame:KItem
+           => findHandler(EffQN, Vs, PerfEnv) ...</k>
+       <kontAccum> (.List => ListItem(Frame)) ... </kontAccum>
+    requires notBool isEvalBodyDone(Frame)
+
+  // Found matching evalBodyDone: capture continuation, invoke handler
+  // The handler receives (args..., kontVal) — the continuation is
+  // always the last argument.
+  rule <k> findHandler(EffQN, Vs, PerfEnv) ~> evalBodyDone(Eff, HandlerEnv)
+           => doApply2(HandlerVal, appendValue(Vs, kontVal(Frames, PerfEnv, Eff, HandlerVal, HandlerEnv))) ...</k>
+       <store> _ => HandlerEnv </store>
+       <effectStack> ListItem(handlerEntry(_, HandlerVal)) ES => ES </effectStack>
+       <kontAccum> Frames => .List </kontAccum>
+    requires effectContains(Eff, EffQN)
+
+  // Non-matching evalBodyDone: skip it (and its handler entry)
+  // This supports nested handlers for different effects.
+  rule <k> findHandler(EffQN, Vs, PerfEnv) ~> Frame:KItem
+           => findHandler(EffQN, Vs, PerfEnv) ...</k>
+       <kontAccum> (.List => ListItem(Frame)) ... </kontAccum>
+       <effectStack> ListItem(_HE) ES => ES </effectStack>
+    requires isEvalBodyDone(Frame) andBool notBool effectContainsFromFrame(Frame, EffQN)
+
+  // Helper: extract effect row from evalBodyDone and check containment
+  syntax Bool ::= effectContainsFromFrame(KItem, QName) [function, symbol(effectContainsFromFrame)]
+  rule effectContainsFromFrame(evalBodyDone(Eff, _), QN) => effectContains(Eff, QN)
+  rule effectContainsFromFrame(_, _) => false [owise]
+
+  // Unhandled effect: K cell exhausted (findHandler alone with nothing after)
+  rule <k> findHandler(_EffQN, _Vs, _PerfEnv) => #error("unhandled effect") </k>
+       <kontAccum> _ => .List </kontAccum>
+
+  // -------------------------------------------
+  // Continuation restoration (resume)
+  //
+  // When a handler calls the continuation (kontVal), doApply2
+  // triggers restoreKont which pushes captured frames back onto
+  // K, re-installs the handler on the effect stack, and places
+  // evalBodyDone at the end so normal return still works.
+  // -------------------------------------------
+
+  // Convert a List of KItems to a K sequence (used for frame restoration)
+  syntax K ::= listToK(List) [function, symbol(listToK)]
+  rule listToK(.List) => .K
+  rule listToK(ListItem(F:KItem) Rest:List) => F ~> listToK(Rest)
 
   // ---------------------------------------------------------------
   // 12. Builtin arithmetic and string operations

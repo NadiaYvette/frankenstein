@@ -287,6 +287,78 @@ check "eval: factorial(5) = 120 via self-application" \
   '#val ( vlit ( litInt ( 120 ) ) )'
 
 echo ""
+echo "=== Algebraic Effect Operations ==="
+
+# Effect row and handler helpers used across tests
+EXN_EFF='effectExtend(qname("mercury", name("exn", 0)), effectEmpty)'
+CHOICE_EFF='effectExtend(qname("mercury", name("choice", 0)), effectEmpty)'
+EXN_QN='qname("mercury", name("exn", 0))'
+CHOICE_QN='qname("mercury", name("choice", 0))'
+
+# --- Test: EHandle with normal return (no perform) ---
+# handle(exn, \k -> 0, 42)  =>  42
+check "effect: handle with normal return" \
+  "eval(EHandle($EXN_EFF, ELam(param(name(\"k\",0), $T), ELit(litInt(0))), ELit(litInt(42))))" \
+  '#val ( vlit ( litInt ( 42 ) ) )'
+
+# --- Test: EPerform + EHandle abort (exn) ---
+# handle(exn, \k -> 99, perform exn)  =>  99
+# Handler ignores continuation, returns 99 (abort semantics)
+check "effect: perform exn aborts to handler" \
+  "eval(EHandle($EXN_EFF, ELam(param(name(\"k\",0), $T), ELit(litInt(99))), EPerform($EXN_QN, noArgs)))" \
+  '#val ( vlit ( litInt ( 99 ) ) )'
+
+# --- Test: EPerform + EHandle resume (choice) ---
+# handle(choice, \k -> k(7), perform choice)  =>  7
+# Handler calls continuation with 7 (resume semantics)
+check "effect: perform choice resumes with value" \
+  "eval(EHandle($CHOICE_EFF, ELam(param(name(\"k\",0), $T), EApp(EVar(name(\"k\",0)), ELit(litInt(7)))), EPerform($CHOICE_QN, noArgs)))" \
+  '#val ( vlit ( litInt ( 7 ) ) )'
+
+# --- Test: Resume in expression context ---
+# handle(choice, \k -> k(5), perform(choice) + 10)  =>  15
+# Perform returns 5, then 5+10=15
+check "effect: resume in expression context (5+10=15)" \
+  "eval(EHandle($CHOICE_EFF, ELam(param(name(\"k\",0), $T), EApp(EVar(name(\"k\",0)), ELit(litInt(5)))), EApp(ECon($PLUS), EPerform($CHOICE_QN, noArgs), ELit(litInt(10)))))" \
+  '#val ( vlit ( litInt ( 15 ) ) )'
+
+# --- Test: Abort discards continuation ---
+# handle(exn, \k -> 99, perform(exn) + 10)  =>  99 (not 109)
+# The + 10 is discarded because handler aborts
+check "effect: abort discards continuation (99 not 109)" \
+  "eval(EHandle($EXN_EFF, ELam(param(name(\"k\",0), $T), ELit(litInt(99))), EApp(ECon($PLUS), EPerform($EXN_QN, noArgs), ELit(litInt(10)))))" \
+  '#val ( vlit ( litInt ( 99 ) ) )'
+
+# --- Test: Perform with arguments ---
+# handle(exn, \(v, k) -> v, perform(exn, [42]))  =>  42
+# Handler receives the argument 42 and the continuation, returns 42
+check "effect: perform with argument" \
+  "eval(EHandle($EXN_EFF, ELam(param(name(\"v\",0), $T), param(name(\"k\",0), $T), EVar(name(\"v\",0))), EPerform($EXN_QN, ELit(litInt(42)))))" \
+  '#val ( vlit ( litInt ( 42 ) ) )'
+
+# --- Test: EHandle body with let + perform ---
+# handle(exn, \k -> 0, let x = 5 in perform exn)  =>  0
+check "effect: let then perform aborts" \
+  "eval(EHandle($EXN_EFF, ELam(param(name(\"k\",0), $T), ELit(litInt(0))), ELet(bind(name(\"x\",0), $T, ELit(litInt(5)), defVal), EPerform($EXN_QN, noArgs))))" \
+  '#val ( vlit ( litInt ( 0 ) ) )'
+
+# --- Test: Resume after let ---
+# handle(choice, \k -> k(3), let x = 10 in (perform(choice) + x))  =>  13
+# Perform returns 3, x is 10, 3+10=13
+check "effect: resume after let binding (3+10=13)" \
+  "eval(EHandle($CHOICE_EFF, ELam(param(name(\"k\",0), $T), EApp(EVar(name(\"k\",0)), ELit(litInt(3)))), ELet(bind(name(\"x\",0), $T, ELit(litInt(10)), defVal), EApp(ECon($PLUS), EPerform($CHOICE_QN, noArgs), EVar(name(\"x\",0))))))" \
+  '#val ( vlit ( litInt ( 13 ) ) )'
+
+# --- Test: Nested handle (different effects) ---
+# handle(choice, \k -> k(1),
+#   handle(exn, \k -> 0,
+#     perform(choice) + 5))
+# => 6 (choice handler resumes with 1, 1+5=6, exn handler unused)
+check "effect: nested handlers, inner unused" \
+  "eval(EHandle($CHOICE_EFF, ELam(param(name(\"k\",0), $T), EApp(EVar(name(\"k\",0)), ELit(litInt(1)))), EHandle($EXN_EFF, ELam(param(name(\"k2\",0), $T), ELit(litInt(0))), EApp(ECon($PLUS), EPerform($CHOICE_QN, noArgs), ELit(litInt(5))))))" \
+  '#val ( vlit ( litInt ( 6 ) ) )'
+
+echo ""
 echo "============================================================"
 echo "=== Bridge Translation Properties ==="
 echo "============================================================"

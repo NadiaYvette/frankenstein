@@ -94,11 +94,16 @@ emitProgramText prog =
   let -- Rename user's "main" to "_frankenstein_main" so we can generate our own entry point
       defs = progDefs prog
       hasMain = any (\d -> nameText (qnameName (defName d)) == "main") defs
+      -- Rename main and strip EDelay wrapper (GHC marks main as lazy, but
+      -- the entry point should be evaluated eagerly, not thunked)
       renamedDefs = if hasMain
         then map (\d -> if nameText (qnameName (defName d)) == "main"
-                        then d { defName = QName "" (Name "_frankenstein_main" 99) }
+                        then d { defName = QName "" (Name "_frankenstein_main" 99)
+                               , defExpr = stripTopDelay (defExpr d) }
                         else d) defs
         else defs
+      stripTopDelay (EDelay e) = e
+      stripTopDelay e           = e
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
@@ -106,17 +111,33 @@ emitProgramText prog =
         [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
           <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
         | (gn, s) <- esStringLits finalState ]
+      -- Check if _frankenstein_main already prints (i.e. main calls print/putStrLn).
+      -- If so, the wrapper should not print the return value.
+      mainPrints = any (\d -> nameText (qnameName (defName d)) == "main"
+                         && exprCallsPrint (defExpr d)) defs
       mainWrapper = if hasMain
-        then T.unlines
-          [ "  func.func @main() -> i32 {"
-          , "    %result = func.call @_frankenstein_main() : () -> i64"
-          , "    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr"
-          , "    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
-          , "    %zero = arith.constant 0 : i32"
-          , "    func.return %zero : i32"
-          , "  }"
-          ]
+        then if mainPrints
+          then T.unlines
+            [ "  func.func @main() -> i32 {"
+            , "    func.call @_frankenstein_main() : () -> i64"
+            , "    %zero = arith.constant 0 : i32"
+            , "    func.return %zero : i32"
+            , "  }"
+            ]
+          else T.unlines
+            [ "  func.func @main() -> i32 {"
+            , "    %result = func.call @_frankenstein_main() : () -> i64"
+            , "    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr"
+            , "    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
+            , "    %zero = arith.constant 0 : i32"
+            , "    func.return %zero : i32"
+            , "  }"
+            ]
         else ""
+      exprCallsPrint (EApp (EVar fn) _) = nameText fn == "print"
+      exprCallsPrint (EDelay e)          = exprCallsPrint e
+      exprCallsPrint (ELet _ body)       = exprCallsPrint body
+      exprCallsPrint _                   = False
   in T.unlines
     [ "module {"
     , ""
@@ -302,6 +323,20 @@ emitExpr (EApp (EVar fn) [a, b])
   | nameText fn == ">" || nameText fn == "gt"  = emitCmpOp "sgt" a b
   | nameText fn == "<=" || nameText fn == "le" = emitCmpOp "sle" a b
   | nameText fn == ">=" || nameText fn == "ge" = emitCmpOp "sge" a b
+
+-- Haskell print/putStrLn: emit as printf call
+-- GHC desugars print to dictionary-passing, but after stripping dicts
+-- we get a bare call to print with one argument.
+emitExpr (EApp (EVar fn) [arg])
+  | nameText fn == "print" = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      fmtName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> fmtName <> " = llvm.mlir.addressof @fmt_int : !llvm.ptr"
+        , "llvm.call @printf(%" <> fmtName <> ", %" <> argName <> ") vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
+        , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
 
 -- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)
 emitExpr (EApp (EVar fn) [evvArg, idxArg])
@@ -491,6 +526,8 @@ emitExpr (EReuse ref alloc) = do
         ], resultName)
 
 -- Laziness (thunks) — lambda-lift the delayed expression and call kk_thunk_create
+-- The lifted body is a regular func.func. We use func.constant + index_cast to
+-- get a function pointer as i64, avoiding llvm.mlir.addressof incompatibility.
 emitExpr (EDelay e) = do
   -- Lambda-lift e to a zero-arg function
   liftedName <- freshName "thunk_body"
@@ -502,7 +539,8 @@ emitExpr (EDelay e) = do
         [ "    func.return %" <> bodyResult <> " : " <> mlirRetTy
         , "  }" ]
   addLiftedFn fnText
-  -- Get the function pointer and call kk_thunk_create
+  -- Get the function pointer via llvm.mlir.addressof (will resolve after func-to-llvm)
+  -- We emit the addressof + ptrtoint inline; mlir-opt must run func-to-llvm first.
   addrName <- freshName "v"
   fptrName <- freshName "v"
   resultName <- freshName "v"

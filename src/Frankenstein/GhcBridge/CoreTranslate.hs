@@ -136,7 +136,19 @@ trExpr (Lam b e)
 trExpr (Let bind body) =
   F.ELet (translateBind bind) (trExpr body)
 
--- Case: translate scrutinee and alternatives
+-- Case: simplify I# unboxing pattern, then translate
+-- GHC Core: case scrut of { I# ds# -> rhs } → let ds# = scrut in rhs
+-- This strips the integer boxing that GHC uses internally.
+trExpr (Case scrut bndr _ty [Alt (DataAlt dc) [innerBndr] rhs])
+  | getOccString (dataConName dc) == "I#" =
+      F.ELet [[ F.Bind
+        { F.bindName = translateName innerBndr
+        , F.bindType = translateType (varType innerBndr)
+        , F.bindExpr = trExpr scrut
+        , F.bindSort = F.DefVal
+        }
+      ]] (trExpr rhs)
+-- General case: translate scrutinee and alternatives
 trExpr (Case scrut _bndr _ty alts) =
   F.ECase (trExpr scrut) (map translateAlt alts)
 

@@ -6,10 +6,14 @@
  *
  * The refcount lives at (ptr - 8). Fields start at (ptr + 8).
  * A null/zero pointer means "unboxed integer" and is not dereferenced.
+ *
+ * The high byte of the refcount encodes the cycle collector color
+ * (see kk_cycle.h). Normal RC operations use the low 56 bits.
  */
 
 #include <stdlib.h>
 #include <stdint.h>
+#include "kk_cycle.h"
 
 /* Raw allocation: size in bytes */
 void* kk_alloc(int64_t size) {
@@ -37,15 +41,33 @@ static inline int64_t* kk_rc_ptr(int64_t ptr) {
 
 void kk_retain(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
-    (*kk_rc_ptr(ptr))++;
+    int64_t* rc = kk_rc_ptr(ptr);
+    /* Increment only the count bits, preserve color */
+    int64_t count = (*rc & KK_RC_MASK) + 1;
+    *rc = (*rc & KK_COLOR_MASK) | count;
+    /* Retained objects are live — mark black */
+    *rc = (*rc & KK_RC_MASK) | KK_COLOR_BLACK;
 }
 
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
-    if (--(*rc) <= 0) {
-        /* Free the whole block. The malloc'd pointer is at (ptr - 8). */
+    int64_t count = (*rc & KK_RC_MASK);
+    if (count <= 1) {
+        /* Refcount reaches zero — free children and this object */
+        *rc = KK_COLOR_BLACK;  /* mark black, rc=0 */
+        /* Recursively drop children */
+        int64_t nf = kk_nfields(ptr);
+        int64_t* fields = (int64_t*)(ptr + 8);
+        for (int64_t i = 0; i < nf; i++) {
+            kk_drop(fields[i]);
+        }
+        kk_unregister_nfields(ptr);
         free((void*)(ptr - 8));
+    } else {
+        /* Decrement but don't free — possible cycle root */
+        *rc = (*rc & KK_COLOR_MASK) | (count - 1);
+        kk_cycle_candidate(ptr);
     }
 }
 
@@ -56,7 +78,7 @@ void kk_release(int64_t ptr) {
 int64_t kk_reuse(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return 0;
     int64_t* rc = kk_rc_ptr(ptr);
-    if (*rc == 1) {
+    if ((*rc & KK_RC_MASK) == 1) {
         /* Sole owner — reuse the allocation */
         return ptr;
     }
@@ -85,14 +107,17 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
     int64_t total = (2 + nfields) * 8;  /* rc + tag + fields */
     int64_t* block = (int64_t*)malloc((size_t)total);
     if (!block) return 0;
-    block[0] = 1;          /* refcount = 1 */
-    block[1] = tag;         /* tag */
+    block[0] = KK_COLOR_BLACK | 1;  /* color=black, refcount = 1 */
+    block[1] = tag;                  /* tag */
     /* Zero-init fields */
     for (int64_t i = 0; i < nfields; i++) {
         block[2 + i] = 0;
     }
     /* Return pointer to the tag slot */
-    return (int64_t)&block[1];
+    int64_t ptr = (int64_t)&block[1];
+    /* Register field count for cycle collector scanning */
+    kk_register_nfields(ptr, nfields);
+    return ptr;
 }
 
 /* Write field[idx] of a boxed value */

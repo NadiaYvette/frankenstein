@@ -2,6 +2,7 @@ module Main (main) where
 
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus)
+import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, GhcCoreResult(..))
@@ -213,6 +214,15 @@ handleOutput prog0 flags = do
       | flagEmitCore flags -> do
           TIO.putStrLn "=== Frankenstein Core ==="
           TIO.putStrLn $ prettyProgram prog
+          -- Show cycle analysis results
+          let cycles = analyzeCycles prog
+              cyclicDefs = filter ciCyclic cycles
+          if null cyclicDefs
+            then TIO.putStrLn "\n=== Cycle Analysis: all definitions acyclic ==="
+            else do
+              TIO.putStrLn "\n=== Cycle Analysis ==="
+              mapM_ (\ci -> TIO.putStrLn $ "  " <> nameText (qnameName (ciName ci))
+                            <> ": " <> ciReason ci) cyclicDefs
       | flagEmitMlir flags ->
           TIO.putStrLn $ emitProgram prog
       | otherwise -> do

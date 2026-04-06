@@ -1123,23 +1123,31 @@ compileToExecutable config prog = do
           -- because -x ir would apply to all inputs.
           case ecKokaRuntimePath config of
             Just rtPath -> do
-              let rtObjPath = ecOutputPath config ++ ".rt.o"
-              -- Compile runtime C to .o
+              -- Derive cycle collector path from runtime path
+              let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
+                  cyclePath = rtDir ++ "kk_cycle.c"
+                  rtObjPath = ecOutputPath config ++ ".rt.o"
+                  cycleObjPath = ecOutputPath config ++ ".cycle.o"
+                  optFlag = "-O" ++ show (ecOptLevel config)
+                  includeFlag = "-I" ++ rtDir
+              -- Compile runtime C files to .o
               (ec3a, _, err3a) <- readProcessWithExitCode (ecClangPath config)
-                ["-c", rtPath, "-o", rtObjPath,
-                 "-O" ++ show (ecOptLevel config)] ""
+                ["-c", rtPath, "-o", rtObjPath, includeFlag, optFlag] ""
               case ec3a of
                 ExitFailure _ -> pure $ Left $ "clang (runtime) failed: " <> T.pack err3a
                 ExitSuccess -> do
-                  -- Link LLVM IR + runtime .o → executable
-                  -- Use -x ir for .ll, then -x none to reset for .o
-                  (ec3b, _, err3b) <- readProcessWithExitCode (ecClangPath config)
-                    ["-x", "ir", llPath, "-x", "none", rtObjPath,
-                     "-o", ecOutputPath config,
-                     "-O" ++ show (ecOptLevel config)] ""
-                  case ec3b of
-                    ExitFailure _ -> pure $ Left $ "clang (link) failed: " <> T.pack err3b
-                    ExitSuccess -> pure $ Right $ ecOutputPath config
+                  (ec3c, _, err3c) <- readProcessWithExitCode (ecClangPath config)
+                    ["-c", cyclePath, "-o", cycleObjPath, includeFlag, optFlag] ""
+                  case ec3c of
+                    ExitFailure _ -> pure $ Left $ "clang (cycle) failed: " <> T.pack err3c
+                    ExitSuccess -> do
+                      -- Link LLVM IR + runtime .o + cycle .o → executable
+                      (ec3b, _, err3b) <- readProcessWithExitCode (ecClangPath config)
+                        ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath,
+                         "-o", ecOutputPath config, optFlag] ""
+                      case ec3b of
+                        ExitFailure _ -> pure $ Left $ "clang (link) failed: " <> T.pack err3b
+                        ExitSuccess -> pure $ Right $ ecOutputPath config
             Nothing -> do
               (ec3, _, err3) <- readProcessWithExitCode (ecClangPath config)
                 [llPath, "-x", "ir", "-o", ecOutputPath config,

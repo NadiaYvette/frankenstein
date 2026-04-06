@@ -133,15 +133,22 @@ All four GHC Core patterns now compile through the pipeline:
   consistently, GHC primop name recognition (`+#`, `-#`, `<#`, `==#`, `negate`),
   Num method selectors (`$fNumInt_$c+/*/negate`).
 
-### 3c. Cycle Detection
+### 3c. Cycle Detection ✓
 
-Pure Perceus cannot handle cyclic data structures (refcount never reaches 0).
-Options:
-- **Trial deletion** (Bacon-Rajan): periodic cycle collection for suspected
-  cyclic roots
-- **Weak references**: Mark back-edges in recursive data as weak (no refcount)
-- **Static analysis**: The K spec could prove absence of cycles for certain
-  program patterns, allowing the runtime to skip cycle checks
+- **Bacon-Rajan trial deletion** ✓: `runtime/kk_cycle.c` implements the synchronous
+  cycle collector — MarkRoots (trial-delete internal refs), ScanRoots (identify
+  live vs garbage), CollectRoots (free white objects). Uses color encoding in high
+  byte of refcount word (black/purple/gray/white).
+- **Runtime integration** ✓: `kk_drop()` registers cycle candidates when rc > 0
+  after decrement. `kk_alloc_con()` registers nfields in side table for child
+  scanning. Recursive child dropping on free. Existing programs unaffected.
+- **Static cycle analysis** ✓: `Core/CycleAnalysis.hs` detects potential cycle
+  sources (constructor applications capturing self-references). Reports in
+  `--emit-core` output. All current test programs correctly identified as acyclic.
+- **C test suite** ✓: 10/10 tests passing — acyclic data, cyclic pairs (A↔B),
+  cyclic triples (A→B→C→A), self-reference (A→A), mixed acyclic+cyclic.
+- **K tests** ✓: 8 new krun tests for constructor allocation, retain/drop of
+  heap objects, thunk semantics (force/delay), and RC operations on constructed data.
 
 ### 3d. Benchmark Suite
 
@@ -284,11 +291,17 @@ for its own compilation (though still using GHC as a frontend).
 - **Phase 3b: GHC Core patterns** ✓: All 4 patterns handled — typeclass dictionaries (resolved
   at -O1), unboxed primops (+#/-#/<#/==#), worker/wrapper ($w workers), join points (nested
   cases). Test programs: TypeclassTest(42), UnboxedTest(5050), WorkerWrapperTest(55), JoinPointTest(0)
+- **Phase 3c: Cycle detection** ✓: Bacon-Rajan trial deletion cycle collector in
+  `runtime/kk_cycle.c`, static cycle analysis in `Core/CycleAnalysis.hs`, 10/10 C
+  tests (pairs, triples, self-ref, mixed), 8 new K tests for RC on heap objects
+- **Runtime**: Perceus RC with cycle collection, recursive child dropping, nfields
+  side table, color encoding in refcount word
 - **Test suite**: 39 cabal tests (unit + property + bisimulation), 5 polyglot E2E,
-  K test oracle
+  K test oracle, 112 krun tests, 10 cycle collector C tests
 - **End-to-end**: `--demo --compile` → 3628800, 4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 3c: Cycle detection — Bacon-Rajan collector, static analysis, C tests, K tests
 - Phase 3b: GHC Core patterns — primops, lambda-not-thunk, Bool→i64, negate, test programs
 - Phase 3a: Haskell RC feasibility — Factorial.hs E2E, I# simplification, print builtin, profiled runtime
 - Phase 2d: extended kprove claims (120 total: bridge, evidence, linker)

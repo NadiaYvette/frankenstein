@@ -618,5 +618,47 @@ checkBridge "koka: non-TSyn fails has-body check" \
   'false'
 
 echo ""
+echo "--- Cycle-related evaluation tests ---"
+
+# Test: constructor allocation creates value (Nil)
+check "constructor: Nil evaluates to conVal" \
+  'eval(EApp(ECon(qname("", name("Nil", 0))), noArgs))' \
+  'conVal'
+
+# Test: constructor with args: Cons(1, Nil)
+check "constructor: Cons(1, Nil) evaluates to conVal" \
+  'eval(EApp(ECon(qname("", name("Cons", 0))), ELit(litInt(1)), EApp(ECon(qname("", name("Nil", 0))), noArgs)))' \
+  'conVal'
+
+# Test: nested constructor: Cons(1, Cons(2, Nil))
+check "constructor: nested Cons(1, Cons(2, Nil))" \
+  'eval(EApp(ECon(qname("", name("Cons", 0))), ELit(litInt(1)), EApp(ECon(qname("", name("Cons", 0))), ELit(litInt(2)), EApp(ECon(qname("", name("Nil", 0))), noArgs))))' \
+  'conVal'
+
+# Test: retain/drop of integer is identity/unit (no heap ops for unboxed)
+check "cycle-safe: retain(42) == 42" \
+  'eval(ERetain(ELit(litInt(42))))' \
+  'vlit ( litInt ( 42 ) )'
+
+check "cycle-safe: drop(42) == unit" \
+  'eval(EDrop(ELit(litInt(42))))' \
+  'unitVal'
+
+# Test: thunk with pure body evaluates correctly (no cycles)
+check "cycle-safe: force(delay(42)) == 42" \
+  'eval(EForce(EDelay(ELit(litInt(42)))))' \
+  'vlit ( litInt ( 42 ) )'
+
+# Test: retain/drop of constructor value (RC-tracked heap object)
+T='TCon(typecon(qname("",name("Int",0)),KStar))'
+check "cycle-safe: retain(Cons(1,Nil)) preserves value" \
+  "eval(ERetain(EApp(ECon(qname(\"\", name(\"Cons\", 0))), ELit(litInt(1)), EApp(ECon(qname(\"\", name(\"Nil\", 0))), noArgs))))" \
+  'conVal'
+
+check "cycle-safe: drop(Cons(1,Nil)) == unit" \
+  "eval(EDrop(EApp(ECon(qname(\"\", name(\"Cons\", 0))), ELit(litInt(1)), EApp(ECon(qname(\"\", name(\"Nil\", 0))), noArgs))))" \
+  'unitVal'
+
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 exit $FAIL

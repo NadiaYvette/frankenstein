@@ -40,3 +40,10 @@ k-specs/*-kompiled/
 
 # === Output directories ===
 result/
+
+# === Koka build artifacts ===
+.koka/
+
+# === Benchmark binaries and intermediate files ===
+bench/bin/
+bench/Fib

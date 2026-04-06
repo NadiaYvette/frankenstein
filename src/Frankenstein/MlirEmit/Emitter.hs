@@ -195,7 +195,7 @@ emitDef def = do
   case defExpr def of
     ELam params body -> do
       let mlirArgs = T.intercalate ", "
-            [ "%" <> nameText pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
+            [ "%" <> nameToSsa pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
           mlirRetTy = typeToMlir retType
       bodyText <- emitBody body mlirRetTy
       pure $ T.unlines
@@ -246,7 +246,7 @@ emitExpr (EVar n) = do
   -- Variable reference — assume it's already in scope as an SSA value
   -- If the name contains "/" it's a qualified Koka stdlib reference that wasn't resolved;
   -- emit a stub constant so MLIR doesn't reference an undeclared SSA value.
-  let sname = sanitizeName (nameText n)
+  let sname = nameToSsa n
   if T.any (== '/') (nameText n)
     then do
       stubName <- freshName "v"
@@ -478,7 +478,7 @@ emitExpr (ELam params body) = do
     then do
       -- No free variables: simple lambda lift (existing behavior)
       let mlirArgs = T.intercalate ", "
-            [ "%" <> nameText pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
+            [ "%" <> nameToSsa pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
           mlirRetTy = "i64"
       (bodyOps, bodyResult) <- emitExpr body
       let fnText = T.unlines $
@@ -493,8 +493,8 @@ emitExpr (ELam params body) = do
     else do
       -- Has free variables: emit closure struct
       -- The lifted function takes captured vars as extra leading params
-      let capturedParams = [ "%" <> sanitizeName (nameText cn) <> ": i64" | cn <- captured ]
-          regularParams = [ "%" <> nameText pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
+      let capturedParams = [ "%" <> nameToSsa cn <> ": i64" | cn <- captured ]
+          regularParams = [ "%" <> nameToSsa pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
           allParams = capturedParams ++ regularParams
           mlirArgs = T.intercalate ", " allParams
           mlirRetTy = "i64"
@@ -520,7 +520,7 @@ emitExpr (ELam params body) = do
       afterFptrName <- freshName "v"
       let insertFptr = "%" <> afterFptrName <> " = llvm.insertvalue %" <> baseName <> ", %" <> fptrName <> "[0] : " <> closTy
       -- Insert each captured variable
-      let capturedNames = map (sanitizeName . nameText) captured
+      let capturedNames = map nameToSsa captured
       (insertOps, finalName) <- foldInsertFields afterFptrName closTy capturedNames 1
       pure (initOps ++ [insertFptr] ++ insertOps, finalName)
 
@@ -823,7 +823,7 @@ emitPatternBindings scrutName structTy pats = do
 
 emitPatField :: Text -> Text -> (Int, Pattern) -> Emit ([Text], Text)
 emitPatField scrutName _structTy (idx, PatVar n _) = do
-  let varName = sanitizeName (nameText n)
+  let varName = nameToSsa n
   -- Fields are 0-indexed from kk_field's perspective.
   -- Pattern index 1 corresponds to field 0 (index 0 is the tag in the old scheme).
   let fieldIdx = idx - 1
@@ -876,7 +876,7 @@ emitScfIf preOps condName thenExpr elseExpr = do
 emitBind :: Bind -> Emit [Text]
 emitBind bnd = do
   (ops, resultName) <- emitExpr (bindExpr bnd)
-  let bname = sanitizeName (nameText (Frankenstein.Core.Types.bindName bnd))
+  let bname = nameToSsa (Frankenstein.Core.Types.bindName bnd)
   if bname == resultName
     then pure ops
     else do
@@ -1078,6 +1078,14 @@ effectRowNameEmit EffectRowEmpty          = "pure"
 -- Sanitize names for MLIR (replace special chars)
 sanitizeName :: Text -> Text
 sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~" :: [Char]) then '_' else c)
+
+-- | Convert a Name to a unique MLIR SSA name.
+-- For names like "_" or "ds" that commonly collide, append the unique ID.
+nameToSsa :: Name -> Text
+nameToSsa n
+  | t == "_" || t == "ds" || t == "wild" = t <> T.pack (show (nameUnique n))
+  | otherwise = sanitizeName t
+  where t = nameText n
 
 -- | Escape a string for MLIR string literal (handle backslashes, quotes, newlines)
 escapeMLIRString :: Text -> Text

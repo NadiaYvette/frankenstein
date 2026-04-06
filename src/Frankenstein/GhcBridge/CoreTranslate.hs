@@ -127,10 +127,15 @@ trExpr (App f a) =
       let args' = filter (not . isDictArg) args
       in F.EApp (trExpr fun) (map trExpr args')
 
--- Type lambda: skip type binders, recurse on body
+-- Lambda: collect consecutive value binders into a single multi-param ELam
+-- This ensures that e.g. \x y z -> body becomes ELam [(x,T),(y,T),(z,T)] body
+-- rather than nested ELam [(x,T)] (ELam [(y,T)] (ELam [(z,T)] body))
 trExpr (Lam b e)
   | isTyVar b = F.ETypeLam [translateTyVar b] (trExpr e)
-  | otherwise  = F.ELam [(translateName b, translateType (varType b))] (trExpr e)
+  | otherwise  =
+      let (moreParams, innerBody) = collectValueLams e
+          allParams = (translateName b, translateType (varType b)) : moreParams
+      in F.ELam allParams (trExpr innerBody)
 
 -- Let: translate binding groups
 trExpr (Let bind body) =
@@ -163,6 +168,21 @@ trExpr (Type _) = F.ELit (F.LitInt 0)
 
 -- Coercion: skip
 trExpr (Coercion _) = F.ELit (F.LitInt 0)
+
+-------------------------------------------------------------------------------
+-- Collect consecutive value lambda binders
+-------------------------------------------------------------------------------
+
+-- | Collect consecutive value (non-type) lambda binders, skipping type lambdas.
+collectValueLams :: CoreExpr -> ([(F.Name, F.Type)], CoreExpr)
+collectValueLams (Lam b e)
+  | isTyVar b = collectValueLams e  -- skip type binders
+  | otherwise =
+      let (more, body) = collectValueLams e
+      in ((translateName b, translateType (varType b)) : more, body)
+collectValueLams (Cast e _) = collectValueLams e
+collectValueLams (Tick _ e) = collectValueLams e
+collectValueLams e = ([], e)
 
 -------------------------------------------------------------------------------
 -- Collect nested applications into (fun, [args])

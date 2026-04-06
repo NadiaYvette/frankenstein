@@ -228,7 +228,7 @@ for its own compilation (though still using GHC as a frontend).
 
 ---
 
-## Current State (2026-04-05)
+## Current State (2026-04-06)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
@@ -244,10 +244,22 @@ for its own compilation (though still using GHC as a frontend).
   20 kprove-verified claims
 - **Effect semantics in K**: Full `EPerform`/`EHandle` with delimited continuation
   capture, abort (exn) and resume (choice) patterns, nested handler support
-- **Test suite**: 28 cabal unit tests, 5 polyglot end-to-end tests, K test oracle
+- **K oracle (Phase 2b)**: QuickCheck differential testing — random OrganIR programs
+  run through both krun and MLIR pipeline, outputs compared (70 property tests)
+- **Bridge bisimulation (Phase 2c)**: For each bridge, `krun(translate(source))`
+  compared against expected values and native compiler output. Verified:
+  - GHC: arithmetic + factorial(10)=3628800, with native `ghc` comparison
+  - Koka: arithmetic, krun matches expected
+  - Rust: arithmetic, with native `rustc` comparison
+  - Mercury: structural (semantic pending HLDS variable resolution)
+  - Expression cleaning pipeline: strip laziness/Perceus ops, normalize builtins,
+    simplify I# boxing, reorder branches, self-application for recursion
+- **Test suite**: 39 cabal tests (unit + property + bisimulation), 5 polyglot E2E,
+  K test oracle
 - **End-to-end**: `--demo --compile` → 3628800, 4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 2c: bridge bisimulation proofs (GHC, Koka, Rust, Mercury)
 - `ac1a533` — Phase 1b: polyglot test suite, Mercury choice effect (multi-shot)
 - `093f0ce` — Closures, thunks, MIR parsing, linker, evidence, strings
 - `95f43c8` — Perceus retains, MLIR improvements, data decls, tests, kprove
@@ -277,7 +289,9 @@ OrganIR → Evidence Pass → Perceus → MLIR Text → mlir-opt → mlir-transl
 
 ### K Verification Pipeline
 ```
-organ-ir.k → kompile (LLVM backend) → krun tests (73 pass)
+organ-ir.k → kompile (LLVM backend) → krun tests (104 pass)
 organ-ir.k → kompile (Haskell backend) → kprove claims (20 verified)
 bridge-properties.k → kompile (LLVM backend) → krun tests (47 pass)
+bridge bisimulation → krun(translate(source)) == native compiler (7 tests)
+K oracle → krun(random_expr) == MLIR_pipeline(random_expr) (70 property tests)
 ```

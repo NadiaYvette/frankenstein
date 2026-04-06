@@ -50,6 +50,7 @@ test-suite frankenstein-tests
     type:             exitcode-stdio-1.0
     main-is:          Main.hs
     other-modules:    KOracle
+                      BridgeBisim
     hs-source-dirs:   test
     build-depends:
         base >= 4.17 && < 5,

@@ -11,6 +11,7 @@ import Frankenstein.Core.Evidence (evidencePass)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.MlirEmit.Emitter (emitProgram)
 import KOracle (kOracleTests)
+import BridgeBisim (bridgeBisimTests)
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -67,6 +68,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , linkerTests
   , mlirEmitTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
+  , bridgeBisimTests
   ]
 
 -------------------------------------------------------------------------------

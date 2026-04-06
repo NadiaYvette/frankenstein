@@ -2,12 +2,15 @@ module Main (main) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck (QuickCheckMaxRatio(..))
+import Test.Tasty (adjustOption)
 
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus, analyzeUsage, freeVars)
 import Frankenstein.Core.Evidence (evidencePass)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.MlirEmit.Emitter (emitProgram)
+import KOracle (kOracleTests)
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -63,6 +66,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , evidenceTests
   , linkerTests
   , mlirEmitTests
+  , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   ]
 
 -------------------------------------------------------------------------------

@@ -311,18 +311,46 @@ emitExpr (EApp (EVar fn) [a, b])
   | nameText fn == "<=f" || nameText fn == "lef" = emitFloatCmpOp "ole" a b
   | nameText fn == ">=f" || nameText fn == "gef" = emitFloatCmpOp "oge" a b
 
--- Integer binary ops (existing)
+-- Integer binary ops (including GHC primops with # suffix)
 emitExpr (EApp (EVar fn) [a, b])
-  | nameText fn == "+" || nameText fn == "add" = emitBinOp "arith.addi" "i64" a b
-  | nameText fn == "-" || nameText fn == "sub" = emitBinOp "arith.subi" "i64" a b
-  | nameText fn == "*" || nameText fn == "mul" = emitBinOp "arith.muli" "i64" a b
-  | nameText fn == "/" || nameText fn == "div" = emitBinOp "arith.divsi" "i64" a b
-  | nameText fn == "==" || nameText fn == "eq" = emitCmpOp "eq" a b
-  | nameText fn == "/=" || nameText fn == "ne" = emitCmpOp "ne" a b
-  | nameText fn == "<" || nameText fn == "lt"  = emitCmpOp "slt" a b
-  | nameText fn == ">" || nameText fn == "gt"  = emitCmpOp "sgt" a b
-  | nameText fn == "<=" || nameText fn == "le" = emitCmpOp "sle" a b
-  | nameText fn == ">=" || nameText fn == "ge" = emitCmpOp "sge" a b
+  | n `elem` ["+", "add", "+#", "$fNumInt_$c+"] = emitBinOp "arith.addi" "i64" a b
+  | n `elem` ["-", "sub", "-#", "$fNumInt_$c-"] = emitBinOp "arith.subi" "i64" a b
+  | n `elem` ["*", "mul", "*#", "$fNumInt_$c*"] = emitBinOp "arith.muli" "i64" a b
+  | n `elem` ["/", "div", "quot#", "quotInt#"]  = emitBinOp "arith.divsi" "i64" a b
+  | n `elem` ["mod", "rem#", "remInt#"]          = emitBinOp "arith.remsi" "i64" a b
+  | n `elem` ["==", "eq", "==#"]                 = emitCmpOp "eq" a b
+  | n `elem` ["/=", "ne", "/=#"]                 = emitCmpOp "ne" a b
+  | n `elem` ["<", "lt", "<#"]                   = emitCmpOp "slt" a b
+  | n `elem` [">", "gt", ">#"]                   = emitCmpOp "sgt" a b
+  | n `elem` ["<=", "le", "<=#"]                 = emitCmpOp "sle" a b
+  | n `elem` [">=", "ge", ">=#"]                 = emitCmpOp "sge" a b
+  | n `elem` ["andI#", "and#"]                    = emitBinOp "arith.andi" "i64" a b
+  | n `elem` ["orI#", "or#"]                      = emitBinOp "arith.ori" "i64" a b
+  | n `elem` ["xorI#", "xor#"]                    = emitBinOp "arith.xori" "i64" a b
+  where n = nameText fn
+
+-- Unary integer operations
+emitExpr (EApp (EVar fn) [arg])
+  | nameText fn `elem` ["negate", "negateInt#", "$fNumInt_$cnegate"] = do
+      (argOps, argName) <- emitExpr arg
+      zeroName <- freshName "v"
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> zeroName <> " = arith.constant 0 : i64"
+        , "%" <> resultName <> " = arith.subi %" <> zeroName <> ", %" <> argName <> " : i64"
+        ], resultName)
+  | nameText fn == "abs" = do
+      (argOps, argName) <- emitExpr arg
+      zeroName <- freshName "v"
+      negName <- freshName "v"
+      cmpName <- freshName "v"
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> zeroName <> " = arith.constant 0 : i64"
+        , "%" <> negName <> " = arith.subi %" <> zeroName <> ", %" <> argName <> " : i64"
+        , "%" <> cmpName <> " = arith.cmpi slt, %" <> argName <> ", %" <> zeroName <> " : i64"
+        , "%" <> resultName <> " = arith.select %" <> cmpName <> ", %" <> negName <> ", %" <> argName <> " : i64"
+        ], resultName)
 
 -- Haskell print/putStrLn: emit as printf call
 -- GHC desugars print to dictionary-passing, but after stripping dicts
@@ -1025,7 +1053,7 @@ typeToMlir (TCon tc)
   | n == "f32" || n == "Float" || n == "Float32"
     = "f32"
   | n == "bool" || n == "Bool"
-    = "i1"
+    = "i64"  -- represent Bool as i64 (0/1) consistently throughout the pipeline
   | n == "ptr" || n == "Ptr"
     = "!llvm.ptr"
   | n == "unit" || n == "Unit" || n == "()" || n == "void" || n == "Void"

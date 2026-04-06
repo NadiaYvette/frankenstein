@@ -397,12 +397,21 @@ classifyBind b
 -- | Decide whether to wrap an expression in EDelay based on demand.
 -- Strict bindings: use expression directly.
 -- Absent bindings: dead code, emit a placeholder.
--- Lazy bindings: wrap in EDelay (thunk).
+-- Lazy bindings: wrap in EDelay (thunk) — UNLESS the expression is a lambda,
+-- since a lambda is already a value and thunking it is pointless.
 decideLaziness :: Var -> CoreExpr -> F.Expr
 decideLaziness b e
   | isAbsDmd (idDemandInfo b)    = F.ELit (F.LitInt 0)  -- dead code
   | isStrictDmd (idDemandInfo b) = trExpr e              -- strict: no thunk
+  | isLambda e                   = trExpr e              -- lambda is a value, no thunk needed
   | otherwise                     = F.EDelay (trExpr e)  -- lazy: wrap in thunk
+
+-- | Check if a Core expression is a lambda (possibly under type abstraction/cast/tick)
+isLambda :: CoreExpr -> Bool
+isLambda (Lam _ _)   = True
+isLambda (Cast e _)  = isLambda e
+isLambda (Tick _ e)  = isLambda e
+isLambda _           = False
 
 -------------------------------------------------------------------------------
 -- TyCon -> DataDecl translation

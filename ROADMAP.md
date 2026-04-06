@@ -234,14 +234,14 @@ for its own compilation (though still using GHC as a frontend).
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
 - **Core IR**: Multiplicity, effect rows, Perceus ops, laziness ops
 - **Perceus pass**: Drop + retain insertion, formally verified (20 kprove claims)
-- **Evidence pass**: Single-op and multi-op effect dispatch
-- **Linker**: Multi-module merging with cross-module name rewriting
+- **Evidence pass**: Single-op and multi-op effect dispatch, 13 kprove claims
+- **Linker**: Multi-module merging with cross-module name rewriting, 20 kprove claims
 - **MLIR emitter**: func/arith/scf/llvm dialects, lambda lifting, closures with
   real function pointers, thunks, bool/char/int/float/string support
 - **Runtime**: Perceus RC (`kk_retain`/`kk_drop`), boxed values, thunks
 - **K specs**: OrganIR typing + Perceus + full effect semantics (organ-ir.k),
   104 krun tests (incl. 9 algebraic effect tests), 47 bridge property tests,
-  20 kprove-verified claims
+  120 kprove-verified claims (20 Perceus + 67 bridge + 13 evidence + 20 linker)
 - **Effect semantics in K**: Full `EPerform`/`EHandle` with delimited continuation
   capture, abort (exn) and resume (choice) patterns, nested handler support
 - **K oracle (Phase 2b)**: QuickCheck differential testing — random OrganIR programs
@@ -254,11 +254,19 @@ for its own compilation (though still using GHC as a frontend).
   - Mercury: structural (semantic pending HLDS variable resolution)
   - Expression cleaning pipeline: strip laziness/Perceus ops, normalize builtins,
     simplify I# boxing, reorder branches, self-application for recursion
+- **Extended kprove claims (Phase 2d)**: 100 new claims beyond original 20 Perceus:
+  - Bridge claims (67): all 47 property functions promoted to formal verification
+    with concrete positive/negative test cases per property
+  - Evidence claims (13): no-EHandle/EPerform post-pass, single-op/multi-op
+    binding structure, nested effect scope preservation
+  - Linker claims (20): local names preserved, main never mangled, module-prefix
+    mangling correct, call graph preservation, shouldRewrite consistency
 - **Test suite**: 39 cabal tests (unit + property + bisimulation), 5 polyglot E2E,
   K test oracle
 - **End-to-end**: `--demo --compile` → 3628800, 4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 2d: extended kprove claims (120 total: bridge, evidence, linker)
 - Phase 2c: bridge bisimulation proofs (GHC, Koka, Rust, Mercury)
 - `ac1a533` — Phase 1b: polyglot test suite, Mercury choice effect (multi-shot)
 - `093f0ce` — Closures, thunks, MIR parsing, linker, evidence, strings
@@ -290,7 +298,10 @@ OrganIR → Evidence Pass → Perceus → MLIR Text → mlir-opt → mlir-transl
 ### K Verification Pipeline
 ```
 organ-ir.k → kompile (LLVM backend) → krun tests (104 pass)
-organ-ir.k → kompile (Haskell backend) → kprove claims (20 verified)
+organ-ir.k → kompile (Haskell backend) → kprove perceus-claims.k (20 verified)
+all-claims-def.k → kompile (Haskell backend) → kprove bridge-claims.k (67 verified)
+all-claims-def.k → kompile (Haskell backend) → kprove evidence-claims.k (13 verified)
+all-claims-def.k → kompile (Haskell backend) → kprove linker-claims.k (20 verified)
 bridge-properties.k → kompile (LLVM backend) → krun tests (47 pass)
 bridge bisimulation → krun(translate(source)) == native compiler (7 tests)
 K oracle → krun(random_expr) == MLIR_pipeline(random_expr) (70 property tests)

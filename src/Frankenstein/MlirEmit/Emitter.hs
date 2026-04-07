@@ -98,10 +98,16 @@ emitPapClosure fnName arity suppliedArgs = do
   nfieldsName <- freshName "v"
   ptrName <- freshName "v"
   fptrAddrName <- freshName "v"
+  fptrPtrName <- freshName "v"
   fptrName <- freshName "v"
   idxZeroName <- freshName "v"
   let wrapperParamTys = T.intercalate ", " (replicate (1 + nRemaining) "i64")
       wrapperFnTy = "(" <> wrapperParamTys <> ") -> i64"
+  -- Cast func -> !llvm.ptr -> i64. The intermediate ptr cast survives
+  -- --convert-func-to-llvm cleanly (the func.constant becomes
+  -- llvm.mlir.addressof, and reconcile-unrealized-casts collapses the
+  -- ptr->ptr cast). A direct func->i64 cast would otherwise leak through
+  -- mlir-translate as an LLVM-incompatible type.
   let allocOps =
         [ "// PAP for @" <> fnName <> " (arity " <> T.pack (show arity)
           <> ", supplied " <> T.pack (show nSupplied) <> ")"
@@ -109,7 +115,8 @@ emitPapClosure fnName arity suppliedArgs = do
         , "%" <> nfieldsName <> " = arith.constant " <> T.pack (show nFields) <> " : i64"
         , "%" <> ptrName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
         , "%" <> fptrAddrName <> " = func.constant @" <> wrapperName <> " : " <> wrapperFnTy
-        , "%" <> fptrName <> " = builtin.unrealized_conversion_cast %" <> fptrAddrName <> " : " <> wrapperFnTy <> " to i64"
+        , "%" <> fptrPtrName <> " = builtin.unrealized_conversion_cast %" <> fptrAddrName <> " : " <> wrapperFnTy <> " to !llvm.ptr"
+        , "%" <> fptrName <> " = llvm.ptrtoint %" <> fptrPtrName <> " : !llvm.ptr to i64"
         , "%" <> idxZeroName <> " = arith.constant 0 : i64"
         , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxZeroName <> ", %" <> fptrName <> ") : (i64, i64, i64) -> ()"
         ]
@@ -874,13 +881,13 @@ emitExpr (ELam params body) = do
   nfieldsName <- freshName "v"
   ptrName <- freshName "v"
   fptrAddrName <- freshName "v"
+  fptrPtrName <- freshName "v"
   fptrName <- freshName "v"
   idxZeroName <- freshName "v"
   -- Get the lifted fn's address as i64. Since @liftedName is a `func.func`
   -- (not an `llvm.func`), `llvm.mlir.addressof` would fail the verifier.
-  -- Instead, use `func.constant` to materialize a function-typed SSA value,
-  -- then `builtin.unrealized_conversion_cast` to i64. The cast resolves
-  -- through `--reconcile-unrealized-casts` after `--convert-func-to-llvm`.
+  -- Cast func -> !llvm.ptr -> i64 so reconcile-unrealized-casts can erase
+  -- the intermediate after func-to-llvm rewrites the function.
   let paramTyList = T.intercalate ", " ("i64" : replicate (length params) "i64")
       fnCastTy = "(" <> paramTyList <> ") -> i64"
   let allocOps =
@@ -889,7 +896,8 @@ emitExpr (ELam params body) = do
         , "%" <> nfieldsName <> " = arith.constant " <> T.pack (show nFields) <> " : i64"
         , "%" <> ptrName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
         , "%" <> fptrAddrName <> " = func.constant @" <> liftedName <> " : " <> fnCastTy
-        , "%" <> fptrName <> " = builtin.unrealized_conversion_cast %" <> fptrAddrName <> " : " <> fnCastTy <> " to i64"
+        , "%" <> fptrPtrName <> " = builtin.unrealized_conversion_cast %" <> fptrAddrName <> " : " <> fnCastTy <> " to !llvm.ptr"
+        , "%" <> fptrName <> " = llvm.ptrtoint %" <> fptrPtrName <> " : !llvm.ptr to i64"
         , "%" <> idxZeroName <> " = arith.constant 0 : i64"
         , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxZeroName <> ", %" <> fptrName <> ") : (i64, i64, i64) -> ()"
         ]
@@ -972,11 +980,13 @@ emitExpr (EDelay e) = do
             , "  }" ]
       addLiftedFn fnText
       addrName <- freshName "v"
+      ptrName <- freshName "v"
       fptrName <- freshName "v"
       resultName <- freshName "v"
       pure ([ "// delay (thunk) -> @" <> liftedName
             , "%" <> addrName <> " = func.constant @" <> liftedName <> " : () -> i64"
-            , "%" <> fptrName <> " = builtin.unrealized_conversion_cast %" <> addrName <> " : () -> i64 to i64"
+            , "%" <> ptrName <> " = builtin.unrealized_conversion_cast %" <> addrName <> " : () -> i64 to !llvm.ptr"
+            , "%" <> fptrName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
             , "%" <> resultName <> " = func.call @kk_thunk_create(%" <> fptrName <> ") : (i64) -> i64"
             ], resultName)
 

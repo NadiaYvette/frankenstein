@@ -439,6 +439,89 @@ The remaining 1-error-per-module pattern is partial application of top-level
 functions (callee has N params, call site supplies M<N args) — would require
 eta-expanding partial applications into closures. Left as future work.
 
+### 6d. Self-Hosting Cleanup ✓
+
+**Result**: 17 of 18 modules emit fully valid MLIR. The 18th, `OrganIR.Consumer`,
+fails earlier in the GHC frontend due to a pre-existing `text-2.1.3`/`2.1.4`
+package skew unrelated to MLIR emission.
+
+Emitter changes:
+- **PAP closures**: `emitPapClosure` allocates a heap closure via `kk_alloc_con`
+  (field 0 = wrapper fptr, fields 1..n = supplied args). `ensurePapWrapper`
+  emits a per-(fn, supplied-arity) wrapper that loads captured args from the
+  closure and tail-calls the original. Fires when `nArgs < arity` at a
+  top-level call site.
+- **Oversaturated path**: when `nArgs > arity`, call the top-level fn with the
+  first `arity` args, then closure-indirect the remainder via field-0 fptr
+  extraction (`kk_field`/`inttoptr`/`llvm.call`).
+- **Uniform i64 ABI**: all top-level fn params and return types are i64,
+  matching the closure ABI and avoiding `!llvm.ptr` leaking into kk_* runtime
+  calls and PAP wrappers.
+- **String literals → i64**: `ELit (LitString)` immediately `ptrtoint`s the
+  global address so it lives in the i64 universe.
+- **ELet alias scoping**: save/restore `esAliases` around the let body so
+  bindings don't leak into sibling `scf.if` branches as undeclared SSA refs.
+- **`ETypeLam` stripping in `emitDef`**: matches `buildTopFnArity` so emitted
+  arity equals the call-site arity table (fixed `KokaBridge.CoreTranslate`'s
+  `foldlM` mismatch).
+- **No `llvm.unreachable` in unhandled-case fallback**: it was illegal as a
+  non-terminator inside `scf.if` regions.
+
+### 6e. Self-Hosted MLIR → Native Objects ✓
+
+**Result**: All 17 self-hosted modules lower cleanly through
+`mlir-opt → mlir-translate → clang -c` and produce real ELF objects, totalling
+~1.8 MB. The biggest is `Emitter.o` at 702 KB.
+
+| Module | .o size |
+|--------|---------|
+| Core/Types | 13 KB |
+| Core/CycleAnalysis | 24 KB |
+| KokaBridge/Driver | 32 KB |
+| GhcBridge/Driver | 37 KB |
+| Core/KokaCore | 43 KB |
+| Core/Evidence | 43 KB |
+| Core/Perceus | 45 KB |
+| MlirEmit/Dialects | 47 KB |
+| Core/EffectOpt | 50 KB |
+| GhcBridge/CoreTranslate | 53 KB |
+| RustBridge/CoreTranslate | 58 KB |
+| MercuryBridge/CoreTranslate | 58 KB |
+| KokaBridge/CoreTranslate | 80 KB |
+| MercuryBridge/HldsParse | 119 KB |
+| Core/Linker | 188 KB |
+| RustBridge/MirParse | 237 KB |
+| MlirEmit/Emitter | **702 KB** |
+
+Pipeline:
+```
+frankenstein <file.hs> --emit-mlir
+  | mlir-opt --allow-unregistered-dialect --reconcile-unrealized-casts
+             --convert-scf-to-cf --convert-arith-to-llvm
+             --convert-cf-to-llvm --convert-func-to-llvm
+             --reconcile-unrealized-casts
+  | mlir-translate --mlir-to-llvmir
+  | clang -c -o file.o
+```
+
+Emitter fix:
+- **`func.constant` → i64 via `!llvm.ptr`**: every closure-fptr cast now goes
+  `func.constant @fn : (...) -> ty` → `unrealized_conversion_cast` to
+  `!llvm.ptr` → `llvm.ptrtoint` to i64. The previous one-shot
+  `unrealized_conversion_cast` to i64 left a function-typed cast that
+  `reconcile-unrealized-casts` couldn't erase, so `mlir-translate` rejected the
+  IR with "LLVM Translation failed for operation:
+  builtin.unrealized_conversion_cast". Going via `!llvm.ptr` lets
+  `--convert-func-to-llvm` rewrite the `func.constant` to `llvm.mlir.addressof`
+  and reconcile then folds the redundant `ptr → ptr` cast.
+
+End-to-end runnable validation: linked self-hosted `Core/Types.o` against the
+C runtime (`kk_runtime.c` + `kk_cycle.c`) and a small driver, called the
+frankenstein-compiled `bindName`/`bindExpr` record selectors on a heap-allocated
+`Bind` value, and got back the correct field values. **Frankenstein has now
+bootstrapped a piece of itself end-to-end: source → GHC bridge → Core IR →
+Perceus → MLIR → LLVM IR → ELF object → executed in process.**
+
 ---
 
 ## Current State (2026-04-07, Phase 6a+6b+6c substantially complete)
@@ -502,6 +585,7 @@ eta-expanding partial applications into closures. Left as future work.
   4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 6e: Self-hosted MLIR → native objects — all 17 self-hosted modules lower cleanly through `mlir-opt --convert-{scf,arith,cf,func}-to-llvm` → `mlir-translate --mlir-to-llvmir` → `clang -c` to real ELF objects (totalling ~1.8 MB; Emitter.o is 702 KB). Required fix: every `func.constant @fn` → i64 cast now goes via `!llvm.ptr` (`unrealized_conversion_cast` to `!llvm.ptr` then `llvm.ptrtoint`) so `reconcile-unrealized-casts` can erase the intermediate after `--convert-func-to-llvm`. Direct func-type → i64 casts were leaking past mlir-translate as LLVM-incompatible types. End-to-end runnable: linked the self-hosted `Core/Types.o` against the C runtime and a small driver, called the frankenstein-compiled `bindName`/`bindExpr` record selectors on a heap-allocated Bind, got back the correct field values. All 50 cabal tests pass; `--demo --compile` still produces 3628800.
 - Phase 6d: Self-hosting cleanup — 17/18 modules emit fully valid MLIR (the 18th, OrganIR/Consumer.hs, fails earlier in the GHC frontend due to a pre-existing text-2.1.3/2.1.4 package skew unrelated to MLIR). PAP closures via `kk_alloc_con` for undersaturated top-level calls, oversaturated path that calls then closure-indirects the remainder, uniform i64 ABI at top-level fn boundaries, string literals immediately `ptrtoint`-ed to i64, ELet alias scoping (save/restore around let body to prevent leakage into sibling scf.if branches), `ETypeLam` stripping in `emitDef` so emitted arity matches `buildTopFnArity`, and dropping `llvm.unreachable` in unhandled-case fallback (was illegal inside scf.if regions). All 50 cabal tests pass; `--demo --compile` still produces 3628800.
 - Phase 6c: Full self-hosting — all 18 modules through GHC bridge, 3 emit fully valid MLIR, 14 have 1–12 residual errors out of thousands of lines, closure ABI + scf.if alias scoping + func.constant fptrs
 - Phase 6b: Self-hosting Perceus.hs — closure ABI via kk_alloc_con, capture filter, lambda param renaming

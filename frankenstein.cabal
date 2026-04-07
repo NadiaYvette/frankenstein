@@ -18,6 +18,7 @@ library
         Frankenstein.Core.Perceus
         Frankenstein.Core.CycleAnalysis
         Frankenstein.Core.Evidence
+        Frankenstein.Core.EffectOpt
         Frankenstein.Core.Linker
         Frankenstein.GhcBridge.Driver
         Frankenstein.GhcBridge.CoreTranslate

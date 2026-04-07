@@ -4,6 +4,7 @@ import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
+import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..))
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
@@ -11,7 +12,7 @@ import Frankenstein.MercuryBridge.CoreTranslate
 import Frankenstein.RustBridge.MirParse
 import Frankenstein.RustBridge.CoreTranslate
 import Frankenstein.KokaBridge.Driver (compileKokaFile)
-import Frankenstein.MlirEmit.Emitter (emitProgram, compileToExecutable, defaultEmitConfig, EmitConfig(..))
+import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWithEffects, compileToExecutable, defaultEmitConfig, EmitConfig(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
 import Data.Text (Text)
@@ -59,13 +60,14 @@ main = do
 data Flags = Flags
   { flagEmitCore :: !Bool
   , flagEmitMlir :: !Bool
+  , flagEmitEffectMlir :: !Bool
   , flagCompile  :: !Bool
   , flagOutput   :: !FilePath
   , flagFromJson :: !Bool
   } deriving (Show)
 
 defaultFlags :: Flags
-defaultFlags = Flags False False False "a.out" False
+defaultFlags = Flags False False False False "a.out" False
 
 data Command
   = ShowHelp
@@ -104,6 +106,7 @@ parseFlags :: [String] -> Flags
 parseFlags args = Flags
   { flagEmitCore = "--emit-core" `elem` args
   , flagEmitMlir = "--emit-mlir" `elem` args
+  , flagEmitEffectMlir = "--emit-effect-mlir" `elem` args
   , flagCompile  = "--compile" `elem` args
   , flagOutput   = case dropWhile (/= "--output") args of
                      ("--output":o:_) -> o
@@ -196,14 +199,23 @@ compileOrganIR inputFile = do
 
 handleOutput :: Program -> Flags -> IO ()
 handleOutput prog0 flags = do
+  -- Run effect optimizations before evidence pass
+  let (optProg, optStats) = effectOptimizeWithStats prog0
   -- Use global evidence pass: collects all effect declarations across merged
   -- modules, then threads evidence parameters for cross-module effects.
-  let globalEffects = collectGlobalEffects prog0
-      prog = insertPerceus (evidencePassGlobal globalEffects prog0)
+  let globalEffects = collectGlobalEffects optProg
+      prog = insertPerceus (evidencePassGlobal globalEffects optProg)
       config = defaultEmitConfig
         { ecOutputPath = flagOutput flags
         , ecKokaRuntimePath = Just "runtime/kk_runtime.c"
         }
+  -- Print optimization stats if any optimizations fired
+  let totalOpts = eosInlined optStats + eosEliminated optStats + eosTailRes optStats
+  if totalOpts > 0
+    then TIO.putStrLn $ "Effect opts: " <> T.pack (show (eosInlined optStats)) <> " inlined, "
+                <> T.pack (show (eosEliminated optStats)) <> " eliminated, "
+                <> T.pack (show (eosTailRes optStats)) <> " tail-resumptive"
+    else pure ()
   case () of
     _ | flagCompile flags -> do
           TIO.putStrLn "=== Compiling to native ==="
@@ -211,6 +223,10 @@ handleOutput prog0 flags = do
           case result of
             Left err -> TIO.putStrLn $ "Compilation error: " <> err
             Right path -> TIO.putStrLn $ "Compiled: " <> T.pack path
+      | flagEmitEffectMlir flags -> do
+          -- Emit MLIR with frankenstein.* dialect ops (no evidence pass)
+          let effectProg = insertPerceus optProg
+          TIO.putStrLn $ emitProgramWithEffects effectProg
       | flagEmitCore flags -> do
           TIO.putStrLn "=== Frankenstein Core ==="
           TIO.putStrLn $ prettyProgram prog
@@ -261,7 +277,8 @@ printHelp = do
   putStrLn ""
   putStrLn "Options:"
   putStrLn "  --emit-core       Print Frankenstein Core IR"
-  putStrLn "  --emit-mlir       Print MLIR output"
+  putStrLn "  --emit-mlir       Print MLIR output (after evidence lowering)"
+  putStrLn "  --emit-effect-mlir Print MLIR with frankenstein.* dialect ops"
   putStrLn "  --compile         Compile to native executable"
   putStrLn "  -o, --output      Output path (default: a.out)"
   putStrLn "  --from-json       Treat input as OrganIR JSON (also: --from-organ)"

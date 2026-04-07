@@ -6,12 +6,14 @@
 module Frankenstein.MlirEmit.Emitter
   ( emitProgram
   , emitProgramText
+  , emitProgramWithEffects
   , compileToExecutable
   , EmitConfig(..)
   , defaultEmitConfig
   ) where
 
 import Frankenstein.Core.Types
+import Frankenstein.MlirEmit.Dialects (MlirOp(..), renderOp)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -52,6 +54,7 @@ data EmitState = EmitState
   , esStringLits    :: ![(Text, Text)]   -- global name -> string content
   , esEvidenceScope :: !(Map Text Text)  -- effect name -> evidence SSA variable name
   , esAliases       :: !(Map Text Text)  -- name alias: let x = y → x maps to y
+  , esEffectDialect :: !Bool              -- emit frankenstein.* dialect ops for effects
   }
 
 type Emit a = State EmitState a
@@ -104,7 +107,7 @@ emitProgramText prog =
         else defs
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
-      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty
+      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -180,6 +183,54 @@ emitProgramText prog =
     , ""
     , bodyText
     , mainWrapper
+    , "}"
+    ]
+
+-- | Emit MLIR with frankenstein.* dialect ops for EHandle/EPerform.
+-- Call this WITHOUT running the evidence pass first — effects remain
+-- as high-level dialect operations in the output.
+emitProgramWithEffects :: Program -> Text
+emitProgramWithEffects prog =
+  let defs = progDefs prog
+      hasMain = any (\d -> nameText (qnameName (defName d)) == "main") defs
+      renamedDefs = if hasMain
+        then map (\d -> if nameText (qnameName (defName d)) == "main"
+                        then d { defName = QName "" (Name "_frankenstein_main" 99)
+                               , defExpr = stripTopDelay (defExpr d) }
+                        else d) defs
+        else defs
+      stripTopDelay (EDelay e) = e
+      stripTopDelay e           = e
+      -- Key difference: esEffectDialect = True
+      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
+      (bodyText, finalState) = runState (emitDefs renamedDefs) initState
+      liftedFns = T.unlines (reverse (esLiftedFns finalState))
+      stringGlobals = T.unlines
+        [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
+          <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
+        | (gn, s) <- esStringLits finalState ]
+  in T.unlines
+    [ "// Frankenstein Effect Dialect MLIR"
+    , "// Use: mlir-opt --allow-unregistered-dialect to validate"
+    , "module {"
+    , ""
+    , "  // External declarations"
+    , "  llvm.func @printf(!llvm.ptr, ...) -> i32"
+    , ""
+    , "  // String literals"
+    , stringGlobals
+    , ""
+    , "  // Runtime declarations"
+    , "  func.func private @kk_drop(i64) -> ()"
+    , "  func.func private @kk_retain(i64) -> ()"
+    , "  func.func private @kk_alloc_con(i64, i64) -> i64"
+    , "  func.func private @kk_thunk_create(i64) -> i64"
+    , "  func.func private @kk_thunk_force(i64) -> i64"
+    , ""
+    , "  // Lifted functions"
+    , liftedFns
+    , ""
+    , bodyText
     , "}"
     ]
 
@@ -612,47 +663,71 @@ emitExpr (EFunRef qn) = do
 -- (e.g. if the evidence pass didn't fully desugar).
 
 emitExpr (EPerform qn args) = do
-  -- Check if we have evidence in scope for this effect
-  let effName = qnameModule qn
-  evScope <- gets esEvidenceScope
-  argResults <- mapM emitExpr args
-  let allOps = concatMap fst argResults
-      argNames = map snd argResults
-  case Map.lookup effName evScope of
-    Just evVarName -> do
-      -- Evidence is in scope: call indirectly through the evidence variable.
-      -- The evidence variable holds a function pointer (as i64).
-      fptrName <- freshName "v"
+  effectMode <- gets esEffectDialect
+  if effectMode
+    then do
+      -- Effect dialect mode: emit frankenstein.perform
+      argResults <- mapM emitExpr args
+      let allOps = concatMap fst argResults
+          argNames = map snd argResults
+          effName = qnameModule qn
+          opName' = nameText (qnameName qn)
       resultName <- freshName "v"
-      let argList = T.intercalate ", " ["%" <> n | n <- argNames]
-          argTys = T.intercalate ", " (replicate (length argNames) "i64")
-          -- Convert evidence i64 to function pointer, then call indirectly
-          ops = [ "// perform " <> nameText (qnameName qn) <> " via evidence"
-                , "%" <> fptrName <> " = llvm.inttoptr %" <> evVarName <> " : i64 to !llvm.ptr"
-                , "%" <> resultName <> " = llvm.call %" <> fptrName
-                    <> "(" <> argList <> ") : !llvm.ptr, (" <> argTys <> ") -> i64"
-                ]
-      pure (allOps ++ ops, resultName)
-    Nothing -> do
-      -- No handler in scope: call kk_unhandled_effect (abort)
-      resultName <- freshName "v"
-      pure (allOps ++
-            [ "// perform " <> nameText (qnameName qn) <> " -- no handler in scope"
-            , "%" <> resultName <> " = func.call @kk_unhandled_effect() : () -> i64"
-            ], resultName)
+      let dialectOp = "%" <> resultName <> " = "
+            <> renderOp (FrankPerform effName opName' argNames)
+      pure (allOps ++ [dialectOp], resultName)
+    else do
+      -- Lowered mode: evidence-passing indirect calls
+      let effName = qnameModule qn
+      evScope <- gets esEvidenceScope
+      argResults <- mapM emitExpr args
+      let allOps = concatMap fst argResults
+          argNames = map snd argResults
+      case Map.lookup effName evScope of
+        Just evVarName -> do
+          fptrName <- freshName "v"
+          resultName <- freshName "v"
+          let argList = T.intercalate ", " ["%" <> n | n <- argNames]
+              argTys = T.intercalate ", " (replicate (length argNames) "i64")
+              ops = [ "// perform " <> nameText (qnameName qn) <> " via evidence"
+                    , "%" <> fptrName <> " = llvm.inttoptr %" <> evVarName <> " : i64 to !llvm.ptr"
+                    , "%" <> resultName <> " = llvm.call %" <> fptrName
+                        <> "(" <> argList <> ") : !llvm.ptr, (" <> argTys <> ") -> i64"
+                    ]
+          pure (allOps ++ ops, resultName)
+        Nothing -> do
+          resultName <- freshName "v"
+          pure (allOps ++
+                [ "// perform " <> nameText (qnameName qn) <> " -- no handler in scope"
+                , "%" <> resultName <> " = func.call @kk_unhandled_effect() : () -> i64"
+                ], resultName)
 
 emitExpr (EHandle effRow handler body) = do
-  -- 1. Emit the handler expression (a lambda or function reference)
-  (handlerOps, handlerName) <- emitExpr handler
-  -- 2. Register the handler as evidence for this effect
-  let effName = effectRowNameEmit effRow
-  oldScope <- gets esEvidenceScope
-  modify (\s -> s { esEvidenceScope = Map.insert effName handlerName (esEvidenceScope s) })
-  -- 3. Emit the body with evidence in scope
-  (bodyOps, bodyName) <- emitExpr body
-  -- 4. Restore the old evidence scope
-  modify (\s -> s { esEvidenceScope = oldScope })
-  pure (handlerOps ++ bodyOps, bodyName)
+  effectMode <- gets esEffectDialect
+  if effectMode
+    then do
+      -- Effect dialect mode: emit frankenstein.handle
+      let effName = effectRowNameEmit effRow
+      (handlerOps, handlerName) <- emitExpr handler
+      -- Emit body with effect dialect (performs become frankenstein.perform)
+      (bodyOps, bodyName) <- emitExpr body
+      resultName <- freshName "v"
+      let dialectOps =
+            [ "// frankenstein.handle @" <> effName
+            , renderOp (FrankHandle effName handlerName bodyName)
+            , "%" <> resultName <> " = arith.constant 0 : i64  // handle result placeholder"
+            ]
+      -- The body result is the handle result
+      pure (handlerOps ++ bodyOps ++ dialectOps, bodyName)
+    else do
+      -- Lowered mode: install evidence, emit body, restore scope
+      (handlerOps, handlerName) <- emitExpr handler
+      let effName = effectRowNameEmit effRow
+      oldScope <- gets esEvidenceScope
+      modify (\s -> s { esEvidenceScope = Map.insert effName handlerName (esEvidenceScope s) })
+      (bodyOps, bodyName) <- emitExpr body
+      modify (\s -> s { esEvidenceScope = oldScope })
+      pure (handlerOps ++ bodyOps, bodyName)
 
 -- Catch-all removed: all Expr constructors are handled above
 

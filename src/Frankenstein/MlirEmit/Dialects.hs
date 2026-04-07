@@ -66,11 +66,16 @@ data MlirOp
   | KokaDrop MlirValue               -- kk_drop(ptr) — decrement + free if 0
   | KokaReuse MlirValue MlirValue    -- kk_reuse(ptr, tag) — reuse if refcount==1
   | KokaIsUnique MlirValue           -- kk_is_unique(ptr) — check refcount==1
-  -- Effect handler operations
+  -- Effect handler operations (lowered form — evidence-passing)
   | EvvGet                            -- get evidence vector
   | EvvPush MlirValue                 -- push handler onto evidence vector
   | EvvPop                            -- pop handler from evidence vector
   | EvvLookup MlirValue              -- lookup handler in evidence vector
+  -- Frankenstein effect dialect (high-level, before lowering)
+  -- These use MLIR generic syntax with --allow-unregistered-dialect
+  | FrankHandle Text Text Text        -- "frankenstein.handle" effect handler_ssa body_result
+  | FrankPerform Text Text [Text]     -- "frankenstein.perform" effect op [arg_ssas]
+  | FrankResume Text                  -- "frankenstein.resume" %arg (continue from handler)
   -- Raw MLIR text (escape hatch)
   | RawMlir Text
   deriving (Show)
@@ -166,6 +171,16 @@ renderOp EvvGet = "func.call @kk_evv_get() : () -> i64"
 renderOp (EvvPush v) = "func.call @kk_evv_push(" <> valName v <> ") : (i64) -> ()"
 renderOp EvvPop = "func.call @kk_evv_pop() : () -> ()"
 renderOp (EvvLookup v) = "func.call @kk_evv_lookup(" <> valName v <> ") : (i64) -> i64"
+-- Frankenstein effect dialect (high-level, unregistered dialect ops)
+renderOp (FrankHandle eff handlerSsa bodySsa) =
+  "\"frankenstein.handle\"(%" <> handlerSsa <> ") {effect = \"" <> eff <> "\"}"
+  <> " // body result: %" <> bodySsa
+renderOp (FrankPerform eff op argSsas) =
+  "\"frankenstein.perform\"(" <> T.intercalate ", " ["%" <> a | a <- argSsas]
+  <> ") {effect = \"" <> eff <> "\", op = \"" <> op <> "\"} : ("
+  <> T.intercalate ", " (replicate (length argSsas) "i64") <> ") -> i64"
+renderOp (FrankResume argSsa) =
+  "\"frankenstein.resume\"(%" <> argSsa <> ") : (i64) -> i64"
 renderOp (RawMlir t) = t
 
 -- | Render a list of MLIR ops as indented lines (alternative to raw Text emission)

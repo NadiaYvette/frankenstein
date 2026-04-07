@@ -8,8 +8,10 @@ import Test.Tasty (adjustOption)
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus, analyzeUsage, freeVars)
 import Frankenstein.Core.Evidence (evidencePass)
+import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
+  , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
-import Frankenstein.MlirEmit.Emitter (emitProgram)
+import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWithEffects)
 import KOracle (kOracleTests)
 import BridgeBisim (bridgeBisimTests)
 
@@ -65,6 +67,7 @@ main = defaultMain $ testGroup "Frankenstein"
   [ coreIRTests
   , perceusTests
   , evidenceTests
+  , effectOptTests
   , linkerTests
   , mlirEmitTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
@@ -273,7 +276,88 @@ isEApp (EApp {}) = True
 isEApp _         = False
 
 -------------------------------------------------------------------------------
--- D. Linker tests
+-- D. Effect Optimization tests
+-------------------------------------------------------------------------------
+
+effectOptTests :: TestTree
+effectOptTests = testGroup "Effect Optimization"
+  [ testCase "eliminateIdentityHandlers: removes identity handler (uncurried)" $
+      -- EHandle eff (\x k -> k(x)) body  =>  body
+      let exnEff = QName "std" (mkName "exn")
+          handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (EApp (EVar (Name "k" 2)) [EVar (Name "x" 1)])
+          body = ELit (LitInt 42)
+          expr = EHandle (EffectRowExtend exnEff EffectRowEmpty) handler body
+          result = eliminateIdentityHandlers expr
+      in result @?= body
+
+  , testCase "eliminateIdentityHandlers: removes identity handler (curried)" $
+      let exnEff = QName "std" (mkName "exn")
+          handler = ELam [(Name "x" 1, intType)]
+                      (ELam [(Name "k" 2, intType)]
+                        (EApp (EVar (Name "k" 2)) [EVar (Name "x" 1)]))
+          body = ELit (LitInt 42)
+          expr = EHandle (EffectRowExtend exnEff EffectRowEmpty) handler body
+          result = eliminateIdentityHandlers expr
+      in result @?= body
+
+  , testCase "eliminateIdentityHandlers: keeps non-identity handler" $
+      let exnEff = QName "std" (mkName "exn")
+          handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (ELit (LitInt 0))  -- doesn't resume
+          body = ELit (LitInt 42)
+          expr = EHandle (EffectRowExtend exnEff EffectRowEmpty) handler body
+          result = eliminateIdentityHandlers expr
+      in case result of
+        EHandle {} -> pure ()
+        _          -> assertFailure "should preserve non-identity handler"
+
+  , testCase "effectOptimizeWithStats: reports zero stats for no-effect program" $
+      let prog = mkProgram "test" "t"
+            [ mkFunDef "test" "id"
+                (ELam [(mkName "x", intType)] (EVar (mkName "x")))
+                (TFun [(Many, intType)] EffectRowEmpty intType)
+            ]
+          (_prog', stats) = effectOptimizeWithStats prog
+      in do
+        eosInlined stats @?= 0
+        eosEliminated stats @?= 0
+        eosTailRes stats @?= 0
+
+  , testCase "emitProgramWithEffects: contains frankenstein comment header" $
+      let prog = mkProgram "test" "t" []
+          mlir = emitProgramWithEffects prog
+      in assertBool "should contain effect dialect comment"
+           (T.isInfixOf "Effect Dialect" mlir || T.isInfixOf "effect" (T.toLower mlir))
+
+  , testCase "emitProgramWithEffects: program with EHandle emits frankenstein.handle" $
+      let exnEff = QName "std" (mkName "exn")
+          handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (EApp (EVar (Name "k" 2)) [EVar (Name "x" 1)])
+          body = ELit (LitInt 42)
+          prog = mkProgram "test" "t"
+            [ mkFunDef "test" "main"
+                (EHandle (EffectRowExtend exnEff EffectRowEmpty) handler body)
+                (TFun [] EffectRowEmpty intType)
+            ]
+          mlir = emitProgramWithEffects prog
+      in assertBool "should contain frankenstein.handle"
+           (T.isInfixOf "frankenstein.handle" mlir)
+
+  , testCase "emitProgramWithEffects: program with EPerform emits frankenstein.perform" $
+      let exnEff = QName "std" (mkName "raise")
+          prog = mkProgram "test" "t"
+            [ mkFunDef "test" "main"
+                (EPerform exnEff [ELit (LitInt 1)])
+                (TFun [] EffectRowEmpty intType)
+            ]
+          mlir = emitProgramWithEffects prog
+      in assertBool "should contain frankenstein.perform"
+           (T.isInfixOf "frankenstein.perform" mlir)
+  ]
+
+-------------------------------------------------------------------------------
+-- D2. Linker tests
 -------------------------------------------------------------------------------
 
 linkerTests :: TestTree

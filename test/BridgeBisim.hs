@@ -25,6 +25,8 @@ import Frankenstein.RustBridge.MirParse (dumpMir, parseMirText)
 import Frankenstein.RustBridge.CoreTranslate (translateMir)
 import Frankenstein.MercuryBridge.HldsParse (dumpHlds, parseHldsDump)
 import Frankenstein.MercuryBridge.CoreTranslate (translateHlds)
+import Frankenstein.PythonBridge.AstParse (parsePython)
+import Frankenstein.PythonBridge.CoreTranslate (translatePythonAst)
 import KOracle (exprToK)
 
 import Data.Text (Text)
@@ -62,6 +64,7 @@ bridgeBisimTests = testGroup "Bridge Bisimulation (Phase 2c)"
   , kokaBisimTests
   , rustBisimTests
   , mercuryBisimTests
+  , pythonBisimTests
   ]
 
 -------------------------------------------------------------------------------
@@ -171,6 +174,40 @@ mercuryBisimTests = testGroup "Mercury Bridge"
   -- Note: Full semantic bisimulation (krun == mmc) is pending until the Mercury
   -- bridge resolves HLDS unification variables to arithmetic builtins.
   ]
+
+-------------------------------------------------------------------------------
+-- E. Python Bridge Bisimulation
+-------------------------------------------------------------------------------
+
+pythonBisimTests :: TestTree
+pythonBisimTests = testGroup "Python Bridge"
+  [ testCase "arith: krun(translatePython(arith.py)) == 44" $ do
+      prog <- compilePython (testDir </> "python" </> "arith.py")
+      def <- findDefOrFail "compute" prog
+      let callExpr = applyDef def [ELit (LitInt 2)]
+      assertKrunEquals callExpr 44
+
+  , testCase "structural: factorial.py produces recursive Def" $ do
+      -- Recursive control flow in Python ends up as a case-on-comparison
+      -- which the K oracle doesn't currently model (it expects constructor
+      -- patterns). The full factorial pipeline is verified end-to-end via
+      -- --compile in the manual smoke test (3628800).
+      prog <- compilePython "examples/factorial.py"
+      _ <- findDefOrFail "factorial" prog
+      _ <- findDefOrFail "main" prog
+      pure ()
+  ]
+
+compilePython :: FilePath -> IO Program
+compilePython relPath = do
+  -- Tests run from the project root, so the helper script is reachable.
+  result <- parsePython relPath
+  case result of
+    Left err -> assertFailure ("Python bridge failed: " <> T.unpack err) >> error "unreachable"
+    Right sx ->
+      case translatePythonAst (T.pack "factorial") sx of
+        Left err -> assertFailure ("Python translate failed: " <> T.unpack err) >> error "unreachable"
+        Right prog -> pure prog
 
 -------------------------------------------------------------------------------
 -- Expression Cleaning: strip bridge artifacts for pure K evaluation

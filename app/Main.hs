@@ -12,6 +12,8 @@ import Frankenstein.MercuryBridge.CoreTranslate
 import Frankenstein.RustBridge.MirParse
 import Frankenstein.RustBridge.CoreTranslate
 import Frankenstein.KokaBridge.Driver (compileKokaFile)
+import Frankenstein.PythonBridge.AstParse (parsePython)
+import Frankenstein.PythonBridge.CoreTranslate (translatePythonAst)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
@@ -135,6 +137,7 @@ compileFile fromJson path = do
           ".kk" -> compileKoka path
           ".m"  -> compileMercury path
           ".rs" -> compileRust path
+          ".py" -> compilePython path
           _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
   pure $ case result of
     Left err   -> Left (path, err)
@@ -189,6 +192,16 @@ compileRust inputFile = do
       case parseMirText mirText of
         Left err -> pure $ Left $ "MIR parse error: " <> err
         Right mir -> pure $ translateMir mir
+
+compilePython :: FilePath -> IO (Either Text Program)
+compilePython inputFile = do
+  TIO.putStrLn $ "Compiling Python: " <> T.pack inputFile
+  result <- parsePython inputFile
+  case result of
+    Left err -> pure $ Left $ "Python bridge error: " <> err
+    Right sexpr ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translatePythonAst modName sexpr
 
 compileOrganIR :: FilePath -> IO (Either Text Program)
 compileOrganIR inputFile = do
@@ -306,6 +319,7 @@ printHelp = do
   putStrLn "  .kk     Koka      (via Koka compiler library)"
   putStrLn "  .m      Mercury   (via mmc --dump-hlds)"
   putStrLn "  .rs     Rust      (via rustc MIR)"
+  putStrLn "  .py     Python    (via CPython ast module)"
   putStrLn "  .json   OrganIR   (organ-bank JSON)"
   putStrLn "  .organ  OrganIR   (organ-bank JSON)"
   putStrLn ""

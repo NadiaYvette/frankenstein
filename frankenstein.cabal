@@ -28,6 +28,8 @@ library
         Frankenstein.RustBridge.CoreTranslate
         Frankenstein.KokaBridge.Driver
         Frankenstein.KokaBridge.CoreTranslate
+        Frankenstein.PythonBridge.AstParse
+        Frankenstein.PythonBridge.CoreTranslate
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
         Frankenstein.OrganIR.Consumer

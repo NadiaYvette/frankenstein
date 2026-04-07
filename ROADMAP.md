@@ -502,6 +502,7 @@ eta-expanding partial applications into closures. Left as future work.
   4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 6d: Self-hosting cleanup — 17/18 modules emit fully valid MLIR (the 18th, OrganIR/Consumer.hs, fails earlier in the GHC frontend due to a pre-existing text-2.1.3/2.1.4 package skew unrelated to MLIR). PAP closures via `kk_alloc_con` for undersaturated top-level calls, oversaturated path that calls then closure-indirects the remainder, uniform i64 ABI at top-level fn boundaries, string literals immediately `ptrtoint`-ed to i64, ELet alias scoping (save/restore around let body to prevent leakage into sibling scf.if branches), `ETypeLam` stripping in `emitDef` so emitted arity matches `buildTopFnArity`, and dropping `llvm.unreachable` in unhandled-case fallback (was illegal inside scf.if regions). All 50 cabal tests pass; `--demo --compile` still produces 3628800.
 - Phase 6c: Full self-hosting — all 18 modules through GHC bridge, 3 emit fully valid MLIR, 14 have 1–12 residual errors out of thousands of lines, closure ABI + scf.if alias scoping + func.constant fptrs
 - Phase 6b: Self-hosting Perceus.hs — closure ABI via kk_alloc_con, capture filter, lambda param renaming
 - Phase 6a: Self-hosting bootstrap — Core/Types.hs through GHC bridge → MLIR validates clean

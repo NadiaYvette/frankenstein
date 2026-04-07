@@ -64,6 +64,8 @@ data EmitState = EmitState
   , esAliases       :: !(Map Text Text)  -- name alias: let x = y → x maps to y
   , esEffectDialect :: !Bool              -- emit frankenstein.* dialect ops for effects
   , esTopFns        :: !(Set Text)        -- MLIR names of top-level func.func defs
+  , esTopFnArity    :: !(Map Text Int)    -- arity of each top-level function
+  , esPapWrappers   :: !(Set Text)        -- PAP wrapper names already emitted
   }
 
 type Emit a = State EmitState a
@@ -77,6 +79,87 @@ freshName prefix = do
 
 addLiftedFn :: Text -> Emit ()
 addLiftedFn fn = modify (\s -> s { esLiftedFns = fn : esLiftedFns s })
+
+-- | Emit a PAP (partial application) closure for an undersaturated call
+-- to a top-level function. Allocates a heap closure via kk_alloc_con whose
+-- field 0 is a wrapper fn pointer and fields 1..nSupplied are the supplied
+-- args. A wrapper fn is synthesized (once per (fnName,nSupplied) pair) that
+-- unpacks the captured args and calls the original fn with all args.
+--
+-- Returns (ops, resultSsaName) where resultSsaName holds the i64 closure ptr.
+emitPapClosure :: Text -> Int -> [Text] -> Emit ([Text], Text)
+emitPapClosure fnName arity suppliedArgs = do
+  let nSupplied = length suppliedArgs
+      nRemaining = arity - nSupplied
+  wrapperName <- ensurePapWrapper fnName arity nSupplied
+  -- Allocate closure: 1 slot for fptr + nSupplied slots for captured args
+  let nFields = 1 + nSupplied
+  tagName <- freshName "v"
+  nfieldsName <- freshName "v"
+  ptrName <- freshName "v"
+  fptrAddrName <- freshName "v"
+  fptrName <- freshName "v"
+  idxZeroName <- freshName "v"
+  let wrapperParamTys = T.intercalate ", " (replicate (1 + nRemaining) "i64")
+      wrapperFnTy = "(" <> wrapperParamTys <> ") -> i64"
+  let allocOps =
+        [ "// PAP for @" <> fnName <> " (arity " <> T.pack (show arity)
+          <> ", supplied " <> T.pack (show nSupplied) <> ")"
+        , "%" <> tagName <> " = arith.constant 0 : i64"
+        , "%" <> nfieldsName <> " = arith.constant " <> T.pack (show nFields) <> " : i64"
+        , "%" <> ptrName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
+        , "%" <> fptrAddrName <> " = func.constant @" <> wrapperName <> " : " <> wrapperFnTy
+        , "%" <> fptrName <> " = builtin.unrealized_conversion_cast %" <> fptrAddrName <> " : " <> wrapperFnTy <> " to i64"
+        , "%" <> idxZeroName <> " = arith.constant 0 : i64"
+        , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxZeroName <> ", %" <> fptrName <> ") : (i64, i64, i64) -> ()"
+        ]
+  -- Store each supplied arg into slots 1..nSupplied
+  setOps <- fmap concat $ mapM (\(i, a) -> do
+      idxN <- freshName "v"
+      pure
+        [ "%" <> idxN <> " = arith.constant " <> T.pack (show i) <> " : i64"
+        , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxN <> ", %" <> a <> ") : (i64, i64, i64) -> ()"
+        ]
+    ) (zip [(1 :: Int)..] suppliedArgs)
+  pure (allocOps ++ setOps, ptrName)
+
+-- | Ensure a PAP wrapper function exists for (fnName, nSupplied). Emits the
+-- wrapper lazily and returns its MLIR symbol name. The wrapper takes
+-- (closure, remaining_args...) and dispatches to @fnName(captured..., remaining...).
+ensurePapWrapper :: Text -> Int -> Int -> Emit Text
+ensurePapWrapper fnName arity nSupplied = do
+  let wrapperName = "pap_" <> fnName <> "_" <> T.pack (show nSupplied)
+      nRemaining = arity - nSupplied
+  existing <- gets esPapWrappers
+  if Set.member wrapperName existing
+    then pure wrapperName
+    else do
+      modify (\s -> s { esPapWrappers = Set.insert wrapperName (esPapWrappers s) })
+      -- Wrapper signature: (i64 closure, i64 remaining_0, ..., i64 remaining_{nRemaining-1}) -> i64
+      let remainingParams = [ "%r" <> T.pack (show i) <> ": i64" | i <- [0 .. nRemaining - 1] ]
+          paramList = T.intercalate ", " ("%clos: i64" : remainingParams)
+          origParamTys = T.intercalate ", " (replicate arity "i64")
+      -- Body: extract captured args from closure fields 1..nSupplied, then call original
+      let captureLoads = concat
+            [ [ "    %cidx" <> T.pack (show i) <> " = arith.constant " <> T.pack (show i) <> " : i64"
+              , "    %c" <> T.pack (show i) <> " = func.call @kk_field(%clos, %cidx" <> T.pack (show i) <> ") : (i64, i64) -> i64"
+              ]
+            | i <- [1 .. nSupplied]
+            ]
+          capturedArgRefs = [ "%c" <> T.pack (show i) | i <- [1 .. nSupplied] ]
+          remainingArgRefs = [ "%r" <> T.pack (show i) | i <- [0 .. nRemaining - 1] ]
+          allArgRefs = T.intercalate ", " (capturedArgRefs ++ remainingArgRefs)
+          callLine = "    %result = func.call @" <> fnName <> "(" <> allArgRefs
+                     <> ") : (" <> origParamTys <> ") -> i64"
+          wrapperText = T.unlines $
+            [ "  func.func @" <> wrapperName <> "(" <> paramList <> ") -> i64 {"
+            ] ++ captureLoads ++
+            [ callLine
+            , "    func.return %result : i64"
+            , "  }"
+            ]
+      addLiftedFn wrapperText
+      pure wrapperName
 
 -- | Record the MLIR type for an SSA name
 recordType :: Text -> Text -> Emit ()
@@ -118,6 +201,8 @@ emitProgramText prog =
       stripTopDelay e           = e
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
+                         (buildTopFnArity renamedDefs)
+                         Set.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -214,6 +299,8 @@ emitProgramWithEffects prog =
       -- Key difference: esEffectDialect = True
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
+                         (buildTopFnArity renamedDefs)
+                         Set.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -261,6 +348,8 @@ emitProgramWasm prog =
       stripTopDelay e           = e
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
+                         (buildTopFnArity renamedDefs)
+                         Set.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -320,11 +409,19 @@ emitDef :: Def -> Emit Text
 emitDef def = do
   let name = nameText (qnameName (defName def))
       (_argNames, _argTypes, retType) = decomposeDefType (defType def)
-  case defExpr def of
+      -- Strip ETypeLam wrappers so the arity buildTopFnArity sees matches
+      -- the arity we actually emit. Otherwise a `ETypeLam (ELam ps b)` def
+      -- would emit a 0-param func while the call site uses arity = length ps.
+      stripTypeLam (ETypeLam _ e) = stripTypeLam e
+      stripTypeLam e              = e
+  case stripTypeLam (defExpr def) of
     ELam params body -> do
+      -- Use uniform i64 for all top-level fn params (matches the closure ABI
+      -- and avoids type mismatches when params flow into kk_* runtime calls
+      -- or PAP wrappers that assume i64 throughout).
       let mlirArgs = T.intercalate ", "
-            [ "%" <> nameToSsa pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
-          mlirRetTy = typeToMlir retType
+            [ "%" <> nameToSsa pn <> ": i64" | (pn, _) <- params ]
+          mlirRetTy = "i64"
       -- Install parameters as identity aliases so EVar lookups find them.
       savedA <- gets esAliases
       let paramAliases = [ (nameToSsa pn, nameToSsa pn) | (pn, _) <- params ]
@@ -337,9 +434,9 @@ emitDef def = do
         , bodyText
         , "  }"
         ]
-    -- Non-lambda top-level: emit as nullary function
+    -- Non-lambda top-level: emit as nullary function (uniform i64 return)
     expr -> do
-      let mlirRetTy = typeToMlir retType
+      let mlirRetTy = "i64"
       bodyText <- emitBody expr mlirRetTy
       pure $ T.unlines
         [ "  func.func @" <> sanitizeName name <> "() -> " <> mlirRetTy <> " {"
@@ -372,9 +469,14 @@ emitExpr (ELit (LitChar c)) = do
 
 emitExpr (ELit (LitString s)) = do
   globalName <- addStringLit s
-  name <- freshName "v"
-  recordType name "!llvm.ptr"
-  pure (["%" <> name <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"], name)
+  ptrName <- freshName "v"
+  intName <- freshName "v"
+  -- Convert to i64 immediately so string values flow uniformly as i64
+  -- through call/return boundaries; callers that need a ptr can inttoptr.
+  pure ( [ "%" <> ptrName <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"
+         , "%" <> intName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
+         ]
+       , intName)
 
 emitExpr (EVar n) = do
   -- Variable reference — look up in alias map; if not found and not a known
@@ -536,12 +638,47 @@ emitExpr (EApp (EVar fn) args) = do
   argTypes <- mapM lookupType argNames
   let argTypeList = T.intercalate ", " argTypes
   topFns <- gets esTopFns
+  arityMap <- gets esTopFnArity
+  let nArgs = length args
+      mArity = Map.lookup sanitized arityMap
   if Set.member sanitized topFns
-    then do
-      resultName <- freshName "v"
-      let callOp = "%" <> resultName <> " = func.call @" <> sanitized
-                   <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
-      pure (allOps ++ [callOp], resultName)
+    then case mArity of
+      Just arity | nArgs < arity -> do
+        -- Undersaturated: build a PAP closure.
+        (papOps, resultName) <- emitPapClosure sanitized arity argNames
+        pure (allOps ++ papOps, resultName)
+      Just arity | nArgs > arity -> do
+        -- Oversaturated: call the top-level fn with the first `arity` args
+        -- to obtain a closure i64, then dispatch through that closure for
+        -- the remaining args via the closure-indirect path.
+        let (satArgs, extraArgs) = splitAt arity argNames
+            (satTys, extraTys)   = splitAt arity argTypes
+            satList = T.intercalate ", " ["%" <> n | n <- satArgs]
+            satTyList = T.intercalate ", " satTys
+        closName <- freshName "v"
+        let topCallTy = if arity == 0 then "() -> i64" else "(" <> satTyList <> ") -> i64"
+            topCallOp = "%" <> closName <> " = func.call @" <> sanitized
+                        <> "(" <> satList <> ") : " <> topCallTy
+        -- Closure-indirect call with the remaining args
+        idxZeroName <- freshName "v"
+        fptrIntName <- freshName "v"
+        fptrPtrName <- freshName "v"
+        resultName  <- freshName "v"
+        let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- extraArgs])
+            closArgTypes = T.intercalate ", " ("i64" : extraTys)
+            extractOps =
+              [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
+              , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+              , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
+              , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+                <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
+              ]
+        pure (allOps ++ [topCallOp] ++ extractOps, resultName)
+      _ -> do
+        resultName <- freshName "v"
+        let callOp = "%" <> resultName <> " = func.call @" <> sanitized
+                     <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
+        pure (allOps ++ [callOp], resultName)
     else do
       -- Closure-indirect call: fn is a local value holding a heap closure ptr.
       -- If the name isn't actually in scope, it's an unresolved external —
@@ -644,19 +781,27 @@ emitExpr (ECase scrut branches) = do
 
     -- Fallback: emit unreachable to catch codegen bugs at runtime
     UnhandledCase -> do
+      -- Don't emit llvm.unreachable here: this expression may be inside an
+      -- scf.if/scf.for region whose terminator must be scf.yield. A trapping
+      -- runtime call would be ideal but a 0 sentinel keeps blocks well-formed.
       name <- freshName "v"
       pure (scrutOps ++ ["// unhandled case with " <> T.pack (show (length branches)) <> " branches"
-                         , "%" <> name <> " = arith.constant 0 : i64"
-                         , "llvm.unreachable"], name)
+                         , "%" <> name <> " = arith.constant 0 : i64"], name)
 
 emitExpr (ELet [binds] body) = do
+  -- Save aliases so let-bindings don't leak out of this scope
+  -- (e.g. into sibling scf.if branches).
+  savedA <- gets esAliases
   bindOps <- concat <$> mapM emitBind binds
   (bodyOps, bodyName) <- emitExpr body
+  modify (\s -> s { esAliases = savedA })
   pure (bindOps ++ bodyOps, bodyName)
 
 emitExpr (ELet (bg:bgs) body) = do
+  savedA <- gets esAliases
   bindOps <- concat <$> mapM emitBind bg
   (restOps, restName) <- emitExpr (ELet bgs body)
+  modify (\s -> s { esAliases = savedA })
   pure (bindOps ++ restOps, restName)
 
 emitExpr (ELet [] body) = emitExpr body
@@ -1375,6 +1520,19 @@ effectRowNameEmit EffectRowEmpty          = "pure"
 -- Sanitize names for MLIR (replace special chars)
 sanitizeName :: Text -> Text
 sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~(),[]{}'\"\\ \t" :: [Char]) then '_' else c)
+
+-- | Build arity map from top-level defs: sanitized-name -> number of ELam params.
+-- Nullary defs (arity 0) are also recorded so oversaturated calls can be
+-- detected and routed through the closure-indirect path.
+buildTopFnArity :: [Def] -> Map Text Int
+buildTopFnArity defs = Map.fromList
+  [ (sanitizeName (nameText (qnameName (defName d))), topLamArity (defExpr d))
+  | d <- defs
+  ]
+  where
+    topLamArity (ELam ps _)     = length ps
+    topLamArity (ETypeLam _ e)  = topLamArity e
+    topLamArity _               = 0
 
 -- | Convert a Name to a unique MLIR SSA name.
 -- For names like "_" or "ds" that commonly collide, append the unique ID.

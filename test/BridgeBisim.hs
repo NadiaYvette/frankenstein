@@ -27,6 +27,10 @@ import Frankenstein.MercuryBridge.HldsParse (dumpHlds, parseHldsDump)
 import Frankenstein.MercuryBridge.CoreTranslate (translateHlds)
 import Frankenstein.PythonBridge.AstParse (parsePython)
 import Frankenstein.PythonBridge.CoreTranslate (translatePythonAst)
+import Frankenstein.GoBridge.AstParse (parseGo)
+import Frankenstein.GoBridge.CoreTranslate (translateGoAst)
+import Frankenstein.FutharkBridge.Parser (parseFutharkFile)
+import Frankenstein.FutharkBridge.CoreTranslate (translateFuthark)
 import KOracle (exprToK)
 
 import Data.Text (Text)
@@ -65,6 +69,8 @@ bridgeBisimTests = testGroup "Bridge Bisimulation (Phase 2c)"
   , rustBisimTests
   , mercuryBisimTests
   , pythonBisimTests
+  , goBisimTests
+  , futharkBisimTests
   ]
 
 -------------------------------------------------------------------------------
@@ -207,6 +213,67 @@ compilePython relPath = do
     Right sx ->
       case translatePythonAst (T.pack "factorial") sx of
         Left err -> assertFailure ("Python translate failed: " <> T.unpack err) >> error "unreachable"
+        Right prog -> pure prog
+
+-------------------------------------------------------------------------------
+-- F. Go Bridge Bisimulation
+-------------------------------------------------------------------------------
+
+goBisimTests :: TestTree
+goBisimTests = testGroup "Go Bridge"
+  [ testCase "arith: krun(translateGo(arith.go)) == 44" $ do
+      prog <- compileGo (testDir </> "go" </> "arith.go")
+      def <- findDefOrFail "compute" prog
+      let callExpr = applyDef def [ELit (LitInt 2)]
+      assertKrunEquals callExpr 44
+
+  , testCase "structural: factorial.go produces recursive Def" $ do
+      -- Same caveat as Python: early-return becomes case-on-comparison,
+      -- which the K oracle's PatLit-based pipeline doesn't model. The
+      -- full pipeline is verified end-to-end via --compile (3628800).
+      prog <- compileGo "examples/factorial.go"
+      _ <- findDefOrFail "factorial" prog
+      _ <- findDefOrFail "main" prog
+      pure ()
+  ]
+
+compileGo :: FilePath -> IO Program
+compileGo relPath = do
+  result <- parseGo relPath
+  case result of
+    Left err -> assertFailure ("Go bridge failed: " <> T.unpack err) >> error "unreachable"
+    Right sx ->
+      case translateGoAst sx of
+        Left err -> assertFailure ("Go translate failed: " <> T.unpack err) >> error "unreachable"
+        Right prog -> pure prog
+
+-------------------------------------------------------------------------------
+-- G. Futhark Bridge Bisimulation
+-------------------------------------------------------------------------------
+
+futharkBisimTests :: TestTree
+futharkBisimTests = testGroup "Futhark Bridge"
+  [ testCase "arith: krun(translateFuthark(arith.fut)) == 44" $ do
+      prog <- compileFuthark (testDir </> "futhark" </> "arith.fut")
+      def <- findDefOrFail "compute" prog
+      let callExpr = applyDef def [ELit (LitInt 2)]
+      assertKrunEquals callExpr 44
+
+  , testCase "structural: factorial.fut produces recursive Def" $ do
+      prog <- compileFuthark "examples/factorial.fut"
+      _ <- findDefOrFail "factorial" prog
+      _ <- findDefOrFail "main" prog
+      pure ()
+  ]
+
+compileFuthark :: FilePath -> IO Program
+compileFuthark relPath = do
+  result <- parseFutharkFile relPath
+  case result of
+    Left err -> assertFailure ("Futhark bridge failed: " <> T.unpack err) >> error "unreachable"
+    Right ast ->
+      case translateFuthark (T.pack "futhark") ast of
+        Left err -> assertFailure ("Futhark translate failed: " <> T.unpack err) >> error "unreachable"
         Right prog -> pure prog
 
 -------------------------------------------------------------------------------

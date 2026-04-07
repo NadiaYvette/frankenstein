@@ -30,6 +30,10 @@ library
         Frankenstein.KokaBridge.CoreTranslate
         Frankenstein.PythonBridge.AstParse
         Frankenstein.PythonBridge.CoreTranslate
+        Frankenstein.GoBridge.AstParse
+        Frankenstein.GoBridge.CoreTranslate
+        Frankenstein.FutharkBridge.Parser
+        Frankenstein.FutharkBridge.CoreTranslate
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
         Frankenstein.OrganIR.Consumer

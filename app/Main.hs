@@ -14,6 +14,10 @@ import Frankenstein.RustBridge.CoreTranslate
 import Frankenstein.KokaBridge.Driver (compileKokaFile)
 import Frankenstein.PythonBridge.AstParse (parsePython)
 import Frankenstein.PythonBridge.CoreTranslate (translatePythonAst)
+import Frankenstein.GoBridge.AstParse (parseGo)
+import Frankenstein.GoBridge.CoreTranslate (translateGoAst)
+import Frankenstein.FutharkBridge.Parser (parseFutharkFile)
+import Frankenstein.FutharkBridge.CoreTranslate (translateFuthark)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
@@ -138,6 +142,8 @@ compileFile fromJson path = do
           ".m"  -> compileMercury path
           ".rs" -> compileRust path
           ".py" -> compilePython path
+          ".go" -> compileGo path
+          ".fut" -> compileFuthark path
           _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
   pure $ case result of
     Left err   -> Left (path, err)
@@ -202,6 +208,24 @@ compilePython inputFile = do
     Right sexpr ->
       let modName = T.pack (takeBaseName inputFile)
       in pure $ translatePythonAst modName sexpr
+
+compileGo :: FilePath -> IO (Either Text Program)
+compileGo inputFile = do
+  TIO.putStrLn $ "Compiling Go: " <> T.pack inputFile
+  result <- parseGo inputFile
+  case result of
+    Left err -> pure $ Left $ "Go bridge error: " <> err
+    Right sexpr -> pure $ translateGoAst sexpr
+
+compileFuthark :: FilePath -> IO (Either Text Program)
+compileFuthark inputFile = do
+  TIO.putStrLn $ "Compiling Futhark: " <> T.pack inputFile
+  result <- parseFutharkFile inputFile
+  case result of
+    Left err -> pure $ Left $ "Futhark bridge error: " <> err
+    Right ast ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translateFuthark modName ast
 
 compileOrganIR :: FilePath -> IO (Either Text Program)
 compileOrganIR inputFile = do
@@ -320,6 +344,8 @@ printHelp = do
   putStrLn "  .m      Mercury   (via mmc --dump-hlds)"
   putStrLn "  .rs     Rust      (via rustc MIR)"
   putStrLn "  .py     Python    (via CPython ast module)"
+  putStrLn "  .go     Go        (via go/parser stdlib helper)"
+  putStrLn "  .fut    Futhark   (via in-tree Pratt parser)"
   putStrLn "  .json   OrganIR   (organ-bank JSON)"
   putStrLn "  .organ  OrganIR   (organ-bank JSON)"
   putStrLn ""

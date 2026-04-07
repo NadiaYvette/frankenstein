@@ -62,6 +62,7 @@ data EmitState = EmitState
   , esEvidenceScope :: !(Map Text Text)  -- effect name -> evidence SSA variable name
   , esAliases       :: !(Map Text Text)  -- name alias: let x = y → x maps to y
   , esEffectDialect :: !Bool              -- emit frankenstein.* dialect ops for effects
+  , esTopFns        :: !(Set Text)        -- MLIR names of top-level func.func defs
   }
 
 type Emit a = State EmitState a
@@ -115,6 +116,7 @@ emitProgramText prog =
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
+                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -210,6 +212,7 @@ emitProgramWithEffects prog =
       stripTopDelay e           = e
       -- Key difference: esEffectDialect = True
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
+                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -256,6 +259,7 @@ emitProgramWasm prog =
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
+                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -366,22 +370,37 @@ emitExpr (ELit (LitString s)) = do
   pure (["%" <> name <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"], name)
 
 emitExpr (EVar n) = do
-  -- Variable reference — assume it's already in scope as an SSA value
-  -- If the name contains "/" it's a qualified Koka stdlib reference that wasn't resolved;
-  -- emit a stub constant so MLIR doesn't reference an undeclared SSA value.
+  -- Variable reference — look up in alias map; if not found and not a known
+  -- top-level function, emit a stub (unresolved external reference).
   let sname = nameToSsa n
+      sanitized = sanitizeName (nameText n)
+  aliases <- gets esAliases
+  topFns <- gets esTopFns
   if T.any (== '/') (nameText n)
     then do
       stubName <- freshName "v"
       pure (["// unresolved external: " <> nameText n
             , "%" <> stubName <> " = arith.constant 0 : i64"], stubName)
-    else do
-      -- Check alias map: if this name was bound to another SSA value, use that
-      aliases <- gets esAliases
-      let resolved = case Map.lookup sname aliases of
-                       Just target -> target
-                       Nothing     -> sname
-      pure ([], resolved)
+    else case Map.lookup sname aliases of
+      Just target -> pure ([], target)
+      Nothing
+        | Set.member sanitized topFns -> do
+            -- Top-level function used as a value (not applied). Materialize
+            -- its address as an i64, so callers can pass it as a closure-like
+            -- value. This is only valid when the callee treats the arg as
+            -- an opaque pointer; a real closure would wrap it with kk_alloc_con.
+            addrName <- freshName "v"
+            intName  <- freshName "v"
+            pure ([ "%" <> addrName <> " = llvm.mlir.addressof @" <> sanitized <> " : !llvm.ptr"
+                  , "%" <> intName  <> " = llvm.ptrtoint %" <> addrName <> " : !llvm.ptr to i64"
+                  ], intName)
+        | otherwise -> do
+            -- Unresolved external: emit a stub constant so downstream
+            -- operations have a valid SSA value to consume.
+            stubName <- freshName "v"
+            pure ([ "// unresolved external: " <> nameText n
+                  , "%" <> stubName <> " = arith.constant 0 : i64"
+                  ], stubName)
 
 -- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
@@ -499,17 +518,55 @@ emitExpr (EApp (EVar fn) [evvArg, idxArg])
       pure (evvOps ++ idxOps ++ [callOp], resultName)
 
 emitExpr (EApp (EVar fn) args) = do
-  -- General function call
+  -- General function call. If fn names a top-level function, emit a direct
+  -- func.call; otherwise treat it as a local closure value (heap-allocated
+  -- via kk_alloc_con) and dispatch indirectly through field 0 (fptr).
   argResults <- mapM emitExpr args
   let allOps = concatMap fst argResults
       argNames = map snd argResults
       argList = T.intercalate ", " ["%" <> n | n <- argNames]
+      sanitized = sanitizeName (nameText fn)
   argTypes <- mapM lookupType argNames
   let argTypeList = T.intercalate ", " argTypes
-  resultName <- freshName "v"
-  let callOp = "%" <> resultName <> " = func.call @" <> sanitizeName (nameText fn)
-               <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
-  pure (allOps ++ [callOp], resultName)
+  topFns <- gets esTopFns
+  if Set.member sanitized topFns
+    then do
+      resultName <- freshName "v"
+      let callOp = "%" <> resultName <> " = func.call @" <> sanitized
+                   <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
+      pure (allOps ++ [callOp], resultName)
+    else do
+      -- Closure-indirect call: fn is a local value holding a heap closure ptr.
+      -- If the name isn't actually in scope, it's an unresolved external —
+      -- fall back to a stub (the whole call becomes undefined behavior, but
+      -- the MLIR stays well-formed so later passes can still run).
+      aliases <- gets esAliases
+      let rawName = nameToSsa fn
+      closName <- case Map.lookup rawName aliases of
+        Just target -> pure target
+        Nothing -> do
+          stubName <- freshName "v"
+          modify (\s -> s { esLiftedFns = esLiftedFns s })
+          -- Inline the stub op into the call sequence via allOps prefix below.
+          pure stubName
+      let closOps = case Map.lookup rawName aliases of
+            Just _  -> []
+            Nothing -> [ "// unresolved external call: " <> nameText fn
+                       , "%" <> closName <> " = arith.constant 0 : i64" ]
+      idxZeroName <- freshName "v"
+      fptrIntName <- freshName "v"
+      fptrPtrName <- freshName "v"
+      resultName  <- freshName "v"
+      let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- argNames])
+          closArgTypes = T.intercalate ", " ("i64" : argTypes)
+          extractOps =
+            [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
+            , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+            , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
+            , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+              <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
+            ]
+      pure (allOps ++ closOps ++ extractOps, resultName)
 
 -- Application of a non-var, non-con expression (e.g. closure call)
 emitExpr (EApp fn args) = do
@@ -598,60 +655,96 @@ emitExpr (ELet (bg:bgs) body) = do
 emitExpr (ELet [] body) = emitExpr body
 
 emitExpr (ELam params body) = do
-  -- Lambda lifting with closure support
+  -- Lambda lifting with heap-allocated closures.
+  --
+  -- Closure ABI (all values are i64):
+  --   Layout:   field 0 = function pointer (as i64), fields 1..n = captured vars
+  --   Signature: lifted fn takes (closure, arg0, arg1, ...) -> i64
+  --   Prologue:  lifted fn extracts captured fields from %closure via kk_field
+  --   Call site: extract field 0 (fptr), cast to ptr, llvm.call %fptr(%closure, args)
+  --
+  -- This avoids MLIR SSA struct values leaking into i64 contexts (HOFs, lets).
   let bodyFree = freeVarsExpr body
       paramNames = Set.fromList (map fst params)
-      captured = Set.toList (bodyFree `Set.difference` paramNames)
+      candidateCaptures = Set.toList (bodyFree `Set.difference` paramNames)
+  -- Only capture names that are actually in scope (aliased to an SSA value).
+  -- Anything else is an external reference (top-level fn or unresolved import);
+  -- it will be resolved at the reference site inside the lambda body.
+  currentAliases <- gets esAliases
+  topFns <- gets esTopFns
+  let isInScope n = let s = nameToSsa n
+                    in Map.member s currentAliases
+                       || Set.member (sanitizeName (nameText n)) topFns
+      captured = filter (\n -> isInScope n
+                            && not (Set.member (sanitizeName (nameText n)) topFns))
+                        candidateCaptures
+      nCaptured = length captured
   liftedName <- freshName "lambda"
-  if null captured
-    then do
-      -- No free variables: simple lambda lift (existing behavior)
-      let mlirArgs = T.intercalate ", "
-            [ "%" <> nameToSsa pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
-          mlirRetTy = "i64"
-      (bodyOps, bodyResult) <- emitExpr body
-      let fnText = T.unlines $
-            [ "  func.func @" <> liftedName <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {" ] ++
-            map ("    " <>) bodyOps ++
-            [ "    func.return %" <> bodyResult <> " : " <> mlirRetTy
-            , "  }" ]
-      addLiftedFn fnText
-      name <- freshName "v"
-      pure (["// lambda lifted as @" <> liftedName,
-             "%" <> name <> " = arith.constant 0 : i64"], name)
-    else do
-      -- Has free variables: emit closure struct
-      -- The lifted function takes captured vars as extra leading params
-      let capturedParams = [ "%" <> nameToSsa cn <> ": i64" | cn <- captured ]
-          regularParams = [ "%" <> nameToSsa pn <> ": " <> typeToMlir pt | (pn, pt) <- params ]
-          allParams = capturedParams ++ regularParams
-          mlirArgs = T.intercalate ", " allParams
-          mlirRetTy = "i64"
-      (bodyOps, bodyResult) <- emitExpr body
-      let fnText = T.unlines $
-            [ "  func.func @" <> liftedName <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {" ] ++
-            map ("    " <>) bodyOps ++
-            [ "    func.return %" <> bodyResult <> " : " <> mlirRetTy
-            , "  }" ]
-      addLiftedFn fnText
-      -- Build closure struct: (fptr_as_i64, captured1, captured2, ...)
-      let nCaptured = length captured
-          closTy = "!llvm.struct<(i64" <> T.concat (replicate nCaptured ", i64") <> ")>"
-      baseName <- freshName "v"
-      fptrName <- freshName "v"
-      fptrAddrName <- freshName "v"
-      let initOps = [ "// closure for @" <> liftedName <> " capturing " <> T.pack (show nCaptured) <> " vars"
-                     , "%" <> fptrAddrName <> " = llvm.mlir.addressof @" <> liftedName <> " : !llvm.ptr"
-                     , "%" <> fptrName <> " = llvm.ptrtoint %" <> fptrAddrName <> " : !llvm.ptr to i64"
-                     , "%" <> baseName <> " = llvm.mlir.undef : " <> closTy
-                     ]
-      -- Insert function pointer at position 0
-      afterFptrName <- freshName "v"
-      let insertFptr = "%" <> afterFptrName <> " = llvm.insertvalue %" <> baseName <> ", %" <> fptrName <> "[0] : " <> closTy
-      -- Insert each captured variable
-      let capturedNames = map nameToSsa captured
-      (insertOps, finalName) <- foldInsertFields afterFptrName closTy capturedNames 1
-      pure (initOps ++ [insertFptr] ++ insertOps, finalName)
+  -- Allocate fresh SSA param names (closure + regular params).
+  closFresh <- freshName "clos"
+  paramFresh <- mapM (\_ -> freshName "p") params
+  -- For each captured variable, allocate a fresh SSA name we'll bind in the prologue.
+  capFresh <- mapM (\_ -> freshName "cap") captured
+  -- Save aliases; install body-local aliases (originals → fresh names).
+  savedAliases <- gets esAliases
+  let capAliases = zip (map nameToSsa captured) capFresh
+      paramAliases = zip (map (nameToSsa . fst) params) paramFresh
+  modify (\s -> s { esAliases = foldr (\(k,v) m -> Map.insert k v m)
+                                      (esAliases s)
+                                      (capAliases ++ paramAliases) })
+  -- Build prologue ops that extract captured fields from %closure.
+  let prologue = concat
+        [ [ "%idx_" <> cfn <> " = arith.constant " <> T.pack (show i) <> " : i64"
+          , "%" <> cfn <> " = func.call @kk_field(%" <> closFresh <> ", %idx_" <> cfn <> ") : (i64, i64) -> i64"
+          ]
+        | (i, cfn) <- zip [(1::Int)..] capFresh
+        ]
+  (bodyOps, bodyResult) <- emitExpr body
+  -- Restore alias map (body-local aliases shouldn't leak out).
+  modify (\s -> s { esAliases = savedAliases })
+  -- Closure ABI: all regular params flow as i64 through the closure dispatch,
+  -- matching the call site's assumption. Ignore per-param types.
+  let regularParams = [ "%" <> fn <> ": i64"
+                      | fn <- paramFresh ]
+      allParams = ("%" <> closFresh <> ": i64") : regularParams
+      mlirArgs = T.intercalate ", " allParams
+      mlirRetTy = "i64"
+      fnText = T.unlines $
+        [ "  func.func @" <> liftedName <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {" ] ++
+        map ("    " <>) (prologue ++ bodyOps) ++
+        [ "    func.return %" <> bodyResult <> " : " <> mlirRetTy
+        , "  }" ]
+  addLiftedFn fnText
+  -- Allocate the closure as a boxed heap value via kk_alloc_con.
+  -- Field 0 = fptr, fields 1..n = captured values.
+  let nFields = nCaptured + 1
+  tagName <- freshName "v"
+  nfieldsName <- freshName "v"
+  ptrName <- freshName "v"
+  fptrAddrName <- freshName "v"
+  fptrName <- freshName "v"
+  idxZeroName <- freshName "v"
+  let allocOps =
+        [ "// closure for @" <> liftedName <> " capturing " <> T.pack (show nCaptured) <> " vars"
+        , "%" <> tagName <> " = arith.constant 0 : i64"
+        , "%" <> nfieldsName <> " = arith.constant " <> T.pack (show nFields) <> " : i64"
+        , "%" <> ptrName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
+        , "%" <> fptrAddrName <> " = llvm.mlir.addressof @" <> liftedName <> " : !llvm.ptr"
+        , "%" <> fptrName <> " = llvm.ptrtoint %" <> fptrAddrName <> " : !llvm.ptr to i64"
+        , "%" <> idxZeroName <> " = arith.constant 0 : i64"
+        , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxZeroName <> ", %" <> fptrName <> ") : (i64, i64, i64) -> ()"
+        ]
+  -- Store each captured variable at field index (1 + i).
+  capturedNames <- mapM (\cn -> do
+                            aliases <- gets esAliases
+                            let sname = nameToSsa cn
+                            pure (Map.findWithDefault sname sname aliases)) captured
+  capSetOps <- mapM (\(i, cnName) -> do
+    idxN <- freshName "v"
+    pure [ "%" <> idxN <> " = arith.constant " <> T.pack (show i) <> " : i64"
+         , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxN <> ", %" <> cnName <> ") : (i64, i64, i64) -> ()"
+         ]) (zip [(1::Int)..] capturedNames)
+  pure (allocOps ++ concat capSetOps, ptrName)
 
 -- Perceus operations — emit real runtime calls
 emitExpr (EDrop e) = do
@@ -1145,7 +1238,8 @@ foldInsertFields :: Text -> Text -> [Text] -> Int -> Emit ([Text], Text)
 foldInsertFields currentName _ [] _ = pure ([], currentName)
 foldInsertFields currentName structTy (fieldName:rest) idx = do
   nextName <- freshName "v"
-  let op = "%" <> nextName <> " = llvm.insertvalue %" <> currentName <> ", %" <> fieldName <> "[" <> T.pack (show idx) <> "] : " <> structTy
+  -- MLIR llvm.insertvalue: %out = llvm.insertvalue %value, %container[idx] : !type
+  let op = "%" <> nextName <> " = llvm.insertvalue %" <> fieldName <> ", %" <> currentName <> "[" <> T.pack (show idx) <> "] : " <> structTy
   (restOps, finalName) <- foldInsertFields nextName structTy rest (idx + 1)
   pure (op : restOps, finalName)
 

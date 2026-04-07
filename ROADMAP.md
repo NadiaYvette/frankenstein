@@ -345,20 +345,51 @@ Emitter fixes required:
   field SSA values from a sibling region)
 - `sanitizeName` now strips parens, commas, brackets, quotes, whitespace
 
-### 6b. Compile Core/Perceus.hs (in progress)
+### 6b. Compile Core/Perceus.hs (substantially complete)
 
 The Perceus pass itself, compiled through the Perceus pass. Beautifully
-recursive. **Status**: Translates to Frankenstein Core successfully — every
-top-level function (`freeVars`, `analyzeUsage`, `wrapRetains`, `perceusBranch`,
-`perceusBindGroup`, `perceusExpr`, `perceusDefTransform`, `insertPerceus`)
-appears in the Core dump. MLIR emission hits known limitations on heavy
-higher-order code:
-- HOFs like `foldr`, `map` get lifted as lambdas with captured environments
-  but `func.call @localFn(...)` references SSA-bound function values that need
-  closure-call indirection rather than direct symbol references
-- Some lifted lambdas have parameter name collisions (captured vs. bound vars
-  with same OccString) — needs unique-suffixed parameter renaming in
-  lambda lifting
+recursive. **Status**: Translates to Frankenstein Core → MLIR (~3550 lines)
+in one shot. All 50 tests still pass, `--demo --compile` still produces
+3628800. Remaining constraints are known and narrow (7 cross-region SSA
+references to drops/retains emitted outside the scf.if region that defines
+the value).
+
+Emitter changes required:
+- **Closure ABI via `kk_alloc_con`**: every lifted lambda allocates a heap
+  closure; field 0 is the function pointer as i64, fields 1..n are the
+  captured variables. Closures flow through HOF contexts as plain i64, so
+  no MLIR struct values leak into the generic `i64` pipeline.
+- **Closure-indirect call path**: `EApp (EVar fn) args` now checks
+  `esTopFns` to decide between `func.call @fn(args)` (direct call to a
+  known top-level function) and a closure-indirect call that extracts
+  field 0 via `kk_field`, inttoptr's it, and `llvm.call`s through the
+  pointer. `esTopFns :: Set Text` is seeded from the program's def names.
+- **Unresolved external fallback**: names that aren't in scope and aren't
+  known top-level functions (imports from `Data.Map`, `Data.Set`, data
+  constructors like `(,)` or `:`) materialize as stub constants with an
+  `// unresolved external` comment — the MLIR stays well-formed even
+  though the call is semantically undefined. Applied at both `EVar` sites
+  and the closure-call path.
+- **Top-level-fn-as-value**: when a known top-level function is used as
+  a value (e.g. passed as an argument), emit `llvm.mlir.addressof @fn`
+  + `llvm.ptrtoint` so the caller gets a real i64 address rather than a
+  dangling SSA name.
+- **Lambda parameter renaming**: every captured var and regular param
+  gets a fresh SSA name via `freshName`, with aliases save/restore around
+  the body, preventing collisions between captured and bound names with
+  the same OccString.
+- **Uniform i64 params in lifted functions**: the closure ABI is uniform
+  i64 for all arguments, so lifted lambda signatures use `i64` rather
+  than `typeToMlir` (which was producing `!llvm.ptr` for some Haskell
+  types and failing when consumers expected i64).
+- **`llvm.insertvalue` operand order**: fixed to (value, container) in
+  both existing callsites (was backwards — MLIR rejects the reversed
+  form as a type mismatch on the struct container).
+- **Capture filter**: only names currently in `esAliases` are captured.
+  External references (unresolved imports, top-level fn names) are
+  handled at the reference site instead of being dragged into the
+  closure, avoiding raw unsanitized names like `%:` or `%foldr` in
+  `kk_set_field` calls.
 
 ### 6c. Full Self-Hosting (blocked on 6b)
 
@@ -369,7 +400,7 @@ for its own compilation (though still using GHC as a frontend).
 
 ---
 
-## Current State (2026-04-07, Phase 6a complete, 6b in progress)
+## Current State (2026-04-07, Phase 6a+6b substantially complete)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)

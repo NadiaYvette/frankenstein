@@ -6,8 +6,11 @@
 module Frankenstein.MlirEmit.Emitter
   ( emitProgram
   , emitProgramText
+  , emitProgramWasm
   , emitProgramWithEffects
   , compileToExecutable
+  , compileToWasm
+  , CompileTarget(..)
   , EmitConfig(..)
   , defaultEmitConfig
   ) where
@@ -27,6 +30,8 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 
+data CompileTarget = TargetNative | TargetWasm32 deriving (Show, Eq)
+
 data EmitConfig = EmitConfig
   { ecMlirOptPath       :: !FilePath
   , ecMlirTranslatePath :: !FilePath
@@ -34,6 +39,7 @@ data EmitConfig = EmitConfig
   , ecKokaRuntimePath   :: !(Maybe FilePath)
   , ecOptLevel          :: !Int
   , ecOutputPath        :: !FilePath
+  , ecTarget            :: !CompileTarget
   } deriving (Show)
 
 defaultEmitConfig :: EmitConfig
@@ -44,6 +50,7 @@ defaultEmitConfig = EmitConfig
   , ecKokaRuntimePath   = Nothing
   , ecOptLevel          = 0
   , ecOutputPath        = "a.out"
+  , ecTarget            = TargetNative
   }
 
 -- Emission state: tracks SSA counter and collected top-level functions
@@ -226,6 +233,71 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_alloc_con(i64, i64) -> i64"
     , "  func.func private @kk_thunk_create(i64) -> i64"
     , "  func.func private @kk_thunk_force(i64) -> i64"
+    , ""
+    , "  // Lifted functions"
+    , liftedFns
+    , ""
+    , bodyText
+    , "}"
+    ]
+
+-- | Emit MLIR for Wasm target: no printf, _frankenstein_main exported directly.
+-- The JS/Wasm host reads the return value of _frankenstein_main().
+emitProgramWasm :: Program -> Text
+emitProgramWasm prog =
+  let defs = progDefs prog
+      hasMain = any (\d -> nameText (qnameName (defName d)) == "main") defs
+      renamedDefs = if hasMain
+        then map (\d -> if nameText (qnameName (defName d)) == "main"
+                        then d { defName = QName "" (Name "_frankenstein_main" 99)
+                               , defExpr = stripTopDelay (defExpr d) }
+                        else d) defs
+        else defs
+      stripTopDelay (EDelay e) = e
+      stripTopDelay e           = e
+      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
+      (bodyText, finalState) = runState (emitDefs renamedDefs) initState
+      liftedFns = T.unlines (reverse (esLiftedFns finalState))
+      stringGlobals = T.unlines
+        [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
+          <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
+        | (gn, s) <- esStringLits finalState ]
+  in T.unlines
+    [ "module {"
+    , ""
+    , "  // External declarations (printf provided by Wasm host)"
+    , "  llvm.func @printf(!llvm.ptr, ...) -> i32"
+    , "  llvm.mlir.global internal constant @fmt_int(\"%ld\\n\\00\") {addr_space = 0 : i32}"
+    , "  llvm.mlir.global internal constant @fmt_str(\"%s\\n\\00\") {addr_space = 0 : i32}"
+    , ""
+    , "  // String literals"
+    , stringGlobals
+    , ""
+    , "  // Perceus runtime declarations"
+    , "  func.func private @kk_drop(i64) -> ()"
+    , "  func.func private @kk_retain(i64) -> ()"
+    , "  func.func private @kk_release(i64) -> ()"
+    , "  func.func private @kk_reuse(i64) -> i64"
+    , ""
+    , "  // Boxed value runtime declarations"
+    , "  func.func private @kk_alloc_con(i64, i64) -> i64"
+    , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
+    , "  func.func private @kk_tag(i64) -> i64"
+    , "  func.func private @kk_field(i64, i64) -> i64"
+    , ""
+    , "  // Thunk runtime declarations"
+    , "  func.func private @kk_thunk_create(i64) -> i64"
+    , "  func.func private @kk_thunk_force(i64) -> i64"
+    , ""
+    , "  // Evidence vector runtime declarations"
+    , "  func.func private @kk_evv_create(i64) -> i64"
+    , "  func.func private @kk_evv_set(i64, i64, i64) -> ()"
+    , "  func.func private @kk_evv_get(i64, i64) -> i64"
+    , "  func.func private @kk_unhandled_effect() -> i64"
+    , ""
+    , "  // Mercury choice effect runtime"
+    , "  func.func private @mercury_choose() -> i64"
+    , "  func.func private @mercury_collect_choices(i64) -> i64"
     , ""
     , "  // Lifted functions"
     , liftedFns
@@ -1238,3 +1310,75 @@ compileToExecutable config prog = do
               case ec3 of
                 ExitFailure _ -> pure $ Left $ "clang failed: " <> T.pack err3
                 ExitSuccess -> pure $ Right $ ecOutputPath config
+
+-- | Compile to WebAssembly (.wasm)
+-- Pipeline: MLIR → mlir-opt → mlir-translate → llc (wasm32) → wasm-ld
+compileToWasm :: EmitConfig -> Program -> IO (Either Text FilePath)
+compileToWasm config prog = do
+  let mlirText = emitProgramWasm prog
+      outBase = ecOutputPath config
+      mlirPath = outBase ++ ".mlir"
+      optPath = outBase ++ ".opt.mlir"
+      llPath = outBase ++ ".ll"
+      wasmObjPath = outBase ++ ".wasm.o"
+      wasmRtObjPath = outBase ++ ".wasm.rt.o"
+      wasmPath = if ".wasm" `isSuffixOf` outBase then outBase else outBase ++ ".wasm"
+
+  -- Write MLIR (no printf, no fmt_int)
+  TIO.writeFile mlirPath mlirText
+
+  -- mlir-opt: lower to LLVM dialect
+  (ec1, out1, err1) <- readProcessWithExitCode (ecMlirOptPath config)
+    ["--convert-scf-to-cf", "--convert-func-to-llvm", "--convert-arith-to-llvm",
+     "--convert-cf-to-llvm", "--reconcile-unrealized-casts", mlirPath] ""
+  case ec1 of
+    ExitFailure _ -> pure $ Left $ "mlir-opt failed: " <> T.pack err1
+    ExitSuccess -> do
+      writeFile optPath out1
+
+      -- mlir-translate: MLIR → LLVM IR
+      (ec2, out2, err2) <- readProcessWithExitCode (ecMlirTranslatePath config)
+        ["--mlir-to-llvmir", optPath] ""
+      case ec2 of
+        ExitFailure _ -> pure $ Left $ "mlir-translate failed: " <> T.pack err2
+        ExitSuccess -> do
+          writeFile llPath out2
+
+          -- llc: LLVM IR → wasm32 object
+          (ec3, _, err3) <- readProcessWithExitCode "llc"
+            ["-mtriple=wasm32-unknown-unknown", "-filetype=obj", "-O2",
+             llPath, "-o", wasmObjPath] ""
+          case ec3 of
+            ExitFailure _ -> pure $ Left $ "llc (wasm32) failed: " <> T.pack err3
+            ExitSuccess -> do
+              -- Compile wasm runtime
+              case ecKokaRuntimePath config of
+                Just rtPath -> do
+                  let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
+                      wasmRtSrc = rtDir ++ "kk_runtime_wasm.c"
+                  (ec4, _, err4) <- readProcessWithExitCode (ecClangPath config)
+                    ["--target=wasm32-unknown-unknown", "-O2", "-nostdlib",
+                     "-c", wasmRtSrc, "-o", wasmRtObjPath] ""
+                  case ec4 of
+                    ExitFailure _ -> pure $ Left $ "clang (wasm runtime) failed: " <> T.pack err4
+                    ExitSuccess -> do
+                      -- wasm-ld: link program + runtime → .wasm
+                      (ec5, _, err5) <- readProcessWithExitCode "wasm-ld"
+                        ["--no-entry", "--export=_frankenstein_main",
+                         "--allow-undefined",
+                         wasmObjPath, wasmRtObjPath,
+                         "-o", wasmPath] ""
+                      case ec5 of
+                        ExitFailure _ -> pure $ Left $ "wasm-ld failed: " <> T.pack err5
+                        ExitSuccess -> pure $ Right wasmPath
+                Nothing -> do
+                  -- No runtime — link program only with undefined symbols allowed
+                  (ec5, _, err5) <- readProcessWithExitCode "wasm-ld"
+                    ["--no-entry", "--export=_frankenstein_main",
+                     "--allow-undefined",
+                     wasmObjPath, "-o", wasmPath] ""
+                  case ec5 of
+                    ExitFailure _ -> pure $ Left $ "wasm-ld failed: " <> T.pack err5
+                    ExitSuccess -> pure $ Right wasmPath
+  where
+    isSuffixOf suf s = drop (length s - length suf) s == suf

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Frankenstein — Polyglot Compiler Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 2rem;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 { color: #7fdbca; margin-bottom: 0.5rem; }
+    .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.9rem; }
+    .demo-card {
+      background: #16213e;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .demo-card h2 { color: #c792ea; font-size: 1.1rem; margin-bottom: 0.5rem; }
+    .demo-card .lang { color: #ffcb6b; font-size: 0.8rem; }
+    pre {
+      background: #0d1117;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 1rem;
+      margin: 0.5rem 0;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+    .kw { color: #c792ea; }
+    .fn { color: #82aaff; }
+    .num { color: #f78c6c; }
+    .op { color: #89ddff; }
+    .result-box {
+      background: #1b3a4b;
+      border: 1px solid #7fdbca;
+      border-radius: 4px;
+      padding: 0.75rem 1rem;
+      margin-top: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .result-box .label { color: #7fdbca; font-weight: bold; }
+    .result-box .value { color: #ffcb6b; font-size: 1.2rem; }
+    .result-box .time { color: #888; font-size: 0.8rem; }
+    button {
+      background: #7fdbca;
+      color: #1a1a2e;
+      border: none;
+      border-radius: 4px;
+      padding: 0.5rem 1.5rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button:hover { background: #a8f0dc; }
+    button:disabled { background: #444; color: #888; cursor: not-allowed; }
+    .stats {
+      display: flex;
+      gap: 2rem;
+      margin-top: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .stat { text-align: center; }
+    .stat .num { font-size: 1.5rem; color: #ffcb6b; display: block; }
+    .stat .label { font-size: 0.75rem; color: #888; }
+    .pipeline {
+      color: #888;
+      font-size: 0.8rem;
+      margin-top: 1rem;
+      line-height: 1.6;
+    }
+    .pipeline code { color: #c792ea; }
+    a { color: #7fdbca; }
+  </style>
+</head>
+<body>
+  <h1>Frankenstein</h1>
+  <p class="subtitle">Polyglot compiler: Haskell + Koka + Rust + Mercury &rarr; WebAssembly</p>
+
+  <div class="demo-card">
+    <h2>factorial(10)</h2>
+    <span class="lang">Koka Core &rarr; MLIR &rarr; LLVM &rarr; WebAssembly</span>
+    <pre><span class="kw">fun</span> <span class="fn">factorial</span>(n : <span class="kw">int</span>) : <span class="kw">int</span>
+  <span class="kw">match</span> n
+    <span class="num">0</span> <span class="op">-&gt;</span> <span class="num">1</span>
+    _ <span class="op">-&gt;</span> n <span class="op">*</span> <span class="fn">factorial</span>(n <span class="op">-</span> <span class="num">1</span>)
+
+<span class="kw">fun</span> <span class="fn">main</span>() : <span class="kw">int</span>
+  <span class="fn">factorial</span>(<span class="num">10</span>)</pre>
+    <button id="run-btn" onclick="runDemo()">Run in WebAssembly</button>
+    <div class="result-box" id="result" style="display:none">
+      <span class="label">Result:</span>
+      <span class="value" id="result-value"></span>
+      <span class="time" id="result-time"></span>
+    </div>
+  </div>
+
+  <div class="stats" id="stats" style="display:none">
+    <div class="stat">
+      <span class="num" id="stat-size">—</span>
+      <span class="label">Wasm binary size</span>
+    </div>
+    <div class="stat">
+      <span class="num" id="stat-time">—</span>
+      <span class="label">Execution time</span>
+    </div>
+    <div class="stat">
+      <span class="num" id="stat-exports">—</span>
+      <span class="label">Exported functions</span>
+    </div>
+  </div>
+
+  <div class="pipeline">
+    <p><strong>Compilation pipeline:</strong></p>
+    <p>
+      <code>Koka Core</code> &rarr;
+      <code>Perceus RC</code> &rarr;
+      <code>MLIR (func/arith/scf)</code> &rarr;
+      <code>mlir-opt</code> &rarr;
+      <code>LLVM IR</code> &rarr;
+      <code>llc -mtriple=wasm32</code> &rarr;
+      <code>wasm-ld</code> &rarr;
+      <code>.wasm</code>
+    </p>
+    <p style="margin-top:0.5rem">
+      Source: <a href="https://github.com/NadiaYvette/frankenstein">github.com/NadiaYvette/frankenstein</a>
+    </p>
+  </div>
+
+  <script>
+    let wasmModule = null;
+    let wasmBytes = null;
+
+    async function loadWasm() {
+      try {
+        const resp = await fetch('factorial.wasm');
+        wasmBytes = await resp.arrayBuffer();
+        wasmModule = await WebAssembly.compile(wasmBytes);
+        document.getElementById('run-btn').disabled = false;
+      } catch (e) {
+        // If fetch fails, show inline error
+        document.getElementById('run-btn').textContent = 'Wasm not found — run web/build.sh first';
+        document.getElementById('run-btn').disabled = true;
+      }
+    }
+
+    function runDemo() {
+      if (!wasmModule) return;
+      const instance = new WebAssembly.Instance(wasmModule, {});
+      const t0 = performance.now();
+      const result = instance.exports._frankenstein_main();
+      const t1 = performance.now();
+      const elapsed = (t1 - t0).toFixed(2);
+
+      document.getElementById('result').style.display = 'flex';
+      document.getElementById('result-value').textContent = Number(result).toLocaleString();
+      document.getElementById('result-time').textContent = `(${elapsed} ms)`;
+
+      document.getElementById('stats').style.display = 'flex';
+      document.getElementById('stat-size').textContent = wasmBytes.byteLength + ' bytes';
+      document.getElementById('stat-time').textContent = elapsed + ' ms';
+      const exports = Object.keys(instance.exports).filter(k => typeof instance.exports[k] === 'function');
+      document.getElementById('stat-exports').textContent = exports.length;
+    }
+
+    loadWasm();
+  </script>
+</body>
+</html>

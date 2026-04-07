@@ -47,3 +47,6 @@ result/
 # === Benchmark binaries and intermediate files ===
 bench/bin/
 bench/Fib
+
+# === Web demo build artifacts ===
+web/*.wasm

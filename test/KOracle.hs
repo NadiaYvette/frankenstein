@@ -29,7 +29,7 @@ import Test.QuickCheck
 import Frankenstein.Core.Types
 import Frankenstein.Core.Evidence (evidencePass)
 import Frankenstein.Core.Perceus (insertPerceus)
-import Frankenstein.MlirEmit.Emitter (EmitConfig(..), compileToExecutable, emitProgramText)
+import Frankenstein.MlirEmit.Emitter (EmitConfig(..), CompileTarget(..), compileToExecutable, emitProgramText)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -461,6 +461,7 @@ runMlirPipeline expr = withSystemTempDirectory "frankenstein-oracle" $ \tmpDir -
         , ecKokaRuntimePath = Just "/home/nyc/src/frankenstein/runtime/kk_runtime.c"
         , ecOptLevel = 0
         , ecOutputPath = outputPath
+        , ecTarget = TargetNative
         }
 
   result <- compileToExecutable config progPerceus

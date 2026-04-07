@@ -12,7 +12,7 @@ import Frankenstein.MercuryBridge.CoreTranslate
 import Frankenstein.RustBridge.MirParse
 import Frankenstein.RustBridge.CoreTranslate
 import Frankenstein.KokaBridge.Driver (compileKokaFile)
-import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWithEffects, compileToExecutable, defaultEmitConfig, EmitConfig(..))
+import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
 import Data.Text (Text)
@@ -64,10 +64,11 @@ data Flags = Flags
   , flagCompile  :: !Bool
   , flagOutput   :: !FilePath
   , flagFromJson :: !Bool
+  , flagTarget   :: !CompileTarget
   } deriving (Show)
 
 defaultFlags :: Flags
-defaultFlags = Flags False False False False "a.out" False
+defaultFlags = Flags False False False False "a.out" False TargetNative
 
 data Command
   = ShowHelp
@@ -100,6 +101,7 @@ removeArgValues :: [String] -> [String]
 removeArgValues [] = []
 removeArgValues ("-o":_:rest) = removeArgValues rest
 removeArgValues ("--output":_:rest) = removeArgValues rest
+removeArgValues ("--target":_:rest) = removeArgValues rest
 removeArgValues (x:rest) = x : removeArgValues rest
 
 parseFlags :: [String] -> Flags
@@ -114,6 +116,10 @@ parseFlags args = Flags
                             ("-o":o:_) -> o
                             _ -> "a.out"
   , flagFromJson = "--from-json" `elem` args || "--from-organ" `elem` args
+  , flagTarget   = case dropWhile (/= "--target") args of
+                     ("--target":"wasm32":_) -> TargetWasm32
+                     ("--target":"wasm":_)   -> TargetWasm32
+                     _ -> TargetNative
   }
 
 -- Compilation dispatch
@@ -208,6 +214,7 @@ handleOutput prog0 flags = do
       config = defaultEmitConfig
         { ecOutputPath = flagOutput flags
         , ecKokaRuntimePath = Just "runtime/kk_runtime.c"
+        , ecTarget = flagTarget flags
         }
   -- Print optimization stats if any optimizations fired
   let totalOpts = eosInlined optStats + eosEliminated optStats + eosTailRes optStats
@@ -217,7 +224,13 @@ handleOutput prog0 flags = do
                 <> T.pack (show (eosTailRes optStats)) <> " tail-resumptive"
     else pure ()
   case () of
-    _ | flagCompile flags -> do
+    _ | flagCompile flags && flagTarget flags == TargetWasm32 -> do
+          TIO.putStrLn "=== Compiling to WebAssembly ==="
+          result <- compileToWasm config prog
+          case result of
+            Left err -> TIO.putStrLn $ "Compilation error: " <> err
+            Right path -> TIO.putStrLn $ "Compiled: " <> T.pack path
+      | flagCompile flags -> do
           TIO.putStrLn "=== Compiling to native ==="
           result <- compileToExecutable config prog
           case result of
@@ -239,6 +252,8 @@ handleOutput prog0 flags = do
               TIO.putStrLn "\n=== Cycle Analysis ==="
               mapM_ (\ci -> TIO.putStrLn $ "  " <> nameText (qnameName (ciName ci))
                             <> ": " <> ciReason ci) cyclicDefs
+      | flagEmitMlir flags && flagTarget flags == TargetWasm32 ->
+          TIO.putStrLn $ emitProgramWasm prog
       | flagEmitMlir flags ->
           TIO.putStrLn $ emitProgram prog
       | otherwise -> do
@@ -279,7 +294,8 @@ printHelp = do
   putStrLn "  --emit-core       Print Frankenstein Core IR"
   putStrLn "  --emit-mlir       Print MLIR output (after evidence lowering)"
   putStrLn "  --emit-effect-mlir Print MLIR with frankenstein.* dialect ops"
-  putStrLn "  --compile         Compile to native executable"
+  putStrLn "  --compile         Compile to native executable (or .wasm)"
+  putStrLn "  --target wasm32   Target WebAssembly (use with --compile)"
   putStrLn "  -o, --output      Output path (default: a.out)"
   putStrLn "  --from-json       Treat input as OrganIR JSON (also: --from-organ)"
   putStrLn "  --demo            Run built-in demo (factorial)"

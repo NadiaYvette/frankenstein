@@ -11,7 +11,7 @@ import Frankenstein.Core.Evidence (evidencePass)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
   , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
-import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWithEffects)
+import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
 import BridgeBisim (bridgeBisimTests)
 
@@ -70,6 +70,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , effectOptTests
   , linkerTests
   , mlirEmitTests
+  , wasmEmitTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -481,6 +482,43 @@ mlirEmitTests = testGroup "MLIR Emission"
           mlir = emitProgram prog
       in assertBool "should produce non-empty output"
            (not (T.null mlir))
+  ]
+
+-------------------------------------------------------------------------------
+-- G. Wasm emission tests
+-------------------------------------------------------------------------------
+
+wasmEmitTests :: TestTree
+wasmEmitTests = testGroup "Wasm Emission"
+  [ testCase "emitProgramWasm: no printf declaration" $
+      let prog = demoFactorialWithMain
+          mlir = emitProgramWasm prog
+      in assertBool "wasm MLIR should not contain main wrapper with printf call"
+           (not (T.isInfixOf "func.func @main" mlir))
+
+  , testCase "emitProgramWasm: contains _frankenstein_main" $
+      let prog = demoFactorialWithMain
+          mlir = emitProgramWasm prog
+      in assertBool "should contain _frankenstein_main"
+           (T.isInfixOf "_frankenstein_main" mlir)
+
+  , testCase "emitProgramWasm: contains runtime declarations" $
+      let prog = demoFactorialWithMain
+          mlir = emitProgramWasm prog
+      in do
+        assertBool "should declare kk_retain"
+          (T.isInfixOf "kk_retain" mlir)
+        assertBool "should declare kk_drop"
+          (T.isInfixOf "kk_drop" mlir)
+
+  , testCase "emitProgramWasm: factorial produces valid MLIR" $
+      let prog = demoFactorialWithMain
+          mlir = emitProgramWasm prog
+      in do
+        assertBool "should contain func.func @factorial"
+          (T.isInfixOf "func.func @factorial" mlir)
+        assertBool "should contain module wrapper"
+          (T.isInfixOf "module {" mlir)
   ]
 
 -------------------------------------------------------------------------------

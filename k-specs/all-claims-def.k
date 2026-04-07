@@ -113,6 +113,97 @@ module EVIDENCE-CHECKERS
 
 endmodule
 
+// --- EffectOpt checker functions ---
+// These model predicates used by src/Frankenstein/Core/EffectOpt.hs
+// (handler inlining, identity handler elimination, tail-resumptive detection).
+
+module EFFECTOPT-CHECKERS
+  imports ORGAN-IR
+  imports BOOL
+
+  // Identity handler: \(x, k) -> k(x)  (uncurried)
+  // or            :  \x -> \k -> k(x)  (curried)
+  syntax Bool ::= isIdentityHandler(Expr) [function, symbol(isIdentityHandler)]
+
+  // Uncurried form: two params [x, k] where body = k(x).
+  // The two-param-and-body-shape constraint is structural: an identity body
+  // must reference the SECOND param applied to the FIRST. We accept the
+  // degenerate XN == KN case as still-an-identity (a no-op rename).
+  rule isIdentityHandler(
+         ELam(
+           param(XN, _TX) , param(KN, _TK) , .ParamList,
+           EApp(EVar(KN), EVar(XN) , .ExprList)
+         )
+       ) => true
+
+  // Curried form: \x -> \k -> k(x)
+  rule isIdentityHandler(
+         ELam(
+           param(XN, _TX) , .ParamList,
+           ELam(
+             param(KN, _TK) , .ParamList,
+             EApp(EVar(KN), EVar(XN) , .ExprList)
+           )
+         )
+       ) => true
+
+  rule isIdentityHandler(_) => false [owise]
+
+  // Tail-call detection: every path through Expr ends with a call to Name.
+  // Mirrors isTailCall in EffectOpt.hs.
+  syntax Bool ::= isTailCall(Name, Expr) [function, symbol(isTailCall)]
+
+  rule isTailCall(N, EApp(EVar(N), _))  => true
+  rule isTailCall(N, ELet(_, Body))     => isTailCall(N, Body)
+  rule isTailCall(N, ECase(_, Brs))     => allBranchesTailCall(N, Brs)
+  rule isTailCall(_, _)                 => false [owise]
+
+  syntax Bool ::= allBranchesTailCall(Name, BranchList) [function, symbol(allBranchesTailCall)]
+  rule allBranchesTailCall(_, .BranchList) => true
+  rule allBranchesTailCall(N, branch(_, _, Body) ; Rest)
+    => isTailCall(N, Body) andBool allBranchesTailCall(N, Rest)
+
+  // Tail-resumptive handler: last param is used as a tail call throughout the body.
+  // Uncurried two-param form: \(x, k) -> ... k(expr)
+  syntax Bool ::= isTailResumptiveHandler(Expr) [function, symbol(isTailResumptiveHandler)]
+
+  rule isTailResumptiveHandler(
+         ELam(param(_X, _TX) , param(K, _TK) , .ParamList, Body)
+       ) => isTailCall(K, Body)
+
+  rule isTailResumptiveHandler(_) => false [owise]
+
+  // Count EPerform nodes whose effect module matches the given string.
+  // Only the forms that the Haskell pass recurses through are modelled.
+  syntax Int ::= countPerforms(String, Expr) [function, symbol(countPerforms)]
+  syntax Int ::= countPerformsList(String, ExprList) [function, symbol(countPerformsList)]
+
+  rule countPerforms(M, EPerform(qname(M, _), Args))
+    => 1 +Int countPerformsList(M, Args)
+  rule countPerforms(M, EPerform(qname(M2, _), Args))
+    => countPerformsList(M, Args)
+    requires M =/=String M2
+  rule countPerforms(M, EApp(F, Args))
+    => countPerforms(M, F) +Int countPerformsList(M, Args)
+  rule countPerforms(M, ELam(_, Body))    => countPerforms(M, Body)
+  rule countPerforms(M, ELet(_, Body))    => countPerforms(M, Body)
+  rule countPerforms(M, EHandle(_, H, B)) => countPerforms(M, H) +Int countPerforms(M, B)
+  rule countPerforms(M, EDelay(E))        => countPerforms(M, E)
+  rule countPerforms(M, EForce(E))        => countPerforms(M, E)
+  rule countPerforms(M, ERetain(E))       => countPerforms(M, E)
+  rule countPerforms(M, EDrop(E))         => countPerforms(M, E)
+  rule countPerforms(_, _)                => 0 [owise]
+
+  rule countPerformsList(_, .ExprList) => 0
+  rule countPerformsList(M, E , Es)
+    => countPerforms(M, E) +Int countPerformsList(M, Es)
+
+  // After substitutePerforms runs, all EPerforms for the matched effect are gone.
+  syntax Bool ::= noPerformsOf(String, Expr) [function, symbol(noPerformsOf)]
+  rule noPerformsOf(M, E) => countPerforms(M, E) ==Int 0
+
+endmodule
+
 // --- Linker checker functions ---
 // These model and check the linker's name-rewriting logic.
 
@@ -168,5 +259,6 @@ module ALL-CLAIMS-DEF
   imports ORGAN-IR
   imports BRIDGE-PROPERTIES
   imports EVIDENCE-CHECKERS
+  imports EFFECTOPT-CHECKERS
   imports LINKER-CHECKERS
 endmodule

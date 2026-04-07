@@ -544,6 +544,12 @@ emitExpr (ECase scrut branches) = do
     MultiIntLitCase litBranches defaultExpr ->
       emitMultiIntCase scrutOps scrutName litBranches defaultExpr
 
+    -- Single exhaustive constructor: emit field extraction + body inline
+    SingleConCase _qn pats body -> do
+      (fieldOps, _) <- emitPatternBindings scrutName "i64" pats
+      (bodyOps, bodyName) <- emitExpr body
+      pure (scrutOps ++ fieldOps ++ bodyOps, bodyName)
+
     -- Constructor case: extract tag and chain scf.if
     ConCase conBranches mDefaultExpr
       -- Koka Bool case: comparison results are i64 0/1, not boxed constructors
@@ -980,6 +986,8 @@ emitPatField scrutName _structTy (idx, PatVar n _) = do
                    , "%" <> fieldName <> " = func.call @kk_field(%" <> scrutName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
                    ]
       aliasOp = "// let " <> varName <> " = %" <> fieldName
+  -- Register alias so subsequent EVar references resolve to the field SSA value
+  modify (\s -> s { esAliases = Map.insert varName fieldName (esAliases s) })
   pure (extractOps ++ [aliasOp], fieldName)
 emitPatField _ _ (_, PatWild _) = do
   name <- freshName "v"
@@ -1040,6 +1048,7 @@ data BranchClass
   = IntLitCase Integer Expr Expr          -- single int literal + default
   | MultiIntLitCase [(Integer, Expr)] Expr -- multiple int literals + default
   | ConCase [(QName, [Pattern], Expr)] Expr -- constructor patterns + default
+  | SingleConCase QName [Pattern] Expr     -- single constructor (exhaustive, no default needed)
   | VarCase Name Expr                      -- single variable binding
   | SingleCase Expr                        -- single branch (wildcard or sole)
   | BoolCase Expr Expr                     -- two branches, truthy test
@@ -1057,6 +1066,10 @@ classifyBranches branches
             Nothing -> branchBody (last branches)  -- last branch as default
           litPairs = [(n, branchBody b) | b <- intLitBranches, PatLit (LitInt n) <- [branchPattern b]]
       in MultiIntLitCase litPairs defaultBody
+  -- Single constructor branch with no real default → exhaustive, no scf.if
+  | [b] <- conBranches, Nothing <- defaultBranch, length branches == 1
+  , PatCon qn pats <- branchPattern b =
+      SingleConCase qn pats (branchBody b)
   -- Constructor patterns
   | not (null conBranches) =
       let defaultBody = case defaultBranch of
@@ -1224,7 +1237,7 @@ effectRowNameEmit EffectRowEmpty          = "pure"
 
 -- Sanitize names for MLIR (replace special chars)
 sanitizeName :: Text -> Text
-sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~" :: [Char]) then '_' else c)
+sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~(),[]{}'\"\\ \t" :: [Char]) then '_' else c)
 
 -- | Convert a Name to a unique MLIR SSA name.
 -- For names like "_" or "ds" that commonly collide, append the unique ID.

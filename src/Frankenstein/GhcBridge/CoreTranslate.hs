@@ -122,6 +122,9 @@ trExpr (App f a) =
     -- I#(literal) → just the literal (unbox)
     (Var v, [Lit l])
       | getOccString v == "I#" -> F.ELit (translateLit l)
+    -- I#(var) → just var (Int and Int# share i64 representation)
+    (Var v, [arg])
+      | getOccString v == "I#" -> trExpr arg
     -- General case: strip dictionary arguments
     (fun, args) ->
       let args' = filter (not . isDictArg) args
@@ -220,6 +223,7 @@ isDictDef d =
   let n = T.unpack (F.nameText (F.qnameName (F.defName d)))
   in isPrefixOf "$f" n || isPrefixOf "$d" n || isPrefixOf "$c" n
      || isPrefixOf "$tr" n || isPrefixOf "$W" n || isPrefixOf "$tc" n
+     || isPrefixOf "$krep" n
 
 -------------------------------------------------------------------------------
 -- Binding groups

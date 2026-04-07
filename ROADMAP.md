@@ -323,19 +323,44 @@ Build with: `bash web/build.sh` → serves via `python3 -m http.server 8080`
 **Goal**: Feed Frankenstein's own Haskell source through the GHC bridge.
 Even partial self-hosting is a dramatic proof of capability.
 
-### 6a. Compile Core/Types.hs
+### 6a. Compile Core/Types.hs ✓
 
 `Core/Types.hs` is a pure data definition module with no IO — the simplest
-target. Compiling it through the GHC bridge → MLIR would prove the pipeline
-handles real Haskell ADTs, pattern matching, and type-level constructs.
+target. **Done**: 35 record selector functions translate cleanly through
+GHC bridge → Frankenstein Core → MLIR → mlir-opt validation. 867-line MLIR
+output for the entire module.
 
-### 6b. Compile Core/Perceus.hs
+Bridge fixes required:
+- Filter `$krep` runtime-type-rep bindings (joined existing `$tc`/`$tr` filter)
+- Recognize `I#(var)` boxing as identity (Int and Int# share i64 representation)
+- GHC bridge `Driver.hs`: import paths (`src/`, `.`), enable `OverloadedStrings`
+  to match `frankenstein.cabal` `default-extensions`
+- Added `ghc-boot-th` to `build-depends` for `GHC.LanguageExtensions.Type`
+
+Emitter fixes required:
+- `emitPatField` now registers field bindings in `esAliases` so subsequent
+  `EVar` references resolve correctly (was previously a comment-only no-op)
+- New `SingleConCase` branch class for exhaustive single-constructor cases:
+  emits field extraction + body inline without an `scf.if` (avoids referencing
+  field SSA values from a sibling region)
+- `sanitizeName` now strips parens, commas, brackets, quotes, whitespace
+
+### 6b. Compile Core/Perceus.hs (in progress)
 
 The Perceus pass itself, compiled through the Perceus pass. Beautifully
-recursive. This exercises: pattern matching on the Expr ADT, Set/Map
-operations, recursive function calls, higher-order functions (map, filter).
+recursive. **Status**: Translates to Frankenstein Core successfully — every
+top-level function (`freeVars`, `analyzeUsage`, `wrapRetains`, `perceusBranch`,
+`perceusBindGroup`, `perceusExpr`, `perceusDefTransform`, `insertPerceus`)
+appears in the Core dump. MLIR emission hits known limitations on heavy
+higher-order code:
+- HOFs like `foldr`, `map` get lifted as lambdas with captured environments
+  but `func.call @localFn(...)` references SSA-bound function values that need
+  closure-call indirection rather than direct symbol references
+- Some lifted lambdas have parameter name collisions (captured vs. bound vars
+  with same OccString) — needs unique-suffixed parameter renaming in
+  lambda lifting
 
-### 6c. Full Self-Hosting
+### 6c. Full Self-Hosting (blocked on 6b)
 
 Compile all of `src/Frankenstein/` through the GHC bridge, link, and produce
 a `frankenstein` binary that can compile the demo. This is the ultimate
@@ -344,7 +369,7 @@ for its own compilation (though still using GHC as a frontend).
 
 ---
 
-## Current State (2026-04-07, Phase 5 complete)
+## Current State (2026-04-07, Phase 6a complete, 6b in progress)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
@@ -405,6 +430,7 @@ for its own compilation (though still using GHC as a frontend).
   4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 6a: Self-hosting bootstrap — Core/Types.hs through GHC bridge → MLIR validates clean
 - Phase 5: Wasm backend — --target wasm32, 485-byte .wasm, browser demo, Node.js validation
 - Phase 4: MLIR effect dialect — frankenstein.* ops, effect optimizations, --emit-effect-mlir
 - Phase 3d: Benchmark suite — fib/tak/ack × 4 compilers, multi-arg lambda fix, nameToSsa

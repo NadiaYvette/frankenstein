@@ -13,8 +13,10 @@ module Frankenstein.GhcBridge.Driver
 
 import GHC
 import GHC.Core (CoreProgram)
-import GHC.Driver.Session (updOptLevel)
+import GHC.Driver.Session (updOptLevel, xopt_set)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
+import qualified GHC.Driver.Session as DynFlags
+import qualified GHC.LanguageExtensions.Type as LangExt
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -54,10 +56,15 @@ compileToCore inputPath = do
 runGhcCompile :: FilePath -> FilePath -> IO (Either Text GhcCoreResult)
 runGhcCompile libdir inputPath = do
   runGhc (Just libdir) $ do
-    -- Set up session flags: enable optimisation so demand analysis runs
+    -- Set up session flags: enable optimisation so demand analysis runs.
+    -- Also add common source roots so the file can import other Frankenstein modules.
+    -- Enable language extensions matching frankenstein.cabal so source files
+    -- that rely on default-extensions (e.g. OverloadedStrings) compile.
     dflags <- getSessionDynFlags
-    let dflags' = updOptLevel 1 dflags
-    setSessionDynFlags dflags'
+    let dflags1 = (updOptLevel 1 dflags)
+          { DynFlags.importPaths = ["src", "."] ++ DynFlags.importPaths dflags }
+        dflags2 = xopt_set dflags1 LangExt.OverloadedStrings
+    setSessionDynFlags dflags2
 
     -- Add the target file
     target <- guessTarget inputPath Nothing Nothing

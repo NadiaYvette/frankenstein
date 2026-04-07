@@ -61,9 +61,43 @@ runGhcCompile libdir inputPath = do
     -- Enable language extensions matching frankenstein.cabal so source files
     -- that rely on default-extensions (e.g. OverloadedStrings) compile.
     dflags <- getSessionDynFlags
+    -- Make the `ghc` package visible so our own modules that import
+    -- GHC.Core, GHC.Driver.Session, etc. can self-host.
     let dflags1 = (updOptLevel 1 dflags)
-          { DynFlags.importPaths = ["src", "."] ++ DynFlags.importPaths dflags }
-        dflags2 = xopt_set dflags1 LangExt.OverloadedStrings
+          { DynFlags.importPaths = ["src", "."] ++ DynFlags.importPaths dflags
+          , DynFlags.packageFlags =
+              [ DynFlags.ExposePackage pkg (DynFlags.PackageArg pkg)
+                  (DynFlags.ModRenaming True [])
+              | pkg <- ["ghc", "koka", "organ-ir"]
+              ] ++ DynFlags.packageFlags dflags
+          , DynFlags.packageDBFlags =
+              -- Cabal store (shared across projects) + project inplace db.
+              -- Order matters: inplace must come after store so its
+              -- `-inplace` units override any installed copies.
+              [ DynFlags.PackageDB (DynFlags.PkgDbPath p)
+              | p <- [ "/home/nyc/.local/state/cabal/store/ghc-9.14.1-0dcc/package.db"
+                     , "dist-newstyle/packagedb/ghc-9.14.1"
+                     ]
+              ] ++ DynFlags.packageDBFlags dflags
+          }
+        -- Match frankenstein.cabal `default-extensions` + common extensions
+        -- that our own source files depend on.
+        dflags2 = foldr (flip xopt_set) dflags1
+          [ LangExt.OverloadedStrings
+          , LangExt.LambdaCase
+          , LangExt.BangPatterns
+          , LangExt.TupleSections
+          , LangExt.ScopedTypeVariables
+          , LangExt.DeriveFunctor
+          , LangExt.DeriveFoldable
+          , LangExt.DeriveTraversable
+          , LangExt.GeneralizedNewtypeDeriving
+          , LangExt.FlexibleContexts
+          , LangExt.FlexibleInstances
+          , LangExt.RecordWildCards
+          , LangExt.NamedFieldPuns
+          , LangExt.MultiParamTypeClasses
+          ]
     setSessionDynFlags dflags2
 
     -- Add the target file
@@ -73,12 +107,22 @@ runGhcCompile libdir inputPath = do
     -- Load (compile) all targets
     _successFlag <- load LoadAllTargets
 
-    -- Get the module graph and find our module
+    -- Get the module graph and find the module matching our target file.
+    -- When the file imports other Frankenstein modules, GHC loads them too;
+    -- taking the head of the graph would pick a random dependency.
     modGraph <- getModuleGraph
     let summaries = mgModSummaries modGraph
-    case summaries of
-      [] -> pure $ Left "No modules found in module graph"
-      (modSummary:_) -> do
+        matchFile s = case ml_hs_file (ms_location s) of
+                        Just p  -> p == inputPath
+                        Nothing -> False
+        targetSummary = case filter matchFile summaries of
+                          (s:_) -> Just s
+                          []    -> case summaries of
+                                     (s:_) -> Just s
+                                     []    -> Nothing
+    case targetSummary of
+      Nothing -> pure $ Left "No modules found in module graph"
+      Just modSummary -> do
         -- Parse, typecheck, and desugar
         parsed    <- parseModule modSummary
         typecked  <- typecheckModule parsed

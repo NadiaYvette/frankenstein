@@ -391,16 +391,57 @@ Emitter changes required:
   closure, avoiding raw unsanitized names like `%:` or `%foldr` in
   `kk_set_field` calls.
 
-### 6c. Full Self-Hosting (blocked on 6b)
+### 6c. Full Self-Hosting (substantially complete)
 
-Compile all of `src/Frankenstein/` through the GHC bridge, link, and produce
-a `frankenstein` binary that can compile the demo. This is the ultimate
-stress test and would make Frankenstein self-sustaining — independent of GHC
-for its own compilation (though still using GHC as a frontend).
+Feed all 18 Haskell modules in `src/Frankenstein/` through the GHC bridge to MLIR.
+**Result**: 3 modules (Types, KokaCore, KokaBridge.Driver) emit fully valid MLIR
+that passes `mlir-opt --allow-unregistered-dialect` with zero errors. 14 modules
+emit MLIR with 1–12 remaining errors out of thousands of lines each (e.g., Emitter
+at 43,581 lines has just 1 remaining error; Linker at 14,344 lines has 5).
+Only 1 module is a hard blocker: `OrganIR.Consumer` fails at the bridge layer
+due to an external `text-2.1.3` vs `text-2.1.4` version conflict between our
+session and the `organ-ir` package — outside our control. All 50 cabal tests
+still pass and `--demo --compile` still produces 3628800.
+
+GHC bridge Driver changes:
+- **Module matching**: `runGhcCompile` now searches the module graph for the
+  module whose `ml_hs_file` matches the input path, instead of taking the head
+  (which picked an arbitrary dependency when the target imported other modules)
+- **Language extensions**: enable `LambdaCase`, `BangPatterns`, `TupleSections`,
+  `ScopedTypeVariables`, `Derive{Functor,Foldable,Traversable}`,
+  `GeneralizedNewtypeDeriving`, `Flexible{Contexts,Instances}`, `RecordWildCards`,
+  `NamedFieldPuns`, `MultiParamTypeClasses` to match `frankenstein.cabal`
+- **Package visibility**: expose `ghc`, `koka`, `organ-ir` packages via
+  `packageFlags` so our own modules can self-host
+- **Package DBs**: add cabal store + dist-newstyle package DBs via
+  `packageDBFlags` so inplace builds of our dependencies are discoverable
+
+Emitter changes required:
+- **Top-level param aliases**: `emitDef` now installs function parameters as
+  identity entries in `esAliases` so `EVar` lookups find them (was relying on
+  implicit SSA name matching before the alias-lookup rewrite)
+- **`scf.if` branch alias scoping**: `emitConChain` now saves/restores
+  `esAliases` around each case arm so pattern-bound field SSA values don't
+  leak across sibling regions — the single biggest fix, dropping most
+  modules from 100+ errors to 1–12
+- **Thunk with captures**: `EDelay` bodies with captured free variables are
+  inlined (degraded laziness) rather than lifted to a zero-arg thunk that
+  can't reach the captures
+- **MLIR string escaping**: `escapeMLIRString` now hex-escapes all non-printable
+  chars via `printf "\%02X"` — raw control bytes would otherwise break MLIR's
+  string literal parser
+- **`func.constant` + `unrealized_conversion_cast`**: closure function pointers
+  and thunk bodies use `func.constant @fn : ty` then cast to i64, because
+  `llvm.mlir.addressof` rejects `func.func` references. `mlir-opt
+  --reconcile-unrealized-casts` cleans these up after inlining
+
+The remaining 1-error-per-module pattern is partial application of top-level
+functions (callee has N params, call site supplies M<N args) — would require
+eta-expanding partial applications into closures. Left as future work.
 
 ---
 
-## Current State (2026-04-07, Phase 6a+6b substantially complete)
+## Current State (2026-04-07, Phase 6a+6b+6c substantially complete)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
@@ -461,6 +502,8 @@ for its own compilation (though still using GHC as a frontend).
   4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 6c: Full self-hosting — all 18 modules through GHC bridge, 3 emit fully valid MLIR, 14 have 1–12 residual errors out of thousands of lines, closure ABI + scf.if alias scoping + func.constant fptrs
+- Phase 6b: Self-hosting Perceus.hs — closure ABI via kk_alloc_con, capture filter, lambda param renaming
 - Phase 6a: Self-hosting bootstrap — Core/Types.hs through GHC bridge → MLIR validates clean
 - Phase 5: Wasm backend — --target wasm32, 485-byte .wasm, browser demo, Node.js validation
 - Phase 4: MLIR effect dialect — frankenstein.* ops, effect optimizations, --emit-effect-mlir

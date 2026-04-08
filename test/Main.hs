@@ -550,6 +550,76 @@ flattenPatternsTests = testGroup "FlattenPatterns"
            ELam _ (ECase _ [Branch (PatCon _ [PatVar _ _]) Nothing (ECase _ _)]) ->
              pure ()
            _ -> assertFailure ("did not lift under ELam: " ++ show flat)
+
+  , testCase "Maranget: sibling branches with same outer ctor merge" $
+      -- case xs of
+      --   Cons (Box n)  ys -> body1 n ys
+      --   Cons Unboxed  ys -> body2 ys
+      --   Nil              -> body3
+      let body1 = EApp (EVar (mkName "body1"))
+                       [EVar (mkName "n"), EVar (mkName "ys")]
+          body2 = EApp (EVar (mkName "body2")) [EVar (mkName "ys")]
+          body3 = EVar (mkName "body3")
+          e = ECase (EVar (mkName "xs"))
+                [ Branch (PatCon (mkQName "" "Cons")
+                           [ PatCon (mkQName "" "Box")
+                               [PatVar (mkName "n") intType]
+                           , PatVar (mkName "ys") anyType
+                           ])
+                         Nothing body1
+                , Branch (PatCon (mkQName "" "Cons")
+                           [ PatCon (mkQName "" "Unboxed") []
+                           , PatVar (mkName "ys") anyType
+                           ])
+                         Nothing body2
+                , Branch (PatCon (mkQName "" "Nil") []) Nothing body3
+                ]
+          flat = flattenPatternsExpr e
+      in case flat of
+           ECase (EVar _) [br1, br2] -> do
+             -- br1 = Cons f0 f1 -> <inner>
+             case branchPattern br1 of
+               PatCon (QName _ (Name "Cons" _))
+                 [PatVar _f0 _, PatVar _f1 _] -> pure ()
+               p -> assertFailure ("expected merged Cons branch, got: " ++ show p)
+             -- br2 = Nil -> body3
+             case branchPattern br2 of
+               PatCon (QName _ (Name "Nil" _)) [] -> pure ()
+               p -> assertFailure ("expected Nil branch, got: " ++ show p)
+             -- Inner body of br1 must be an ECase dispatching Box vs Unboxed
+             case branchBody br1 of
+               ECase (EVar _) innerBrs -> do
+                 let innerNames =
+                       [ n
+                       | Branch (PatCon (QName _ (Name n _)) _) _ _ <- innerBrs ]
+                 assertBool "inner dispatches Box"     (elem "Box" innerNames)
+                 assertBool "inner dispatches Unboxed" (elem "Unboxed" innerNames)
+               other ->
+                 assertFailure ("expected inner ECase, got: " ++ show other)
+           other -> assertFailure ("expected 2 outer branches, got: " ++ show other)
+
+  , testCase "Maranget: wildcard catch-all becomes default branch" $
+      -- case v of
+      --   Some (Just x) -> body1 x
+      --   _             -> body2
+      let body1 = EApp (EVar (mkName "body1")) [EVar (mkName "x")]
+          body2 = EVar (mkName "body2")
+          e = ECase (EVar (mkName "v"))
+                [ Branch (PatCon (mkQName "" "Some")
+                           [PatCon (mkQName "" "Just")
+                              [PatVar (mkName "x") intType]])
+                         Nothing body1
+                , Branch (PatWild anyType) Nothing body2
+                ]
+          flat = flattenPatternsExpr e
+      in case flat of
+           ECase (EVar _) brs -> do
+             assertBool "has at least 2 branches" (length brs >= 2)
+             let lastBr = last brs
+             case branchPattern lastBr of
+               PatWild _ -> pure ()
+               p -> assertFailure ("expected last branch to be default, got: " ++ show p)
+           other -> assertFailure ("unexpected shape: " ++ show other)
   ]
 
 -------------------------------------------------------------------------------

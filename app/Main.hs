@@ -20,6 +20,8 @@ import Frankenstein.FutharkBridge.Parser (parseFutharkFile)
 import Frankenstein.FutharkBridge.CoreTranslate (translateFuthark)
 import Frankenstein.SchemeBridge.Reader (readSchemeFile)
 import Frankenstein.SchemeBridge.CoreTranslate (translateScheme)
+import Frankenstein.SwiftBridge.Driver (readSwiftFile, emitSilCounts, SilCounts(..))
+import Frankenstein.SwiftBridge.CoreTranslate (translateSwift)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
@@ -38,6 +40,7 @@ main = do
     DemoMode flags -> do
       let prog = demoFactorialWithMain
       handleOutput prog flags
+    SwiftCrossCheck files -> mapM_ swiftCrossCheck files
     CompileFiles files flags -> do
       results <- mapM (compileFile (flagFromJson flags)) files
       -- Run per-module evidence pass before linking, so that EPerform/EHandle
@@ -82,6 +85,7 @@ data Command
   = ShowHelp
   | DemoMode Flags
   | CompileFiles [FilePath] Flags
+  | SwiftCrossCheck [FilePath]
   deriving (Show)
 
 parseArgs :: [String] -> Command
@@ -89,6 +93,9 @@ parseArgs [] = ShowHelp
 parseArgs args
   | "--help" `elem` args || "-h" `elem` args = ShowHelp
   | "--demo" `elem` args = DemoMode (parseFlags args)
+  | "--swift-crosscheck" `elem` args =
+      let (files, _) = partition (not . isFlag) (removeArgValues args)
+      in SwiftCrossCheck files
   | otherwise =
       let flags = parseFlags args
           (files, _flagArgs) = partition (not . isFlag) (removeArgValues args)
@@ -147,6 +154,7 @@ compileFile fromJson path = do
           ".go" -> compileGo path
           ".fut" -> compileFuthark path
           ".scm" -> compileScheme path
+          ".swift" -> compileSwift path
           _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
   pure $ case result of
     Left err   -> Left (path, err)
@@ -239,6 +247,70 @@ compileScheme inputFile = do
     Right forms ->
       let modName = T.pack (takeBaseName inputFile)
       in pure $ translateScheme modName forms
+
+compileSwift :: FilePath -> IO (Either Text Program)
+compileSwift inputFile = do
+  TIO.putStrLn $ "Compiling Swift: " <> T.pack inputFile
+  result <- readSwiftFile inputFile
+  case result of
+    Left err -> pure $ Left $ "Swift bridge error: " <> err
+    Right ast ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translateSwift modName ast
+
+-- | Count Perceus RC operations in a program's expressions.
+countPerceusOps :: Program -> (Int, Int, Int)
+countPerceusOps prog = foldr addDef (0,0,0) (progDefs prog)
+  where
+    addDef d acc = go (defExpr d) acc
+    add3 (a,b,c) (x,y,z) = (a+x, b+y, c+z)
+    go e acc = case e of
+      ERetain  _    -> add3 acc (1,0,0)
+      ERelease _    -> add3 acc (0,1,0)
+      EDrop    _    -> add3 acc (0,0,1)
+      ELam _ b      -> go b acc
+      EApp f as     -> foldr go (go f acc) as
+      ELet bss body -> foldr (\bs a -> foldr (\(Bind _ _ be _) a' -> go be a') a bs) (go body acc) bss
+      ECase s bs    -> foldr (\(Branch _ _ be) a -> go be a) (go s acc) bs
+      EHandle _ h b -> go h (go b acc)
+      EPerform _ as -> foldr go acc as
+      EDelay b      -> go b acc
+      EForce b      -> go b acc
+      _             -> acc
+
+-- | Run swiftc SIL + Frankenstein Perceus and compare RC counts.
+swiftCrossCheck :: FilePath -> IO ()
+swiftCrossCheck path = do
+  TIO.putStrLn $ "=== Swift Perceus cross-check: " <> T.pack path <> " ==="
+  -- Frankenstein side
+  result <- compileSwift path
+  case result of
+    Left err -> TIO.putStrLn $ "Frankenstein bridge failed: " <> err
+    Right rawProg -> do
+      let optProg = effectOptimize rawProg
+          prog    = insertPerceus (evidencePassGlobal (collectGlobalEffects optProg) optProg)
+          (fkRetain, fkRelease, fkDrop) = countPerceusOps prog
+      TIO.putStrLn $ "Frankenstein Perceus: retain=" <> T.pack (show fkRetain)
+                  <> " release=" <> T.pack (show fkRelease)
+                  <> " drop=" <> T.pack (show fkDrop)
+      -- swiftc SIL side
+      silR <- emitSilCounts path
+      case silR of
+        Left err -> TIO.putStrLn $ "swiftc SIL failed: " <> err
+        Right sc -> do
+          TIO.putStrLn $ "swiftc -O -emit-sil:    strong_retain=" <> T.pack (show (silStrongRetain sc))
+                      <> " strong_release=" <> T.pack (show (silStrongRelease sc))
+                      <> " copy_value=" <> T.pack (show (silCopyValue sc))
+                      <> " destroy_value=" <> T.pack (show (silDestroyValue sc))
+          let fkTotal  = fkRetain + fkRelease + fkDrop
+              silTotal = silStrongRetain sc + silStrongRelease sc
+                       + silCopyValue sc + silDestroyValue sc
+          if fkTotal == 0 && silTotal == 0
+            then TIO.putStrLn "Agreement: both emit zero RC ops (trivial Int program)."
+            else if fkTotal == silTotal
+                 then TIO.putStrLn "Agreement: total RC op counts match."
+                 else TIO.putStrLn $ "Divergence: Frankenstein=" <> T.pack (show fkTotal)
+                                  <> " vs swiftc=" <> T.pack (show silTotal)
 
 compileOrganIR :: FilePath -> IO (Either Text Program)
 compileOrganIR inputFile = do
@@ -349,6 +421,7 @@ printHelp = do
   putStrLn "  -o, --output      Output path (default: a.out)"
   putStrLn "  --from-json       Treat input as OrganIR JSON (also: --from-organ)"
   putStrLn "  --demo            Run built-in demo (factorial)"
+  putStrLn "  --swift-crosscheck Compare Frankenstein Perceus vs swiftc SIL RC ops"
   putStrLn "  -h, --help        Show this help"
   putStrLn ""
   putStrLn "Supported input formats:"
@@ -360,6 +433,7 @@ printHelp = do
   putStrLn "  .go     Go        (via go/parser stdlib helper)"
   putStrLn "  .fut    Futhark   (via in-tree Pratt parser)"
   putStrLn "  .scm    Scheme    (via in-tree reader + CPS converter, supports call/cc)"
+  putStrLn "  .swift  Swift     (via swiftc -dump-ast; Int subset; Perceus cross-check)"
   putStrLn "  .json   OrganIR   (organ-bank JSON)"
   putStrLn "  .organ  OrganIR   (organ-bank JSON)"
   putStrLn ""

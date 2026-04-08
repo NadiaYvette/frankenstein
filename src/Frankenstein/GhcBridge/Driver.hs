@@ -17,6 +17,7 @@ import GHC.Driver.Session (updOptLevel, xopt_set)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import qualified GHC.Driver.Session as DynFlags
 import qualified GHC.LanguageExtensions.Type as LangExt
+import qualified GHC.Unit.Types as UnitTypes
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -66,6 +67,16 @@ runGhcCompile libdir inputPath = do
     let dflags1 = (updOptLevel 1 dflags)
           { DynFlags.importPaths = ["src", "."] ++ DynFlags.importPaths dflags
           , DynFlags.packageFlags =
+              -- Hide text-2.1.4 from the cabal store: the project (and
+              -- organ-ir) is built against the GHC 9.14.1 global text-2.1.3,
+              -- and exposing both leads to two distinct `Data.Text.Text`
+              -- types when self-hosting modules that import both.
+              [ DynFlags.HidePackage "text-2.1.4" ] ++
+              [ DynFlags.ExposePackage "text-2.1.3" (DynFlags.UnitIdArg
+                  (UnitTypes.RealUnit (UnitTypes.Definite
+                     (UnitTypes.stringToUnitId "text-2.1.3-d6b3"))))
+                  (DynFlags.ModRenaming True [])
+              ] ++
               [ DynFlags.ExposePackage pkg (DynFlags.PackageArg pkg)
                   (DynFlags.ModRenaming True [])
               | pkg <- ["ghc", "koka", "organ-ir"]

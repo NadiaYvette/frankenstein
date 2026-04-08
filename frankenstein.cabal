@@ -36,6 +36,9 @@ library
         Frankenstein.FutharkBridge.CoreTranslate
         Frankenstein.SchemeBridge.Reader
         Frankenstein.SchemeBridge.CoreTranslate
+        Frankenstein.SwiftBridge.AstParse
+        Frankenstein.SwiftBridge.CoreTranslate
+        Frankenstein.SwiftBridge.Driver
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
         Frankenstein.OrganIR.Consumer

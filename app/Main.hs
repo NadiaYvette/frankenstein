@@ -26,6 +26,10 @@ import Frankenstein.OCamlBridge.Driver (readOCamlFile)
 import Frankenstein.OCamlBridge.CoreTranslate (translateOCaml)
 import Frankenstein.ErlangBridge.Driver (readErlangFile)
 import Frankenstein.ErlangBridge.CoreTranslate (translateErlang)
+import Frankenstein.FSharpBridge.Driver (readFSharpFile)
+import Frankenstein.FSharpBridge.CoreTranslate (translateFSharp)
+import Frankenstein.IdrisBridge.Driver (readIdrisFile)
+import Frankenstein.IdrisBridge.CoreTranslate (translateIdris)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
@@ -161,6 +165,9 @@ compileFile fromJson path = do
           ".swift" -> compileSwift path
           ".ml"  -> compileOCaml path
           ".erl" -> compileErlang path
+          ".fs"  -> compileFSharp path
+          ".fsx" -> compileFSharp path
+          ".idr" -> compileIdris path
           _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
   pure $ case result of
     Left err   -> Left (path, err)
@@ -283,6 +290,26 @@ compileErlang inputFile = do
     Right ast ->
       let modName = T.pack (takeBaseName inputFile)
       in pure $ translateErlang modName ast
+
+compileFSharp :: FilePath -> IO (Either Text Program)
+compileFSharp inputFile = do
+  TIO.putStrLn $ "Compiling F#: " <> T.pack inputFile
+  result <- readFSharpFile inputFile
+  case result of
+    Left err -> pure $ Left $ "F# bridge error: " <> err
+    Right ast ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translateFSharp modName ast
+
+compileIdris :: FilePath -> IO (Either Text Program)
+compileIdris inputFile = do
+  TIO.putStrLn $ "Compiling Idris2: " <> T.pack inputFile
+  result <- readIdrisFile inputFile
+  case result of
+    Left err -> pure $ Left $ "Idris2 bridge error: " <> err
+    Right decls ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translateIdris modName decls
 
 -- | Count Perceus RC operations in a program's expressions.
 countPerceusOps :: Program -> (Int, Int, Int)
@@ -462,6 +489,8 @@ printHelp = do
   putStrLn "  .swift  Swift     (via swiftc -dump-ast; Int subset; Perceus cross-check)"
   putStrLn "  .ml     OCaml     (via ocamlc -dparsetree; Int subset)"
   putStrLn "  .erl    Erlang    (via escript + erl_scan/erl_parse; Int subset)"
+  putStrLn "  .fs     F#        (via dotnet fsi + FSharp.Compiler.Service; Int subset)"
+  putStrLn "  .idr    Idris 2   (in-tree source parser; Int subset)"
   putStrLn "  .json   OrganIR   (organ-bank JSON)"
   putStrLn "  .organ  OrganIR   (organ-bank JSON)"
   putStrLn ""

@@ -45,6 +45,11 @@ library
         Frankenstein.ErlangBridge.AstParse
         Frankenstein.ErlangBridge.CoreTranslate
         Frankenstein.ErlangBridge.Driver
+        Frankenstein.FSharpBridge.CoreTranslate
+        Frankenstein.FSharpBridge.Driver
+        Frankenstein.IdrisBridge.Parse
+        Frankenstein.IdrisBridge.CoreTranslate
+        Frankenstein.IdrisBridge.Driver
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
         Frankenstein.OrganIR.Consumer

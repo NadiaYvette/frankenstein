@@ -11,6 +11,7 @@ import Frankenstein.Core.Evidence (evidencePass)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
   , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive)
 import Frankenstein.Core.FlattenPatterns (flattenPatternsExpr)
+import Frankenstein.Core.ConTags (assignProgramTags, collectReferencedCtors)
 import Frankenstein.MercuryBridge.HldsParse
   ( MercuryHLDS(..), MercuryPred(..), MercuryTypeDecl(..)
   , MercuryDet(..), MercuryMode(..), MercuryGoal(..)
@@ -77,6 +78,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , linkerTests
   , mlirEmitTests
   , flattenPatternsTests
+  , conTagsTests
   , mercuryAdtTests
   , wasmEmitTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
@@ -548,6 +550,109 @@ flattenPatternsTests = testGroup "FlattenPatterns"
            ELam _ (ECase _ [Branch (PatCon _ [PatVar _ _]) Nothing (ECase _ _)]) ->
              pure ()
            _ -> assertFailure ("did not lift under ELam: " ++ show flat)
+  ]
+
+-------------------------------------------------------------------------------
+-- F1b. ConTags pass tests
+-------------------------------------------------------------------------------
+
+-- | Small helper: build a DataDecl with n nullary ctors named c0..c_{n-1}.
+mkDataDeclSimple :: Text -> [Text] -> DataDecl
+mkDataDeclSimple tyName ctorNames = DataDecl
+  { dataName   = mkQName "" tyName
+  , dataParams = []
+  , dataCons   = [ ConDecl
+      { conName   = mkQName "" c
+      , conFields = []
+      , conVis    = Public
+      }
+    | c <- ctorNames ]
+  , dataVis    = Public
+  }
+
+conTagsTests :: TestTree
+conTagsTests = testGroup "ConTags (per-program tag assignment)"
+  [ testCase "single DataDecl gets 0..n-1 tags in declaration order" $
+      let dd = mkDataDeclSimple "Color" ["Red", "Green", "Blue"]
+          prog = (mkProgram "" "main" [])
+                   { progData = [dd] }
+          tags = assignProgramTags prog
+      in do
+        assertEqual "Red -> 0"   (Just 0) (Map.lookup "Red"   tags)
+        assertEqual "Green -> 1" (Just 1) (Map.lookup "Green" tags)
+        assertEqual "Blue -> 2"  (Just 2) (Map.lookup "Blue"  tags)
+
+  , testCase "two DataDecls share the 0..n-1 space per type" $
+      let ddA = mkDataDeclSimple "A" ["A0", "A1"]
+          ddB = mkDataDeclSimple "B" ["B0", "B1", "B2"]
+          prog = (mkProgram "" "main" [])
+                   { progData = [ddA, ddB] }
+          tags = assignProgramTags prog
+      in do
+        assertEqual "A0 -> 0" (Just 0) (Map.lookup "A0" tags)
+        assertEqual "A1 -> 1" (Just 1) (Map.lookup "A1" tags)
+        assertEqual "B0 -> 0" (Just 0) (Map.lookup "B0" tags)
+        assertEqual "B1 -> 1" (Just 1) (Map.lookup "B1" tags)
+        assertEqual "B2 -> 2" (Just 2) (Map.lookup "B2" tags)
+
+  , testCase "orphan ctors referenced in ECon get fresh tags past declared range" $
+      let dd = mkDataDeclSimple "Color" ["Red", "Green", "Blue"]  -- uses 0,1,2
+          orphanExpr = EApp (ECon (mkQName "" "Orphan1"))
+                            [ECon (mkQName "" "Orphan2")]
+          def  = mkFunDef "" "f" orphanExpr intType
+          prog = (mkProgram "" "main" [def])
+                   { progData = [dd] }
+          tags = assignProgramTags prog
+      in do
+        assertBool "Orphan1 present"
+          (Map.member "Orphan1" tags)
+        assertBool "Orphan2 present"
+          (Map.member "Orphan2" tags)
+        let Just o1 = Map.lookup "Orphan1" tags
+            Just o2 = Map.lookup "Orphan2" tags
+        assertBool "Orphan1 >= 3" (o1 >= 3)
+        assertBool "Orphan2 >= 3" (o2 >= 3)
+        assertBool "Orphan1 /= Orphan2" (o1 /= o2)
+
+  , testCase "orphan ctors referenced in PatCon are also discovered" $
+      let caseExpr = ECase (EVar (mkName "x"))
+            [ Branch (PatCon (mkQName "" "Leaf") []) Nothing
+                     (ELit (LitInt 0))
+            , Branch (PatCon (mkQName "" "Node")
+                       [PatVar (mkName "n") intType])
+                     Nothing
+                     (EVar (mkName "n"))
+            ]
+          def = mkFunDef "" "f" (ELam [(mkName "x", anyType)] caseExpr) intType
+          prog = mkProgram "" "main" [def]
+          tags = assignProgramTags prog
+      in do
+        assertBool "Leaf discovered" (Map.member "Leaf" tags)
+        assertBool "Node discovered" (Map.member "Node" tags)
+
+  , testCase "collectReferencedCtors finds declared + referenced ctors" $
+      let dd = mkDataDeclSimple "T" ["Decl"]
+          def = mkFunDef "" "f" (ECon (mkQName "" "Used")) intType
+          prog = (mkProgram "" "main" [def])
+                   { progData = [dd] }
+          refs = collectReferencedCtors prog
+      in do
+        assertBool "Decl included" (Set.member "Decl" refs)
+        assertBool "Used included" (Set.member "Used" refs)
+
+  , testCase "no collisions: assignProgramTags is injective when we restrict to one type's ctors" $
+      -- Property: within a single DataDecl, every ctor has a distinct tag.
+      let dd = mkDataDeclSimple "Big"
+                 ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"]
+          prog = (mkProgram "" "main" [])
+                   { progData = [dd] }
+          tags = assignProgramTags prog
+          values =
+            [ Map.lookup c tags
+            | c <- ["C0","C1","C2","C3","C4","C5","C6","C7","C8","C9"] ]
+      in do
+        assertBool "all present" (all (/= Nothing) values)
+        assertEqual "all distinct" 10 (Set.size (Set.fromList values))
   ]
 
 -------------------------------------------------------------------------------

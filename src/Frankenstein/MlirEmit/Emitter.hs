@@ -16,6 +16,7 @@ module Frankenstein.MlirEmit.Emitter
   ) where
 
 import Frankenstein.Core.Types
+import Frankenstein.Core.ConTags (assignProgramTags, conKey)
 import Frankenstein.MlirEmit.Dialects (MlirOp(..), renderOp)
 
 import Data.Text (Text)
@@ -66,7 +67,7 @@ data EmitState = EmitState
   , esTopFns        :: !(Set Text)        -- MLIR names of top-level func.func defs
   , esTopFnArity    :: !(Map Text Int)    -- arity of each top-level function
   , esPapWrappers   :: !(Set Text)        -- PAP wrapper names already emitted
-  , esConTags       :: !(Map Text Int)    -- constructor name -> deterministic tag (0..n-1 within its DataDecl)
+  , esConTags       :: !(Map Text Int)    -- constructor name -> deterministic tag (see Core.ConTags.assignProgramTags)
   }
 
 type Emit a = State EmitState a
@@ -211,7 +212,7 @@ emitProgramText prog =
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
                          (buildTopFnArity renamedDefs)
                          Set.empty
-                         (buildConTagTable (progData prog))
+                         (assignProgramTags prog)
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -310,7 +311,7 @@ emitProgramWithEffects prog =
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
                          (buildTopFnArity renamedDefs)
                          Set.empty
-                         (buildConTagTable (progData prog))
+                         (assignProgramTags prog)
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -360,7 +361,7 @@ emitProgramWasm prog =
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
                          (buildTopFnArity renamedDefs)
                          Set.empty
-                         (buildConTagTable (progData prog))
+                         (assignProgramTags prog)
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -1514,39 +1515,21 @@ isDefaultPat _ = False
 
 -- | Deterministic tag for a constructor.
 --
--- When the constructor belongs to a 'DataDecl' that was known at emit time,
--- the tag is its index within that DataDecl's @dataCons@ list (0..n-1),
--- which is collision-free within a type and therefore sufficient to
--- distinguish arms of any well-typed case expression. For constructors we
--- have no DataDecl for (e.g. built-in / synthetic) we fall back to a
--- hash-of-name tag, which is non-unique but was the previous behaviour.
+-- The tag table is populated up-front by 'assignProgramTags' from
+-- "Frankenstein.Core.ConTags": every constructor reachable from
+-- 'progData' or from any 'ECon' / 'PatCon' node in 'progDefs' has
+-- an entry. Declared ctors get their intra-'DataDecl' index
+-- (0..n-1); orphan ctors (referenced but not declared) get fresh
+-- tags starting after the largest declared tag. A miss here
+-- therefore indicates a compiler bug — a constructor that appeared
+-- after tag assignment — so we surface it as a very visible
+-- sentinel rather than silently hashing.
 lookupConTag :: QName -> Emit Int
 lookupConTag qn = do
   tbl <- gets esConTags
   case Map.lookup (conKey qn) tbl of
     Just t  -> pure t
-    Nothing -> pure (hashConTag qn)
-
--- | Key used in 'esConTags'. Bridges generally emit constructors with an
--- empty module part, so we key on the bare constructor name. Cross-type
--- collisions are irrelevant because case dispatch is intra-type.
-conKey :: QName -> Text
-conKey qn = nameText (qnameName qn)
-
--- | Build the @esConTags@ map from a program's data declarations.
-buildConTagTable :: [DataDecl] -> Map Text Int
-buildConTagTable dds = Map.fromList
-  [ (conKey (conName cd), i)
-  | dd <- dds
-  , (i, cd) <- zip [0..] (dataCons dd)
-  ]
-
--- | Legacy hash-based tag, retained as a fallback for constructors that
--- aren't present in the program's 'progData'.
-hashConTag :: QName -> Int
-hashConTag qn =
-  let t = qnameModule qn <> "." <> nameText (qnameName qn)
-  in abs (T.foldl' (\acc c -> acc * 31 + fromEnum c) 0 t) `mod` 65536
+    Nothing -> pure (-1)   -- sentinel: forces failure in downstream dispatch
 
 -- | LLVM struct type for a constructor with n payload fields
 -- Layout: (i64_tag, i64_field1, i64_field2, ...)

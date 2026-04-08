@@ -39,6 +39,12 @@ library
         Frankenstein.SwiftBridge.AstParse
         Frankenstein.SwiftBridge.CoreTranslate
         Frankenstein.SwiftBridge.Driver
+        Frankenstein.OCamlBridge.AstParse
+        Frankenstein.OCamlBridge.CoreTranslate
+        Frankenstein.OCamlBridge.Driver
+        Frankenstein.ErlangBridge.AstParse
+        Frankenstein.ErlangBridge.CoreTranslate
+        Frankenstein.ErlangBridge.Driver
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
         Frankenstein.OrganIR.Consumer
@@ -52,6 +58,7 @@ library
         directory,
         mtl,
         transformers,
+        temporary,
         ghc == 9.14.*,
         ghc-boot-th,
         koka,

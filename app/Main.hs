@@ -22,6 +22,10 @@ import Frankenstein.SchemeBridge.Reader (readSchemeFile)
 import Frankenstein.SchemeBridge.CoreTranslate (translateScheme)
 import Frankenstein.SwiftBridge.Driver (readSwiftFile, emitSilCounts, SilCounts(..))
 import Frankenstein.SwiftBridge.CoreTranslate (translateSwift)
+import Frankenstein.OCamlBridge.Driver (readOCamlFile)
+import Frankenstein.OCamlBridge.CoreTranslate (translateOCaml)
+import Frankenstein.ErlangBridge.Driver (readErlangFile)
+import Frankenstein.ErlangBridge.CoreTranslate (translateErlang)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
@@ -155,6 +159,8 @@ compileFile fromJson path = do
           ".fut" -> compileFuthark path
           ".scm" -> compileScheme path
           ".swift" -> compileSwift path
+          ".ml"  -> compileOCaml path
+          ".erl" -> compileErlang path
           _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
   pure $ case result of
     Left err   -> Left (path, err)
@@ -257,6 +263,26 @@ compileSwift inputFile = do
     Right ast ->
       let modName = T.pack (takeBaseName inputFile)
       in pure $ translateSwift modName ast
+
+compileOCaml :: FilePath -> IO (Either Text Program)
+compileOCaml inputFile = do
+  TIO.putStrLn $ "Compiling OCaml: " <> T.pack inputFile
+  result <- readOCamlFile inputFile
+  case result of
+    Left err -> pure $ Left $ "OCaml bridge error: " <> err
+    Right ast ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translateOCaml modName ast
+
+compileErlang :: FilePath -> IO (Either Text Program)
+compileErlang inputFile = do
+  TIO.putStrLn $ "Compiling Erlang: " <> T.pack inputFile
+  result <- readErlangFile inputFile
+  case result of
+    Left err -> pure $ Left $ "Erlang bridge error: " <> err
+    Right ast ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translateErlang modName ast
 
 -- | Count Perceus RC operations in a program's expressions.
 countPerceusOps :: Program -> (Int, Int, Int)
@@ -434,6 +460,8 @@ printHelp = do
   putStrLn "  .fut    Futhark   (via in-tree Pratt parser)"
   putStrLn "  .scm    Scheme    (via in-tree reader + CPS converter, supports call/cc)"
   putStrLn "  .swift  Swift     (via swiftc -dump-ast; Int subset; Perceus cross-check)"
+  putStrLn "  .ml     OCaml     (via ocamlc -dparsetree; Int subset)"
+  putStrLn "  .erl    Erlang    (via escript + erl_scan/erl_parse; Int subset)"
   putStrLn "  .json   OrganIR   (organ-bank JSON)"
   putStrLn "  .organ  OrganIR   (organ-bank JSON)"
   putStrLn ""

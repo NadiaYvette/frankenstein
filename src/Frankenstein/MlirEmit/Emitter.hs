@@ -66,6 +66,7 @@ data EmitState = EmitState
   , esTopFns        :: !(Set Text)        -- MLIR names of top-level func.func defs
   , esTopFnArity    :: !(Map Text Int)    -- arity of each top-level function
   , esPapWrappers   :: !(Set Text)        -- PAP wrapper names already emitted
+  , esConTags       :: !(Map Text Int)    -- constructor name -> deterministic tag (0..n-1 within its DataDecl)
   }
 
 type Emit a = State EmitState a
@@ -210,6 +211,7 @@ emitProgramText prog =
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
                          (buildTopFnArity renamedDefs)
                          Set.empty
+                         (buildConTagTable (progData prog))
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -308,6 +310,7 @@ emitProgramWithEffects prog =
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
                          (buildTopFnArity renamedDefs)
                          Set.empty
+                         (buildConTagTable (progData prog))
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -357,6 +360,7 @@ emitProgramWasm prog =
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
                          (buildTopFnArity renamedDefs)
                          Set.empty
+                         (buildConTagTable (progData prog))
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -520,7 +524,7 @@ emitExpr (EVar n) = do
 
 -- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
-  let tag = conTag qn
+  tag <- lookupConTag qn
   tagName <- freshName "v"
   nfieldsName <- freshName "v"
   resultName <- freshName "v"
@@ -531,8 +535,8 @@ emitExpr (ECon qn) = do
 
 -- Constructor application: allocate via runtime, set fields
 emitExpr (EApp (ECon qn) args) = do
-  let tag = conTag qn
-      nFields = length args
+  tag <- lookupConTag qn
+  let nFields = length args
   -- Emit all argument expressions
   argResults <- mapM emitExpr args
   let allOps = concatMap fst argResults
@@ -1287,7 +1291,7 @@ emitConChain _ scrutName structTy [(_qn, pats, body)] Nothing = do
   pure (fieldOps ++ bodyOps, bodyResult)
 emitConChain tagName scrutName structTy [(qn, pats, body)] (Just defaultExpr) = do
   -- Last constructor branch: compare tag, if match do body, else default
-  let tag = conTag qn
+  tag <- lookupConTag qn
   constName <- freshName "v"
   cmpName <- freshName "cmp"
   let cmpOps = [ "%" <> constName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
@@ -1315,7 +1319,7 @@ emitConChain tagName scrutName structTy [(qn, pats, body)] (Just defaultExpr) = 
         ]
   pure (cmpOps ++ ifOps, resultName)
 emitConChain tagName scrutName structTy ((qn, pats, body):rest) mDefaultExpr = do
-  let tag = conTag qn
+  tag <- lookupConTag qn
   constName <- freshName "v"
   cmpName <- freshName "cmp"
   let cmpOps = [ "%" <> constName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
@@ -1508,9 +1512,39 @@ isDefaultPat _ = False
 -- Constructor helpers
 -------------------------------------------------------------------------------
 
--- | Deterministic tag for a constructor (hash of qualified name)
-conTag :: QName -> Int
-conTag qn =
+-- | Deterministic tag for a constructor.
+--
+-- When the constructor belongs to a 'DataDecl' that was known at emit time,
+-- the tag is its index within that DataDecl's @dataCons@ list (0..n-1),
+-- which is collision-free within a type and therefore sufficient to
+-- distinguish arms of any well-typed case expression. For constructors we
+-- have no DataDecl for (e.g. built-in / synthetic) we fall back to a
+-- hash-of-name tag, which is non-unique but was the previous behaviour.
+lookupConTag :: QName -> Emit Int
+lookupConTag qn = do
+  tbl <- gets esConTags
+  case Map.lookup (conKey qn) tbl of
+    Just t  -> pure t
+    Nothing -> pure (hashConTag qn)
+
+-- | Key used in 'esConTags'. Bridges generally emit constructors with an
+-- empty module part, so we key on the bare constructor name. Cross-type
+-- collisions are irrelevant because case dispatch is intra-type.
+conKey :: QName -> Text
+conKey qn = nameText (qnameName qn)
+
+-- | Build the @esConTags@ map from a program's data declarations.
+buildConTagTable :: [DataDecl] -> Map Text Int
+buildConTagTable dds = Map.fromList
+  [ (conKey (conName cd), i)
+  | dd <- dds
+  , (i, cd) <- zip [0..] (dataCons dd)
+  ]
+
+-- | Legacy hash-based tag, retained as a fallback for constructors that
+-- aren't present in the program's 'progData'.
+hashConTag :: QName -> Int
+hashConTag qn =
   let t = qnameModule qn <> "." <> nameText (qnameName qn)
   in abs (T.foldl' (\acc c -> acc * 31 + fromEnum c) 0 t) `mod` 65536
 

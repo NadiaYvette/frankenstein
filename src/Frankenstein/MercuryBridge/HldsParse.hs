@@ -315,10 +315,19 @@ parseSingleGoal txt
   -- Unification: Var = expr
   | " = " `T.isInfixOf` stripped =
       let (lhs, rhs) = T.breakOn " = " stripped
-          rhs' = T.drop 3 rhs
-      in if "." `T.isInfixOf` rhs' || "[" `T.isInfixOf` rhs'
-         then GoalConstruct (T.strip lhs) (T.strip rhs') []
-         else GoalUnify (T.strip lhs) (T.strip rhs')
+          rhs' = T.strip (T.drop 3 rhs)
+          lhs' = T.strip lhs
+      in case parseCtorApp rhs' of
+           -- LHS = module.ctor(args) or LHS = ctor(args) → construct/deconstruct
+           -- with a properly extracted functor name and argument list. Which of
+           -- construct vs deconstruct it is gets decided downstream based on
+           -- the flow of bindings; we emit GoalConstruct here and let the
+           -- translator reinterpret it if the LHS is already bound.
+           Just (ctor, args) -> GoalConstruct lhs' ctor args
+           -- Plain list literal syntax — keep the old best-effort path.
+           Nothing | "[" `T.isInfixOf` rhs' -> GoalConstruct lhs' rhs' []
+           -- Otherwise it's a bare unification / assignment.
+           Nothing -> GoalUnify lhs' rhs'
   -- Predicate call: module.pred(args)
   | "(" `T.isInfixOf` stripped =
       let name = T.takeWhile (/= '(') stripped
@@ -327,6 +336,43 @@ parseSingleGoal txt
       in GoalCall (T.strip name) args
   | otherwise = GoalUnparsed stripped
   where stripped = T.strip txt
+
+-- | Parse a constructor application of the form @ctor(arg1, arg2, ...)@ or
+-- @module.ctor(arg1, arg2, ...)@, returning the bare constructor name and
+-- the argument list. Returns 'Nothing' for anything that does not look like
+-- a functor application (plain atoms, literals, variables, infix exprs).
+parseCtorApp :: Text -> Maybe (Text, [Text])
+parseCtorApp t
+  | not ("(" `T.isInfixOf` t) = Nothing
+  | otherwise =
+      let name    = T.strip (T.takeWhile (/= '(') t)
+          argsRaw = T.drop 1 (T.dropWhile (/= '(') t)
+          -- Drop the matching trailing ')' (and any trailing '.').
+          inside  = dropTrailingParen argsRaw
+          args    = filter (not . T.null)
+                  $ map T.strip
+                  $ splitCtorArgs inside
+          bareName = case T.breakOnEnd "." name of
+            ("", n) -> n
+            (_,  n) -> n
+      in if T.null name || not (isCtorish bareName)
+         then Nothing
+         else Just (bareName, args)
+  where
+    -- A Mercury constructor name starts lowercase (atoms) or may be purely
+    -- alphanumeric plus underscores. Reject strings containing whitespace
+    -- or infix operators — those are expressions, not applications.
+    isCtorish n =
+      not (T.null n)
+      && T.all (\c -> c == '_' || isAlphaNum' c) n
+    isAlphaNum' c = (c >= 'a' && c <= 'z')
+                 || (c >= 'A' && c <= 'Z')
+                 || (c >= '0' && c <= '9')
+    dropTrailingParen s =
+      let s' = T.dropWhileEnd (== '.') (T.stripEnd s)
+      in if not (T.null s') && T.last s' == ')'
+         then T.init s'
+         else s'
 
 -- | Parse Mercury builtin operations like "int.(X > Y)", "int.(X + Y)"
 -- These are module-qualified infix operations in the HLDS dump.

@@ -5,6 +5,7 @@ import Frankenstein.Core.Perceus (insertPerceus)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..))
+import Frankenstein.Core.FlattenPatterns (flattenPatterns)
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
@@ -379,7 +380,10 @@ compileOrganIR inputFile = do
 -- Output handling
 
 handleOutput :: Program -> Flags -> IO ()
-handleOutput prog0 flags = do
+handleOutput progRaw flags = do
+  -- Flatten nested patterns so downstream passes see only one level of
+  -- constructor destructuring per case branch.
+  let prog0 = flattenPatterns progRaw
   -- Run effect optimizations before evidence pass
   let (optProg, optStats) = effectOptimizeWithStats prog0
   -- Use global evidence pass: collects all effect declarations across merged

@@ -19,6 +19,7 @@ library
         Frankenstein.Core.CycleAnalysis
         Frankenstein.Core.Evidence
         Frankenstein.Core.EffectOpt
+        Frankenstein.Core.FlattenPatterns
         Frankenstein.Core.Linker
         Frankenstein.GhcBridge.Driver
         Frankenstein.GhcBridge.CoreTranslate

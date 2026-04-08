@@ -10,6 +10,12 @@ import Frankenstein.Core.Perceus (insertPerceus, analyzeUsage, freeVars)
 import Frankenstein.Core.Evidence (evidencePass)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
   , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive)
+import Frankenstein.Core.FlattenPatterns (flattenPatternsExpr)
+import Frankenstein.MercuryBridge.HldsParse
+  ( MercuryHLDS(..), MercuryPred(..), MercuryTypeDecl(..)
+  , MercuryDet(..), MercuryMode(..), MercuryGoal(..)
+  )
+import Frankenstein.MercuryBridge.CoreTranslate (translateHlds)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
@@ -70,6 +76,8 @@ main = defaultMain $ testGroup "Frankenstein"
   , effectOptTests
   , linkerTests
   , mlirEmitTests
+  , flattenPatternsTests
+  , mercuryAdtTests
   , wasmEmitTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
@@ -495,6 +503,196 @@ mlirEmitTests = testGroup "MLIR Emission"
           (T.isInfixOf "scf.if" mlir)
         assertBool "should contain func.func @orZero"
           (T.isInfixOf "func.func @orZero" mlir)
+  ]
+
+-------------------------------------------------------------------------------
+-- F. FlattenPatterns unit tests
+-------------------------------------------------------------------------------
+
+flattenPatternsTests :: TestTree
+flattenPatternsTests = testGroup "FlattenPatterns"
+  [ testCase "leaves simple patterns unchanged" $
+      let e = ECase (EVar (mkName "x"))
+                [ Branch (PatCon (mkQName "" "Just") [PatVar (mkName "n") intType])
+                         Nothing (EVar (mkName "n")) ]
+      in assertEqual "unchanged" e (flattenPatternsExpr e)
+
+  , testCase "lifts nested PatCon into inner ECase" $
+      let -- case xs of Cons (Box n) ys -> n
+          nested = ECase (EVar (mkName "xs"))
+            [ Branch
+                (PatCon (mkQName "" "Cons")
+                  [ PatCon (mkQName "" "Box") [PatVar (mkName "n") intType]
+                  , PatVar (mkName "ys") anyType
+                  ])
+                Nothing
+                (EVar (mkName "n"))
+            ]
+          flat = flattenPatternsExpr nested
+      in case flat of
+           ECase _ [Branch (PatCon (QName _ (Name "Cons" _)) [PatVar fresh _, PatVar _ys _]) Nothing body] ->
+             case body of
+               ECase (EVar freshRef) [Branch (PatCon (QName _ (Name "Box" _)) [PatVar _ _]) Nothing _] ->
+                 assertEqual "fresh var matches" fresh freshRef
+               _ -> assertFailure ("unexpected body: " ++ show body)
+           _ -> assertFailure ("unexpected shape: " ++ show flat)
+
+  , testCase "recurses into nested bodies (ELam)" $
+      let inner = ECase (EVar (mkName "x"))
+                    [ Branch (PatCon (mkQName "" "Wrap")
+                               [PatCon (mkQName "" "Inner") []])
+                             Nothing (ELit (LitInt 1)) ]
+          e = ELam [(mkName "x", anyType)] inner
+          flat = flattenPatternsExpr e
+      in case flat of
+           ELam _ (ECase _ [Branch (PatCon _ [PatVar _ _]) Nothing (ECase _ _)]) ->
+             pure ()
+           _ -> assertFailure ("did not lift under ELam: " ++ show flat)
+  ]
+
+-------------------------------------------------------------------------------
+-- F2. Mercury ADT translation tests
+-------------------------------------------------------------------------------
+
+-- | Build a synthetic Mercury HLDS for a @shape@ ADT program:
+--
+-- @
+-- :- type shape ---> circle(int) ; square(int).
+-- area(circle(R), A) :- A = R.
+-- area(square(S), A) :- A = S.
+-- main_int(X) :- area(circle(7), X).
+-- @
+--
+-- Constructed directly to bypass the HLDS text parser, which has
+-- pre-existing fragility around multi-line conjunction/disjunction
+-- formatting. This exercises the CoreTranslate Mercury ADT path.
+shapeHlds :: MercuryHLDS
+shapeHlds = MercuryHLDS
+  { hldsModule = "shape"
+  , hldsTypes =
+      [ MercuryTypeDecl
+          { typeDeclName   = "shape"
+          , typeDeclParams = []
+          , typeDeclCtors  = [ ("circle", ["int"]), ("square", ["int"]) ]
+          }
+      ]
+  , hldsPreds =
+      [ -- area(circle(R), A) :- A = R.
+        MercuryPred
+          { predName     = "area_circle"
+          , predArity    = 2
+          , predDet      = Det
+          , predModes    = [ModeIn, ModeOut]
+          , predArgTypes = ["shape", "int"]
+          , predArgNames = ["Shape", "A"]
+          , predGoal     = Just $ GoalConj
+              [ GoalDeconstruct "Shape" "circle" ["R"]
+              , GoalUnify "A" "R"
+              ]
+          }
+        -- main_int(X) :- X = circle(7), area_circle(X, R).
+      , MercuryPred
+          { predName     = "main_int"
+          , predArity    = 1
+          , predDet      = Det
+          , predModes    = [ModeOut]
+          , predArgTypes = ["int"]
+          , predArgNames = ["R"]
+          , predGoal     = Just $ GoalConj
+              [ GoalUnify "Seven" "7"
+              , GoalConstruct "Shape" "circle" ["Seven"]
+              , GoalCall "area_circle" ["Shape", "R"]
+              ]
+          }
+      ]
+  }
+
+-- | Does any subexpression contain an ECon node?
+hasECon :: Expr -> Bool
+hasECon = go
+  where
+    go (ECon _)        = True
+    go (ELam _ b)      = go b
+    go (EApp f args)   = go f || any go args
+    go (ELet bgs body) =
+      any (\(Bind _ _ rhs _) -> go rhs) (concat bgs) || go body
+    go (ECase s bs)    =
+      go s || any (\(Branch _ _ body) -> go body) bs
+    go (EHandle _ h b) = go h || go b
+    go (EPerform _ args) = any go args
+    go _               = False
+
+-- | Does any subexpression (or pattern) contain a PatCon node?
+hasPatCon :: Expr -> Bool
+hasPatCon = go
+  where
+    go (ELam _ b)      = go b
+    go (EApp f args)   = go f || any go args
+    go (ELet bgs body) =
+      any (\(Bind _ _ rhs _) -> go rhs) (concat bgs) || go body
+    go (ECase s bs)    =
+      go s || any branchHit bs
+    go (EHandle _ h b) = go h || go b
+    go (EPerform _ args) = any go args
+    go _               = False
+
+    branchHit (Branch pat _ body) = patHit pat || go body
+    patHit (PatCon _ _) = True
+    patHit _            = False
+
+mercuryAdtTests :: TestTree
+mercuryAdtTests = testGroup "Mercury ADT translation"
+  [ testCase "translateHlds preserves shape DataDecl" $
+      case translateHlds shapeHlds of
+        Left err -> assertFailure ("translateHlds failed: " ++ T.unpack err)
+        Right prog -> do
+          let dds = progData prog
+          assertEqual "one data decl" 1 (length dds)
+          let dd = head dds
+          assertEqual "name" "shape" (nameText (qnameName (dataName dd)))
+          assertEqual "two ctors" 2 (length (dataCons dd))
+          let ctorNames =
+                map (nameText . qnameName . conName) (dataCons dd)
+          assertEqual "ctor names"
+            ["circle", "square"] ctorNames
+
+  , testCase "main_int body contains ECon for circle allocation" $
+      case translateHlds shapeHlds of
+        Left err -> assertFailure ("translateHlds failed: " ++ T.unpack err)
+        Right prog -> do
+          let mainDef = head
+                [ d | d <- progDefs prog
+                    , nameText (qnameName (defName d)) == "main_int" ]
+          assertBool "main_int has an ECon node" (hasECon (defExpr mainDef))
+
+  , testCase "area_circle body contains PatCon for circle" $
+      case translateHlds shapeHlds of
+        Left err -> assertFailure ("translateHlds failed: " ++ T.unpack err)
+        Right prog -> do
+          let areaDef = head
+                [ d | d <- progDefs prog
+                    , nameText (qnameName (defName d)) == "area_circle" ]
+          assertBool "area_circle has a PatCon node"
+            (hasPatCon (defExpr areaDef))
+
+  , testCase "emitted MLIR contains ADT runtime calls" $
+      case translateHlds shapeHlds of
+        Left err -> assertFailure ("translateHlds failed: " ++ T.unpack err)
+        Right prog -> do
+          let mlir = emitProgram prog
+          assertBool "contains kk_alloc_con"
+            (T.isInfixOf "kk_alloc_con" mlir)
+          assertBool "contains kk_tag"
+            (T.isInfixOf "kk_tag" mlir)
+
+  , testCase "synthesises main alias for main_int" $
+      case translateHlds shapeHlds of
+        Left err -> assertFailure ("translateHlds failed: " ++ T.unpack err)
+        Right prog -> do
+          let mainAlias =
+                [ d | d <- progDefs prog
+                    , nameText (qnameName (defName d)) == "main" ]
+          assertBool "main alias def exists" (not (null mainAlias))
   ]
 
 -------------------------------------------------------------------------------

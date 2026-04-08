@@ -130,6 +130,37 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
     return ptr;
 }
 
+/* Print an ADT-valued result as an s-expression.
+ *
+ * Output form:
+ *   - heap pointer with N fields → "(#TAG f0 f1 ... fN-1)" (fields recursively)
+ *   - heap pointer with 0 fields → "(#TAG)"
+ *   - non-pointer scalar         → decimal integer
+ *
+ * The top-level call appends a newline; recursive calls do not. We use a
+ * helper to keep the public API a single one-shot printer.
+ */
+static void kk_print_con_inner(int64_t v) {
+    if (!kk_is_heap_ptr(v)) {
+        printf("%lld", (long long)v);
+        return;
+    }
+    int64_t tag = kk_tag(v);
+    int64_t nf  = kk_nfields(v);
+    printf("(#%lld", (long long)tag);
+    int64_t* fields = (int64_t*)(v + 8);
+    for (int64_t i = 0; i < nf; i++) {
+        printf(" ");
+        kk_print_con_inner(fields[i]);
+    }
+    printf(")");
+}
+
+void kk_println_con(int64_t v) {
+    kk_print_con_inner(v);
+    printf("\n");
+}
+
 /* Write field[idx] of a boxed value */
 void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     if (!kk_is_heap_ptr(ptr)) return;

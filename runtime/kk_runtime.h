@@ -26,6 +26,10 @@ int64_t kk_reuse(int64_t ptr);
 int64_t kk_tag(int64_t ptr);
 int64_t kk_field(int64_t ptr, int64_t idx);
 
+/* Print an ADT-valued result as an s-expression, terminated by newline.
+ * Heap pointers print as (#tag f0 f1 ...); scalars print as decimal ints. */
+void    kk_println_con(int64_t v);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

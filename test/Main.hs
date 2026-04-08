@@ -505,6 +505,44 @@ mlirEmitTests = testGroup "MLIR Emission"
           (T.isInfixOf "scf.if" mlir)
         assertBool "should contain func.func @orZero"
           (T.isInfixOf "func.func @orZero" mlir)
+
+  , testCase "emitProgram: Int-returning main uses printf, not kk_println_con" $
+      let prog = mkProgram "" "p"
+            [ (mkFunDef "" "main" (ELit (LitInt 42)) intType)
+                { defType = TFun [] EffectRowEmpty intType }
+            ]
+          mlir = emitProgram prog
+      in do
+        assertBool "uses printf for Int main"
+          (T.isInfixOf "llvm.call @printf" mlir)
+        assertBool "does not call kk_println_con for Int main"
+          (not (T.isInfixOf "func.call @kk_println_con" mlir))
+
+  , testCase "emitProgram: ADT-returning main calls kk_println_con" $
+      let treeTy = TCon (TypeCon (mkQName "" "Tree") KindValue)
+          dd = DataDecl
+            { dataName   = mkQName "" "Tree"
+            , dataParams = []
+            , dataCons   = [ ConDecl (mkQName "" "Leaf") [] Public
+                           , ConDecl (mkQName "" "Node")
+                               [ (mkName "l", treeTy)
+                               , (mkName "v", intType)
+                               , (mkName "r", treeTy)
+                               ] Public
+                           ]
+            , dataVis    = Public
+            }
+          mainDef = (mkFunDef "" "main" (ECon (mkQName "" "Leaf")) treeTy)
+                      { defType = TFun [] EffectRowEmpty treeTy }
+          prog = (mkProgram "" "p" [mainDef]) { progData = [dd] }
+          mlir = emitProgram prog
+      in do
+        assertBool "calls kk_println_con for ADT main"
+          (T.isInfixOf "func.call @kk_println_con" mlir)
+        assertBool "declares kk_println_con prototype"
+          (T.isInfixOf "func.func private @kk_println_con" mlir)
+        assertBool "does not call printf in wrapper for ADT main"
+          (not (T.isInfixOf "llvm.call @printf(%fmtaddr" mlir))
   ]
 
 -------------------------------------------------------------------------------

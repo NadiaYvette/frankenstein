@@ -223,11 +223,22 @@ emitProgramText prog =
       -- If so, the wrapper should not print the return value.
       mainPrints = any (\d -> nameText (qnameName (defName d)) == "main"
                          && exprCallsPrint (defExpr d)) defs
+      mainReturnsADT = any (\d -> nameText (qnameName (defName d)) == "main"
+                              && returnsDataType prog d) defs
       mainWrapper = if hasMain
         then if mainPrints
           then T.unlines
             [ "  func.func @main() -> i32 {"
             , "    func.call @_frankenstein_main() : () -> i64"
+            , "    %zero = arith.constant 0 : i32"
+            , "    func.return %zero : i32"
+            , "  }"
+            ]
+          else if mainReturnsADT
+          then T.unlines
+            [ "  func.func @main() -> i32 {"
+            , "    %result = func.call @_frankenstein_main() : () -> i64"
+            , "    func.call @kk_println_con(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
@@ -246,6 +257,20 @@ emitProgramText prog =
       exprCallsPrint (EDelay e)          = exprCallsPrint e
       exprCallsPrint (ELet _ body)       = exprCallsPrint body
       exprCallsPrint _                   = False
+      -- True iff the def's return type is a TCon whose name matches a
+      -- DataDecl in the program. Used to pick the s-expression printer
+      -- over printf("%ld") in the main wrapper.
+      returnsDataType p d =
+        let (_, _, ret) = decomposeDefType (defType d)
+            dataNames = [ nameText (qnameName (dataName dd)) | dd <- progData p ]
+            tconName (TCon (TypeCon qn _)) = Just (nameText (qnameName qn))
+            tconName (TApp t _)            = tconName t
+            tconName (TSyn _ _ t)          = tconName t
+            tconName (TForall _ t)         = tconName t
+            tconName _                     = Nothing
+        in case tconName ret of
+             Just n  -> n `elem` dataNames
+             Nothing -> False
   in T.unlines
     [ "module {"
     , ""
@@ -268,6 +293,7 @@ emitProgramText prog =
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
+    , "  func.func private @kk_println_con(i64) -> ()"
     , ""
     , "  // Thunk runtime declarations (lazy evaluation)"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -390,6 +416,7 @@ emitProgramWasm prog =
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
+    , "  func.func private @kk_println_con(i64) -> ()"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"

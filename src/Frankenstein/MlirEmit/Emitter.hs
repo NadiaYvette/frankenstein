@@ -1234,12 +1234,17 @@ isBoolConCase branches =
 
 -- | Emit a Bool constructor case: scrutinee is i64 0 (False) or 1 (True),
 --   not a boxed constructor, so skip kk_tag and compare directly.
-emitBoolConCase :: [Text] -> Text -> [(QName, [Pattern], Expr)] -> Expr -> Emit ([Text], Text)
-emitBoolConCase scrutOps scrutName conBranches defaultExpr = do
+emitBoolConCase :: [Text] -> Text -> [(QName, [Pattern], Expr)] -> Maybe Expr -> Emit ([Text], Text)
+emitBoolConCase scrutOps scrutName conBranches mDefault = do
   -- Find which branch is True and which is False
   let findBranch nm = [e | (qn, _, e) <- conBranches, nameText (qnameName qn) == nm]
-      trueBranch  = case findBranch "True"  of { (e:_) -> e; [] -> defaultExpr }
-      falseBranch = case findBranch "False" of { (e:_) -> e; [] -> defaultExpr }
+      fallback = case mDefault of
+        Just e  -> e
+        Nothing -> case conBranches of
+          []            -> ELit (LitInt 0)
+          ((_,_,e) : _) -> e
+      trueBranch  = case findBranch "True"  of { (e:_) -> e; [] -> fallback }
+      falseBranch = case findBranch "False" of { (e:_) -> e; [] -> fallback }
   -- scrutName is i64: 1 = True, 0 = False. Compare != 0 to get i1.
   zeroName <- freshName "v"
   cmpName <- freshName "cmp"
@@ -1249,19 +1254,38 @@ emitBoolConCase scrutOps scrutName conBranches defaultExpr = do
   emitScfIf (scrutOps ++ toI1) cmpName trueBranch falseBranch
 
 -- | Emit constructor case: extract tag via kk_tag, chain scf.if on tag values
-emitConCase :: [Text] -> Text -> [(QName, [Pattern], Expr)] -> Expr -> Emit ([Text], Text)
-emitConCase scrutOps scrutName conBranches defaultExpr = do
+emitConCase :: [Text] -> Text -> [(QName, [Pattern], Expr)] -> Maybe Expr -> Emit ([Text], Text)
+emitConCase scrutOps scrutName conBranches mDefaultExpr = do
   -- Extract tag from the scrutinee via runtime call
   tagName <- freshName "v"
   let extractTag = "%" <> tagName <> " = func.call @kk_tag(%" <> scrutName <> ") : (i64) -> i64"
       structTy = "i64"  -- not used for extraction anymore, kept for API compat
   -- Build chain of comparisons
-  (chainOps, chainResult) <- emitConChain tagName scrutName structTy conBranches defaultExpr
+  (chainOps, chainResult) <- emitConChain tagName scrutName structTy conBranches mDefaultExpr
   pure (scrutOps ++ [extractTag] ++ chainOps, chainResult)
 
-emitConChain :: Text -> Text -> Text -> [(QName, [Pattern], Expr)] -> Expr -> Emit ([Text], Text)
-emitConChain _ _ _ [] defaultExpr = emitExpr defaultExpr
-emitConChain tagName scrutName structTy [(qn, pats, body)] defaultExpr = do
+emitConChain
+  :: Text -> Text -> Text
+  -> [(QName, [Pattern], Expr)]
+  -> Maybe Expr
+  -> Emit ([Text], Text)
+emitConChain _ _ _ [] (Just defaultExpr) = emitExpr defaultExpr
+emitConChain _ _ _ [] Nothing            =
+  -- No branches and no default: emit a zero placeholder. This should
+  -- only be reachable in degenerate (empty) cases.
+  pure (["// warning: empty case with no default"
+       , "%vzero = arith.constant 0 : i64"], "vzero")
+-- Exhaustive tail: one remaining constructor branch with no default
+-- means \"treat this branch as unconditional\" — skip the tag test and
+-- emit the pattern bindings + body in the outer region so the pattern
+-- variables stay in scope.
+emitConChain _ scrutName structTy [(_qn, pats, body)] Nothing = do
+  savedA <- gets esAliases
+  (fieldOps, _) <- emitPatternBindings scrutName structTy pats
+  (bodyOps, bodyResult) <- emitExpr body
+  modify (\s -> s { esAliases = savedA })
+  pure (fieldOps ++ bodyOps, bodyResult)
+emitConChain tagName scrutName structTy [(qn, pats, body)] (Just defaultExpr) = do
   -- Last constructor branch: compare tag, if match do body, else default
   let tag = conTag qn
   constName <- freshName "v"
@@ -1290,7 +1314,7 @@ emitConChain tagName scrutName structTy [(qn, pats, body)] defaultExpr = do
         , "}"
         ]
   pure (cmpOps ++ ifOps, resultName)
-emitConChain tagName scrutName structTy ((qn, pats, body):rest) defaultExpr = do
+emitConChain tagName scrutName structTy ((qn, pats, body):rest) mDefaultExpr = do
   let tag = conTag qn
   constName <- freshName "v"
   cmpName <- freshName "cmp"
@@ -1301,7 +1325,7 @@ emitConChain tagName scrutName structTy ((qn, pats, body):rest) defaultExpr = do
   (fieldOps, _) <- emitPatternBindings scrutName structTy pats
   (thenOps, thenResult) <- emitExpr body
   modify (\s -> s { esAliases = savedA })
-  (restOps, restResult) <- emitConChain tagName scrutName structTy rest defaultExpr
+  (restOps, restResult) <- emitConChain tagName scrutName structTy rest mDefaultExpr
   modify (\s -> s { esAliases = savedA })
   resultName <- freshName "v"
   let ifOps =
@@ -1397,7 +1421,11 @@ emitBind bnd = do
 data BranchClass
   = IntLitCase Integer Expr Expr          -- single int literal + default
   | MultiIntLitCase [(Integer, Expr)] Expr -- multiple int literals + default
-  | ConCase [(QName, [Pattern], Expr)] Expr -- constructor patterns + default
+  | ConCase [(QName, [Pattern], Expr)] (Maybe Expr)
+    -- ^ Constructor patterns + optional default. When the default is
+    -- @Nothing@ we assume the branch set is exhaustive (the frontend
+    -- has already checked) and the last constructor branch becomes
+    -- unconditional during lowering.
   | SingleConCase QName [Pattern] Expr     -- single constructor (exhaustive, no default needed)
   | VarCase Name Expr                      -- single variable binding
   | SingleCase Expr                        -- single branch (wildcard or sole)
@@ -1420,13 +1448,19 @@ classifyBranches branches
   | [b] <- conBranches, Nothing <- defaultBranch, length branches == 1
   , PatCon qn pats <- branchPattern b =
       SingleConCase qn pats (branchBody b)
-  -- Constructor patterns
+  -- Constructor patterns.
   | not (null conBranches) =
-      let defaultBody = case defaultBranch of
-            Just b  -> branchBody b
-            Nothing -> branchBody (last conBranches)  -- fallback
-          conData = [(qn, pats, branchBody b) | b <- conBranches, PatCon qn pats <- [branchPattern b]]
-      in ConCase conData defaultBody
+      let conData = [(qn, pats, branchBody b)
+                    | b <- conBranches
+                    , PatCon qn pats <- [branchPattern b] ]
+      in case defaultBranch of
+           Just b  -> ConCase conData (Just (branchBody b))
+           -- No explicit default: treat the branch set as exhaustive.
+           -- The last constructor branch becomes unconditional; its own
+           -- pattern-bound variables stay in scope because we emit its
+           -- bindings and body together rather than reusing the body as
+           -- a separate default expression in an inner scf.if region.
+           Nothing -> ConCase conData Nothing
   where
     intLitBranches = [b | b <- branches, isIntLit (branchPattern b)]
     conBranches = [b | b <- branches, isConPat (branchPattern b)]

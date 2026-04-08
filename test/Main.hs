@@ -482,6 +482,19 @@ mlirEmitTests = testGroup "MLIR Emission"
           mlir = emitProgram prog
       in assertBool "should produce non-empty output"
            (not (T.null mlir))
+
+  , testCase "emitProgram: ADT (MyMaybe) produces constructor runtime calls" $
+      let prog = myMaybeProgram
+          mlir = emitProgram prog
+      in do
+        assertBool "should contain kk_alloc_con (ECon allocation)"
+          (T.isInfixOf "kk_alloc_con" mlir)
+        assertBool "should contain kk_tag (PatCon dispatch)"
+          (T.isInfixOf "kk_tag" mlir)
+        assertBool "should contain scf.if for case dispatch"
+          (T.isInfixOf "scf.if" mlir)
+        assertBool "should contain func.func @orZero"
+          (T.isInfixOf "func.func @orZero" mlir)
   ]
 
 -------------------------------------------------------------------------------
@@ -556,5 +569,55 @@ demoFactorialWithMain = Program
           }
       ]
   , progData = []
+  , progEffects = []
+  }
+
+-- | ADT smoke-test program: mirrors examples/maybesum.hs
+--
+-- @
+-- data MyMaybe = MyNothing | MyJust Int
+-- orZero MyNothing  = 0
+-- orZero (MyJust x) = x
+-- main = orZero (MyJust 7)
+-- @
+myMaybeProgram :: Program
+myMaybeProgram = Program
+  { progName = mkQName "test" "myMaybe"
+  , progDefs =
+      [ Def
+          { defName = mkQName "" "orZero"
+          , defType = TFun [(Many, anyType)] EffectRowEmpty intType
+          , defExpr =
+              ELam [(mkName "m", anyType)] $
+                ECase (EVar (mkName "m"))
+                  [ Branch (PatCon (mkQName "" "MyNothing") []) Nothing
+                      (ELit (LitInt 0))
+                  , Branch (PatCon (mkQName "" "MyJust") [PatVar (mkName "x") intType]) Nothing
+                      (EVar (mkName "x"))
+                  ]
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      , Def
+          { defName = mkQName "" "main"
+          , defType = TFun [] EffectRowEmpty intType
+          , defExpr =
+              EApp (EVar (mkName "orZero"))
+                [EApp (ECon (mkQName "" "MyJust")) [ELit (LitInt 7)]]
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      ]
+  , progData =
+      [ DataDecl
+          { dataName   = mkQName "" "MyMaybe"
+          , dataParams = []
+          , dataCons   =
+              [ ConDecl (mkQName "" "MyNothing") [] Public
+              , ConDecl (mkQName "" "MyJust")    [(mkName "x", intType)] Public
+              ]
+          , dataVis    = Public
+          }
+      ]
   , progEffects = []
   }

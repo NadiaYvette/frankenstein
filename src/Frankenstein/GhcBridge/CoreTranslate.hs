@@ -39,7 +39,7 @@ import GHC.Types.Var
 import GHC.Types.Name (getOccString, nameUnique, nameModule_maybe)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Literal (Literal(..))
-import GHC.Types.Id (idDemandInfo)
+import GHC.Types.Id (idDemandInfo, isDataConId_maybe)
 import GHC.Types.Demand (isStrictDmd, isAbsDmd)
 import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys, dataConFieldLabels)
 import GHC.Unit.Module (moduleNameString, moduleName)
@@ -104,6 +104,14 @@ translateTopBind (Rec pairs) =
 -------------------------------------------------------------------------------
 
 trExpr :: CoreExpr -> F.Expr
+-- Data constructors (nullary or the worker id of a saturated con) appear
+-- in GHC Core as Var nodes whose IdDetails marks them as DataConWorkId.
+-- We translate these to ECon so the MLIR emitter can allocate a boxed
+-- constructor rather than treating the name as an unresolved external.
+trExpr (Var v)
+  | Just dc <- isDataConId_maybe v =
+      F.ECon (F.QName T.empty
+               (F.Name (T.pack (getOccString (dataConName dc))) 0))
 trExpr (Var v) = F.EVar (translateName v)
 
 trExpr (Lit l) = F.ELit (translateLit l)

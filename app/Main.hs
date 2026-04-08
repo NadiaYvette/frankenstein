@@ -18,6 +18,8 @@ import Frankenstein.GoBridge.AstParse (parseGo)
 import Frankenstein.GoBridge.CoreTranslate (translateGoAst)
 import Frankenstein.FutharkBridge.Parser (parseFutharkFile)
 import Frankenstein.FutharkBridge.CoreTranslate (translateFuthark)
+import Frankenstein.SchemeBridge.Reader (readSchemeFile)
+import Frankenstein.SchemeBridge.CoreTranslate (translateScheme)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 
@@ -144,6 +146,7 @@ compileFile fromJson path = do
           ".py" -> compilePython path
           ".go" -> compileGo path
           ".fut" -> compileFuthark path
+          ".scm" -> compileScheme path
           _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
   pure $ case result of
     Left err   -> Left (path, err)
@@ -226,6 +229,16 @@ compileFuthark inputFile = do
     Right ast ->
       let modName = T.pack (takeBaseName inputFile)
       in pure $ translateFuthark modName ast
+
+compileScheme :: FilePath -> IO (Either Text Program)
+compileScheme inputFile = do
+  TIO.putStrLn $ "Compiling Scheme: " <> T.pack inputFile
+  result <- readSchemeFile inputFile
+  case result of
+    Left err -> pure $ Left $ "Scheme bridge error: " <> err
+    Right forms ->
+      let modName = T.pack (takeBaseName inputFile)
+      in pure $ translateScheme modName forms
 
 compileOrganIR :: FilePath -> IO (Either Text Program)
 compileOrganIR inputFile = do
@@ -346,6 +359,7 @@ printHelp = do
   putStrLn "  .py     Python    (via CPython ast module)"
   putStrLn "  .go     Go        (via go/parser stdlib helper)"
   putStrLn "  .fut    Futhark   (via in-tree Pratt parser)"
+  putStrLn "  .scm    Scheme    (via in-tree reader + CPS converter, supports call/cc)"
   putStrLn "  .json   OrganIR   (organ-bank JSON)"
   putStrLn "  .organ  OrganIR   (organ-bank JSON)"
   putStrLn ""

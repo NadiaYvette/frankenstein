@@ -13,6 +13,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "kk_cycle.h"
 
 /* Raw allocation: size in bytes */
@@ -49,6 +50,14 @@ void kk_retain(int64_t ptr) {
     *rc = (*rc & KK_RC_MASK) | KK_COLOR_BLACK;
 }
 
+int64_t kk_tag(int64_t ptr);  /* forward decl */
+
+/* Closure objects store a raw function pointer in field 0 and captured
+ * values (which may be heap pointers) in fields 1..n. The code pointer
+ * is *not* a heap pointer and must not be dropped, so the codegen tags
+ * closures with KK_CLOSURE_TAG and kk_drop skips field 0 for them. */
+#define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" */
+
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
@@ -59,7 +68,8 @@ void kk_drop(int64_t ptr) {
         /* Recursively drop children */
         int64_t nf = kk_nfields(ptr);
         int64_t* fields = (int64_t*)(ptr + 8);
-        for (int64_t i = 0; i < nf; i++) {
+        int64_t start = (kk_tag(ptr) == KK_CLOSURE_TAG) ? 1 : 0;
+        for (int64_t i = start; i < nf; i++) {
             kk_drop(fields[i]);
         }
         kk_unregister_nfields(ptr);

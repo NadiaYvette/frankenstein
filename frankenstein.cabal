@@ -34,6 +34,8 @@ library
         Frankenstein.GoBridge.CoreTranslate
         Frankenstein.FutharkBridge.Parser
         Frankenstein.FutharkBridge.CoreTranslate
+        Frankenstein.SchemeBridge.Reader
+        Frankenstein.SchemeBridge.CoreTranslate
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
         Frankenstein.OrganIR.Consumer

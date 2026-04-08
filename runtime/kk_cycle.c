@@ -75,12 +75,13 @@ static void roots_ensure_cap(void) {
 /* ---- Field scanning ---- */
 
 /* Known special tags that have fixed layouts */
-#define KK_EVV_TAG   0x45565630  /* "EVV0" */
-#define KK_THUNK_TAG 0x4C415A59  /* "LAZY" */
+#define KK_EVV_TAG     0x45565630  /* "EVV0" */
+#define KK_THUNK_TAG   0x4C415A59  /* "LAZY" */
+#define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" — field 0 is a raw fn ptr */
 
 int kk_can_be_cyclic(int64_t tag) {
-    /* Thunks and evidence vectors have known acyclic layouts */
-    if (tag == KK_THUNK_TAG || tag == KK_EVV_TAG) return 0;
+    /* Thunks, evidence vectors, and closures have acyclic layouts */
+    if (tag == KK_THUNK_TAG || tag == KK_EVV_TAG || tag == KK_CLOSURE_TAG) return 0;
     /* Constructor tags below 0x10000 are user-defined ADT constructors
      * that could potentially contain back-references */
     return 1;
@@ -143,12 +144,14 @@ int64_t kk_nfields(int64_t ptr) {
     return 0;
 }
 
-/* Iterate over the children (fields that are heap pointers) of an object */
+/* Iterate over the children (fields that are heap pointers) of an object.
+ * For closures we skip field 0, which holds a raw function pointer. */
 static void for_each_child(int64_t ptr, void (*fn)(int64_t child)) {
     if (!kk_is_heap_ptr(ptr)) return;
     int64_t nf = kk_nfields(ptr);
     int64_t* fields = (int64_t*)(ptr + 8);
-    for (int64_t i = 0; i < nf; i++) {
+    int64_t start = (*(int64_t*)ptr == KK_CLOSURE_TAG) ? 1 : 0;
+    for (int64_t i = start; i < nf; i++) {
         int64_t child = fields[i];
         if (kk_is_heap_ptr(child)) {
             fn(child);
@@ -221,7 +224,8 @@ static void collect_white(int64_t ptr) {
     /* Recursively collect children first */
     int64_t nf = kk_nfields(ptr);
     int64_t* fields = (int64_t*)(ptr + 8);
-    for (int64_t i = 0; i < nf; i++) {
+    int64_t start = (*(int64_t*)ptr == KK_CLOSURE_TAG) ? 1 : 0;
+    for (int64_t i = start; i < nf; i++) {
         int64_t child = fields[i];
         collect_white(child);
     }

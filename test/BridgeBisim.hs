@@ -31,6 +31,8 @@ import Frankenstein.GoBridge.AstParse (parseGo)
 import Frankenstein.GoBridge.CoreTranslate (translateGoAst)
 import Frankenstein.FutharkBridge.Parser (parseFutharkFile)
 import Frankenstein.FutharkBridge.CoreTranslate (translateFuthark)
+import Frankenstein.SchemeBridge.Reader (readSchemeFile)
+import Frankenstein.SchemeBridge.CoreTranslate (translateScheme)
 import KOracle (exprToK)
 
 import Data.Text (Text)
@@ -71,6 +73,7 @@ bridgeBisimTests = testGroup "Bridge Bisimulation (Phase 2c)"
   , pythonBisimTests
   , goBisimTests
   , futharkBisimTests
+  , schemeBisimTests
   ]
 
 -------------------------------------------------------------------------------
@@ -274,6 +277,41 @@ compileFuthark relPath = do
     Right ast ->
       case translateFuthark (T.pack "futhark") ast of
         Left err -> assertFailure ("Futhark translate failed: " <> T.unpack err) >> error "unreachable"
+        Right prog -> pure prog
+
+-------------------------------------------------------------------------------
+-- H. Scheme Bridge Bisimulation
+-------------------------------------------------------------------------------
+--
+-- The Scheme bridge CPS-converts every form, so its Core output differs
+-- substantially from the other bridges (nested higher-order continuations
+-- instead of direct let-bound expressions). The K oracle does not model
+-- closures, so we stick to structural tests here plus an end-to-end
+-- native-compile sanity check of a call/cc escape example — that is the
+-- critical property for this bridge.
+
+schemeBisimTests :: TestTree
+schemeBisimTests = testGroup "Scheme Bridge"
+  [ testCase "structural: arith.scm produces main Def" $ do
+      prog <- compileScheme "examples/arith.scm"
+      _ <- findDefOrFail "main" prog
+      _ <- findDefOrFail "sq" prog
+      pure ()
+
+  , testCase "structural: escape.scm produces main Def with call/cc" $ do
+      prog <- compileScheme "examples/escape.scm"
+      _ <- findDefOrFail "main" prog
+      pure ()
+  ]
+
+compileScheme :: FilePath -> IO Program
+compileScheme relPath = do
+  result <- readSchemeFile relPath
+  case result of
+    Left err -> assertFailure ("Scheme bridge failed: " <> T.unpack err) >> error "unreachable"
+    Right forms ->
+      case translateScheme (T.pack "scheme") forms of
+        Left err -> assertFailure ("Scheme translate failed: " <> T.unpack err) >> error "unreachable"
         Right prog -> pure prog
 
 -------------------------------------------------------------------------------

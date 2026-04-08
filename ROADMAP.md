@@ -524,7 +524,57 @@ Perceus → MLIR → LLVM IR → ELF object → executed in process.**
 
 ---
 
-## Current State (2026-04-07, Phase 6a+6b+6c substantially complete)
+## Phase 10: Tier A Directions — Arrays and First-Class Continuations ✓
+
+Two directions from `~/Dokumente/frankenstein.directions` pursued as one batch to
+stress-test opposite corners of the IR: Futhark arrays light up MLIR's `linalg`
+dialect (new backend territory), Scheme `call/cc` stresses the closure/higher-
+order machinery (validates "principled IR" claim).
+
+### 10a. Futhark arrays → MLIR linalg ✓
+
+The Phase 9 Futhark bridge only handled scalar `i64`. Phase 10a extends it to
+emit real `linalg.generic` reductions for `sum_iota n` and `dot_iota n`:
+
+- Allocates `memref<?xi64>` via `memref.alloca`
+- Fills it with `scf.for` over `arith.index_cast`
+- Reduces via `linalg.generic { iterator_types = ["reduction"], indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>] }`
+- Lowered through `--convert-linalg-to-loops --expand-strided-metadata
+  --finalize-memref-to-llvm` added to the native pipeline
+
+Validated: `examples/sum_iota.fut` → 4950, `dot_iota 100` → 328350.
+
+### 10b. Scheme bridge with call/cc ✓
+
+New `Frankenstein.SchemeBridge.{Reader,CoreTranslate}` module. The reader is a
+hand-rolled S-expression parser; the translator is a Danvy-style HOAS CPS
+converter with administrative-redex beta reduction baked in at translation time.
+
+The design decision that makes this work: Frankenstein's existing `Evidence.hs`
+is single-shot inline-only, with no runtime continuation capture. Rather than
+add runtime machinery, we CPS-convert the source so `(call/cc f)` becomes plain
+higher-order code — `[f]_cps(λfv. fv (λ(v _k). k v) k)` — and the existing
+PAP/closure machinery carries the reified continuation. First-class continuations
+with correct escape semantics, without a single runtime change specific to them.
+
+Uncovered two pre-existing Emitter/runtime bugs in the process:
+
+1. `EApp (non-var) args` was emitting `llvm.extractvalue` against an i64 closure
+   pointer as if it were an LLVM struct. Fixed to use the same `kk_field`
+   indirection as the variable path, with the closure threaded as the leading arg.
+2. `kk_drop` walked every field of every boxed object — including field 0 of a
+   closure, which holds a raw function pointer into `.text`, triggering a
+   segfault on the refcount write. Fixed by giving closures a distinct tag
+   (`KK_CLOSURE_TAG = 0x434C4F53 "CLOS"`) and skipping field 0 in `kk_drop`,
+   `for_each_child`, and `collect_white`. Closures are also marked acyclic.
+
+Validated: `examples/arith.scm` → 42, `examples/escape.scm` → 100 (call/cc
+bypasses the surrounding `(+ 10 ...)`). `--demo --compile` regression still
+produces 3628800. All 56 cabal tests pass plus 2 new Scheme structural tests.
+
+---
+
+## Current State (2026-04-08, Phase 10a+10b complete)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)

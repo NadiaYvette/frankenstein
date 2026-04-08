@@ -111,7 +111,7 @@ emitPapClosure fnName arity suppliedArgs = do
   let allocOps =
         [ "// PAP for @" <> fnName <> " (arity " <> T.pack (show arity)
           <> ", supplied " <> T.pack (show nSupplied) <> ")"
-        , "%" <> tagName <> " = arith.constant 0 : i64"
+        , "%" <> tagName <> " = arith.constant 1129074515 : i64  // KK_CLOSURE_TAG 'CLOS'"
         , "%" <> nfieldsName <> " = arith.constant " <> T.pack (show nFields) <> " : i64"
         , "%" <> ptrName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
         , "%" <> fptrAddrName <> " = func.constant @" <> wrapperName <> " : " <> wrapperFnTy
@@ -610,6 +610,59 @@ emitExpr (EApp (EVar fn) [arg])
         , "%" <> resultName <> " = arith.select %" <> cmpName <> ", %" <> negName <> ", %" <> argName <> " : i64"
         ], resultName)
 
+-- Futhark array primitives → MLIR linalg.
+-- These light up the linalg/memref dialects in the lowering pipeline.
+-- The pattern is always: allocate a dynamic memref, fill it via scf.for
+-- (iota or iota²), reduce it via linalg.generic, load the scalar.
+emitExpr (EApp (EVar fn) [nArg])
+  | nameText fn `elem` ["sum_iota", "dot_iota"] = do
+      let isSquare = nameText fn == "dot_iota"
+      (nOps, nName) <- emitExpr nArg
+      idxName  <- freshName "n"
+      bufName  <- freshName "xs"
+      iName    <- freshName "i"
+      ivName   <- freshName "iv"
+      sqName   <- freshName "sq"
+      lo       <- freshName "lo"
+      step     <- freshName "step"
+      zeroI    <- freshName "z"
+      accBuf   <- freshName "acc"
+      inN      <- freshName "in"
+      accN     <- freshName "ac"
+      sumN     <- freshName "s"
+      result   <- freshName "v"
+      let storeVal = if isSquare then sqName else ivName
+          squareOp = if isSquare
+            then ["          %" <> sqName <> " = arith.muli %" <> ivName
+                  <> ", %" <> ivName <> " : i64"]
+            else []
+      pure (nOps ++
+        [ "    %" <> idxName <> " = arith.index_cast %" <> nName <> " : i64 to index"
+        , "    %" <> bufName <> " = memref.alloca(%" <> idxName <> ") : memref<?xi64>"
+        , "    %" <> lo   <> " = arith.constant 0 : index"
+        , "    %" <> step <> " = arith.constant 1 : index"
+        , "    scf.for %" <> iName <> " = %" <> lo <> " to %" <> idxName
+            <> " step %" <> step <> " {"
+        , "      %" <> ivName <> " = arith.index_cast %" <> iName <> " : index to i64"
+        ] ++ squareOp ++
+        [ "      memref.store %" <> storeVal <> ", %" <> bufName
+            <> "[%" <> iName <> "] : memref<?xi64>"
+        , "    }"
+        , "    %" <> zeroI  <> " = arith.constant 0 : i64"
+        , "    %" <> accBuf <> " = memref.alloca() : memref<i64>"
+        , "    memref.store %" <> zeroI <> ", %" <> accBuf <> "[] : memref<i64>"
+        , "    linalg.generic {"
+        , "      indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],"
+        , "      iterator_types = [\"reduction\"]"
+        , "    } ins(%" <> bufName <> " : memref<?xi64>) outs(%" <> accBuf
+            <> " : memref<i64>) {"
+        , "    ^bb0(%" <> inN <> ": i64, %" <> accN <> ": i64):"
+        , "      %" <> sumN <> " = arith.addi %" <> inN <> ", %" <> accN <> " : i64"
+        , "      linalg.yield %" <> sumN <> " : i64"
+        , "    }"
+        , "    %" <> result <> " = memref.load %" <> accBuf <> "[] : memref<i64>"
+        ], result)
+
 -- Haskell print/putStrLn: emit as printf call
 -- GHC desugars print to dictionary-passing, but after stripping dicts
 -- we get a bare call to print with one argument.
@@ -719,26 +772,32 @@ emitExpr (EApp (EVar fn) args) = do
             ]
       pure (allOps ++ closOps ++ extractOps, resultName)
 
--- Application of a non-var, non-con expression (e.g. closure call)
+-- Application of a non-var, non-con expression (e.g. the result of a
+-- closure allocation or a let-bound closure value). The function value
+-- here is always an i64 heap pointer to a closure, so we fetch the
+-- code pointer via kk_field just like the var-indirect path above, and
+-- thread the closure itself as the leading argument.
 emitExpr (EApp fn args) = do
   (fnOps, fnName) <- emitExpr fn
   argResults <- mapM emitExpr args
   let allArgOps = concatMap fst argResults
       argNames = map snd argResults
       nArgs = length argNames
-      closTy = closureStructType nArgs
-      -- Function type for the indirect call: (closure_struct, args...) -> i64
       argTys = replicate nArgs "i64"
-  -- Extract function pointer from closure struct slot 0
-  fptrName <- freshName "v"
-  let extractOp = "%" <> fptrName <> " = llvm.extractvalue %" <> fnName <> "[0] : " <> closTy
-  -- Build the indirect call
-  resultName <- freshName "v"
-  let argList = T.intercalate ", " ["%" <> n | n <- argNames]
-      argTypeList = T.intercalate ", " argTys
-      callOp = "%" <> resultName <> " = llvm.call %" <> fptrName
-               <> "(" <> argList <> ") : !llvm.ptr, (" <> argTypeList <> ") -> i64"
-  pure (fnOps ++ allArgOps ++ [extractOp, callOp], resultName)
+  idxZeroName <- freshName "v"
+  fptrIntName <- freshName "v"
+  fptrPtrName <- freshName "v"
+  resultName  <- freshName "v"
+  let closArgList  = T.intercalate ", " (("%" <> fnName) : ["%" <> n | n <- argNames])
+      closArgTypes = T.intercalate ", " ("i64" : argTys)
+      extractOps =
+        [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
+        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> fnName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+        , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
+        , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+          <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
+        ]
+  pure (fnOps ++ allArgOps ++ extractOps, resultName)
 
 emitExpr (ECase scrut branches) = do
   -- Pattern matching
@@ -892,7 +951,7 @@ emitExpr (ELam params body) = do
       fnCastTy = "(" <> paramTyList <> ") -> i64"
   let allocOps =
         [ "// closure for @" <> liftedName <> " capturing " <> T.pack (show nCaptured) <> " vars"
-        , "%" <> tagName <> " = arith.constant 0 : i64"
+        , "%" <> tagName <> " = arith.constant 1129074515 : i64  // KK_CLOSURE_TAG 'CLOS'"
         , "%" <> nfieldsName <> " = arith.constant " <> T.pack (show nFields) <> " : i64"
         , "%" <> ptrName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
         , "%" <> fptrAddrName <> " = func.constant @" <> liftedName <> " : " <> fnCastTy
@@ -1579,8 +1638,13 @@ compileToExecutable config prog = do
   TIO.writeFile mlirPath mlirText
 
   -- mlir-opt: lower to LLVM dialect
+  -- linalg/memref passes are no-ops when no array ops are present, so they
+  -- are safe to always include. They light up the Futhark array path.
   (ec1, out1, err1) <- readProcessWithExitCode (ecMlirOptPath config)
-    ["--convert-scf-to-cf", "--convert-func-to-llvm", "--convert-arith-to-llvm",
+    ["--convert-linalg-to-loops",
+     "--expand-strided-metadata",
+     "--finalize-memref-to-llvm",
+     "--convert-scf-to-cf", "--convert-func-to-llvm", "--convert-arith-to-llvm",
      "--convert-cf-to-llvm", "--reconcile-unrealized-casts", mlirPath] ""
   case ec1 of
     ExitFailure _ -> pure $ Left $ "mlir-opt failed: " <> T.pack err1

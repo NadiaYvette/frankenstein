@@ -34,4 +34,21 @@ void    kk_println_con(int64_t v);
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);
 
+/* First-class strings.
+ *
+ * A Frankenstein string is passed as an int64_t that, when cast to
+ * const char*, points at a NUL-terminated UTF-8 byte sequence. String
+ * literals are emitted as llvm.mlir.global constants and flow through
+ * the pipeline as i64 via ptrtoint; these helpers return freshly
+ * malloc'd strings that the caller owns (no refcounting yet — strings
+ * are leaked, which is fine for short-lived test programs).
+ *
+ * kk_str_show_int formats a signed integer as decimal digits.
+ */
+void    kk_println_str(int64_t s);
+int64_t kk_str_concat(int64_t a, int64_t b);
+int64_t kk_str_len(int64_t s);
+int64_t kk_str_eq(int64_t a, int64_t b);
+int64_t kk_str_show_int(int64_t n);
+
 #endif /* KK_RUNTIME_H */

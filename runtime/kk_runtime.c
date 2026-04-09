@@ -161,6 +161,81 @@ void kk_println_con(int64_t v) {
     printf("\n");
 }
 
+/* First-class strings.
+ *
+ * Representation: int64_t holding the address of a NUL-terminated char*.
+ * Literals live in .rodata (llvm.mlir.global constant); helpers that
+ * produce new strings malloc fresh buffers and return them. We do not
+ * refcount strings here — a real implementation would track ownership
+ * via the Perceus pass, but this is enough to demonstrate Text/String
+ * flowing as values through the pipeline.
+ */
+
+void kk_println_str(int64_t s) {
+    const char* p = (const char*)s;
+    if (p == NULL) {
+        printf("\n");
+    } else {
+        printf("%s\n", p);
+    }
+}
+
+int64_t kk_str_len(int64_t s) {
+    const char* p = (const char*)s;
+    if (p == NULL) return 0;
+    size_t n = 0;
+    while (p[n] != '\0') n++;
+    return (int64_t)n;
+}
+
+int64_t kk_str_concat(int64_t a, int64_t b) {
+    const char* pa = (const char*)a;
+    const char* pb = (const char*)b;
+    if (pa == NULL) pa = "";
+    if (pb == NULL) pb = "";
+    size_t la = 0; while (pa[la]) la++;
+    size_t lb = 0; while (pb[lb]) lb++;
+    char* out = (char*)malloc(la + lb + 1);
+    if (!out) return 0;
+    for (size_t i = 0; i < la; i++) out[i]      = pa[i];
+    for (size_t i = 0; i < lb; i++) out[la + i] = pb[i];
+    out[la + lb] = '\0';
+    return (int64_t)out;
+}
+
+int64_t kk_str_eq(int64_t a, int64_t b) {
+    const char* pa = (const char*)a;
+    const char* pb = (const char*)b;
+    if (pa == pb) return 1;
+    if (pa == NULL || pb == NULL) return 0;
+    size_t i = 0;
+    while (pa[i] != '\0' && pa[i] == pb[i]) i++;
+    return (pa[i] == pb[i]) ? 1 : 0;
+}
+
+int64_t kk_str_show_int(int64_t n) {
+    /* Worst case: 20 digits + sign + NUL = 22 bytes */
+    char* buf = (char*)malloc(24);
+    if (!buf) return 0;
+    /* snprintf-free: format the integer manually so we don't need <stdio.h>
+     * behaviour guarantees that may drag in locale. */
+    int neg = 0;
+    uint64_t u;
+    if (n < 0) { neg = 1; u = (uint64_t)(-(n + 1)) + 1; }
+    else       { u = (uint64_t)n; }
+    char tmp[24];
+    int len = 0;
+    if (u == 0) { tmp[len++] = '0'; }
+    else {
+        while (u > 0) { tmp[len++] = (char)('0' + (u % 10)); u /= 10; }
+    }
+    int pos = 0;
+    if (neg) buf[pos++] = '-';
+    for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
+    buf[pos] = '\0';
+    return (int64_t)buf;
+}
+
 /* Write field[idx] of a boxed value */
 void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     if (!kk_is_heap_ptr(ptr)) return;

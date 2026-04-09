@@ -225,11 +225,22 @@ emitProgramText prog =
                          && exprCallsPrint (defExpr d)) defs
       mainReturnsADT = any (\d -> nameText (qnameName (defName d)) == "main"
                               && returnsDataType prog d) defs
+      mainReturnsString = any (\d -> nameText (qnameName (defName d)) == "main"
+                                  && returnsStringType d) defs
       mainWrapper = if hasMain
         then if mainPrints
           then T.unlines
             [ "  func.func @main() -> i32 {"
             , "    func.call @_frankenstein_main() : () -> i64"
+            , "    %zero = arith.constant 0 : i32"
+            , "    func.return %zero : i32"
+            , "  }"
+            ]
+          else if mainReturnsString
+          then T.unlines
+            [ "  func.func @main() -> i32 {"
+            , "    %result = func.call @_frankenstein_main() : () -> i64"
+            , "    func.call @kk_println_str(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
@@ -253,7 +264,8 @@ emitProgramText prog =
             , "  }"
             ]
         else ""
-      exprCallsPrint (EApp (EVar fn) _) = nameText fn == "print"
+      exprCallsPrint (EApp (EVar fn) _) =
+        nameText fn `elem` [ "print", "println_str", "putStrLn", "print_str" ]
       exprCallsPrint (EDelay e)          = exprCallsPrint e
       exprCallsPrint (ELet _ body)       = exprCallsPrint body
       exprCallsPrint _                   = False
@@ -271,6 +283,17 @@ emitProgramText prog =
         in case tconName ret of
              Just n  -> n `elem` dataNames
              Nothing -> False
+      -- True iff the def's return type is the first-class string type
+      -- ('std.string'). Used to pick kk_println_str over printf("%ld")
+      -- for the main wrapper.
+      returnsStringType d =
+        let (_, _, ret) = decomposeDefType (defType d)
+            tconName (TCon (TypeCon qn _)) = Just (nameText (qnameName qn))
+            tconName (TApp t _)            = tconName t
+            tconName (TSyn _ _ t)          = tconName t
+            tconName (TForall _ t)         = tconName t
+            tconName _                     = Nothing
+        in tconName ret == Just "string"
   in T.unlines
     [ "module {"
     , ""
@@ -294,6 +317,13 @@ emitProgramText prog =
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
+    , ""
+    , "  // First-class string runtime declarations"
+    , "  func.func private @kk_println_str(i64) -> ()"
+    , "  func.func private @kk_str_concat(i64, i64) -> i64"
+    , "  func.func private @kk_str_len(i64) -> i64"
+    , "  func.func private @kk_str_eq(i64, i64) -> i64"
+    , "  func.func private @kk_str_show_int(i64) -> i64"
     , ""
     , "  // Thunk runtime declarations (lazy evaluation)"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -707,6 +737,46 @@ emitExpr (EApp (EVar fn) [arg])
         [ "%" <> fmtName <> " = llvm.mlir.addressof @fmt_int : !llvm.ptr"
         , "llvm.call @printf(%" <> fmtName <> ", %" <> argName <> ") vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
         , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+
+-- First-class string intrinsics: lower to runtime helpers. Bridges emit
+-- these as plain EVar references; the function names below are the
+-- canonical intrinsic surface that all frontends share.
+emitExpr (EApp (EVar fn) [arg])
+  | nameText fn `elem` ["println_str", "putStrLn", "print_str"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "func.call @kk_println_str(%" <> argName <> ") : (i64) -> ()"
+        , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+  | nameText fn `elem` ["str_len", "strlen"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_len(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["show", "show_int", "str_show_int"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_show_int(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+
+emitExpr (EApp (EVar fn) [a, b])
+  | nameText fn `elem` ["str_concat", "++s", "concat_str"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["str_eq", "==s"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_eq(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
         ], resultName)
 
 -- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)

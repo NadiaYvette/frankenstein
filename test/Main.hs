@@ -543,6 +543,43 @@ mlirEmitTests = testGroup "MLIR Emission"
           (T.isInfixOf "func.func private @kk_println_con" mlir)
         assertBool "does not call printf in wrapper for ADT main"
           (not (T.isInfixOf "llvm.call @printf(%fmtaddr" mlir))
+
+  , testCase "emitProgram: String-returning main calls kk_println_str" $
+      let stringTy = TCon (TypeCon (mkQName "std" "string") KindValue)
+          body     = EApp (EVar (mkName "str_concat"))
+                          [ ELit (LitString "Hello, ")
+                          , ELit (LitString "world")
+                          ]
+          mainDef  = (mkFunDef "" "main" body stringTy)
+                       { defType = TFun [] EffectRowEmpty stringTy }
+          prog     = mkProgram "" "p" [mainDef]
+          mlir     = emitProgram prog
+      in do
+        assertBool "declares kk_println_str prototype"
+          (T.isInfixOf "func.func private @kk_println_str" mlir)
+        assertBool "declares kk_str_concat prototype"
+          (T.isInfixOf "func.func private @kk_str_concat" mlir)
+        assertBool "main wrapper calls kk_println_str"
+          (T.isInfixOf "func.call @kk_println_str" mlir)
+        assertBool "body calls kk_str_concat"
+          (T.isInfixOf "func.call @kk_str_concat" mlir)
+        assertBool "emits string literal globals"
+          (T.isInfixOf "llvm.mlir.global internal constant @str_" mlir)
+        assertBool "does not use kk_println_con for string main"
+          (not (T.isInfixOf "func.call @kk_println_con(%result)" mlir))
+
+  , testCase "emitProgram: show intrinsic lowers to kk_str_show_int" $
+      let stringTy = TCon (TypeCon (mkQName "std" "string") KindValue)
+          body     = EApp (EVar (mkName "show")) [ELit (LitInt 42)]
+          mainDef  = (mkFunDef "" "main" body stringTy)
+                       { defType = TFun [] EffectRowEmpty stringTy }
+          prog     = mkProgram "" "p" [mainDef]
+          mlir     = emitProgram prog
+      in do
+        assertBool "calls kk_str_show_int"
+          (T.isInfixOf "func.call @kk_str_show_int" mlir)
+        assertBool "main wrapper uses kk_println_str"
+          (T.isInfixOf "func.call @kk_println_str" mlir)
   ]
 
 -------------------------------------------------------------------------------

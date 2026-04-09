@@ -538,6 +538,17 @@ runtimeNames = Set.fromList
   , "str_flatten", "flatten"
   , "bytes_index", "byte_at"
   , "show", "show_int", "str_show_int"
+  -- File I/O, process, environment intrinsics (libc-backed)
+  , "read_file", "readFile"
+  , "write_file", "writeFile"
+  , "file_exists", "fileExists"
+  , "read_line", "getLine"
+  , "system", "shell"
+  , "getenv", "getEnv"
+  -- IORef intrinsics (mutable single-cell, kk_ref_* runtime)
+  , "new_ref", "newIORef", "ref"
+  , "get_ref", "readIORef", "deref"
+  , "set_ref", "writeIORef"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

@@ -627,6 +627,46 @@ mlirEmitTests = testGroup "MLIR Emission"
           (T.isInfixOf "func.call @kk_str_concat" mlir)
         assertBool "bytes_len → kk_str_len"
           (T.isInfixOf "func.call @kk_str_len" mlir)
+
+  , testCase "emitProgram: read_file lowers to kk_read_file" $
+      let intTy   = TCon (TypeCon (mkQName "std" "int") KindValue)
+          body    = EApp (EVar (mkName "read_file")) [ELit (LitString "/etc/hostname")]
+          mainDef = (mkFunDef "" "main" body intTy)
+                       { defType = TFun [] EffectRowEmpty intTy }
+          prog    = mkProgram "" "p" [mainDef]
+          mlir    = emitProgram prog
+      in assertBool "calls kk_read_file"
+           (T.isInfixOf "func.call @kk_read_file(" mlir)
+
+  , testCase "emitProgram: write_file lowers to kk_write_file" $
+      let intTy   = TCon (TypeCon (mkQName "std" "int") KindValue)
+          body    = EApp (EVar (mkName "write_file"))
+                         [ELit (LitString "/tmp/x"), ELit (LitString "hi")]
+          mainDef = (mkFunDef "" "main" body intTy)
+                       { defType = TFun [] EffectRowEmpty intTy }
+          prog    = mkProgram "" "p" [mainDef]
+          mlir    = emitProgram prog
+      in assertBool "calls kk_write_file"
+           (T.isInfixOf "func.call @kk_write_file(" mlir)
+
+  , testCase "emitProgram: IORef new/get/set lower to kk_ref_*" $
+      let intTy   = TCon (TypeCon (mkQName "std" "int") KindValue)
+          litZero = ELit (LitInt 0)
+          litOne  = ELit (LitInt 1)
+          newRef  = EApp (EVar (mkName "new_ref")) [litZero]
+          bind    = Bind (mkName "r") intTy newRef DefVal
+          letBind = ELet [[bind]]
+                         (EApp (EVar (mkName "set_ref"))
+                               [EVar (mkName "r"), litOne])
+          mainDef = (mkFunDef "" "main" letBind intTy)
+                       { defType = TFun [] EffectRowEmpty intTy }
+          prog    = mkProgram "" "p" [mainDef]
+          mlir    = emitProgram prog
+      in do
+        assertBool "calls kk_ref_new"
+          (T.isInfixOf "func.call @kk_ref_new(" mlir)
+        assertBool "calls kk_ref_set"
+          (T.isInfixOf "func.call @kk_ref_set(" mlir)
   ]
 
 -------------------------------------------------------------------------------

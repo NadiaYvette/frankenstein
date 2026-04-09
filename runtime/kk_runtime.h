@@ -85,4 +85,30 @@ int64_t kk_bytes_concat(int64_t a, int64_t b);
 int64_t kk_bytes_index(int64_t b, int64_t i);
 int64_t kk_bytes_eq(int64_t a, int64_t b);
 
+/* File I/O — paths and contents are first-class strings.
+ *
+ * read_file slurps the whole file into a freshly-allocated owned LEAF.
+ * write_file flattens the contents into a contiguous buffer and writes
+ * it atomically with a single fwrite. Both return 0 on success, -1 on
+ * failure (read_file returns 0 as a "string" only if you check first
+ * via file_exists; on error it returns the empty string).
+ */
+int64_t kk_read_file(int64_t path_str);     /* string -> string */
+int64_t kk_write_file(int64_t path_str, int64_t content_str);  /* -> 0/-1 */
+int64_t kk_file_exists(int64_t path_str);   /* -> 0/1 */
+int64_t kk_read_line(void);                 /* stdin -> string (no newline) */
+
+/* Process / environment */
+int64_t kk_system(int64_t cmd_str);         /* -> exit code */
+int64_t kk_getenv(int64_t name_str);        /* -> string ("" if unset) */
+
+/* IORef — single-field mutable cell, allocated as a kk_alloc_con box.
+ * The cell holds an int64_t which may be a scalar or another boxed pointer.
+ * Refcounting is the caller's responsibility (Perceus inserts retain/drop
+ * around the cell itself; the contents are treated opaquely).
+ */
+int64_t kk_ref_new(int64_t initial);
+int64_t kk_ref_get(int64_t ref);
+int64_t kk_ref_set(int64_t ref, int64_t value);  /* returns 0 */
+
 #endif /* KK_RUNTIME_H */

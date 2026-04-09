@@ -540,6 +540,51 @@ int64_t kk_getenv(int64_t name_str) {
     return (int64_t)kk_str_alloc_leaf(val, n, 0);
 }
 
+/* ---- Command-line arguments ----
+ *
+ * The main() wrapper stashes argc/argv into these globals at program
+ * start. Programs read them through the intrinsics args_count / args_get,
+ * which excludes argv[0] (the program name) — matching Haskell's
+ * System.Environment.getArgs. The program name is available separately
+ * through args_progname.
+ */
+static int   kk_g_argc = 0;
+static char** kk_g_argv = NULL;
+
+void kk_args_init(int argc, char** argv) {
+    kk_g_argc = argc;
+    kk_g_argv = argv;
+}
+
+int64_t kk_args_count(void) {
+    return (int64_t)(kk_g_argc > 0 ? kk_g_argc - 1 : 0);
+}
+
+int64_t kk_args_get(int64_t i) {
+    /* Map i in [0..argc-2] to argv[i+1]. Out-of-range returns empty. */
+    if (i < 0 || i >= (int64_t)(kk_g_argc - 1)) return kk_string_empty();
+    const char* s = kk_g_argv[i + 1];
+    int64_t n = 0;
+    while (s[n] != '\0') n++;
+    /* Borrow argv memory — it's process-lifetime. */
+    return (int64_t)kk_str_alloc_leaf(s, n, 0);
+}
+
+int64_t kk_args_progname(void) {
+    if (kk_g_argc <= 0 || kk_g_argv == NULL) return kk_string_empty();
+    const char* s = kk_g_argv[0];
+    int64_t n = 0;
+    while (s[n] != '\0') n++;
+    return (int64_t)kk_str_alloc_leaf(s, n, 0);
+}
+
+/* Exit the process with the given status code. Wrapped so callers can
+ * use it as an i64 intrinsic from MLIR without pulling in an llvm.func
+ * declaration for libc exit(). */
+void kk_exit(int64_t code) {
+    exit((int)code);
+}
+
 /* IORef — single-field mutable cell allocated as a kk_alloc_con box.
  * Tag is "REF0"; payload index 0 holds the current value. */
 #define KK_REF_TAG 0x52454630

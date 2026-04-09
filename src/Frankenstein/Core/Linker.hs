@@ -545,6 +545,11 @@ runtimeNames = Set.fromList
   , "read_line", "getLine"
   , "system", "shell"
   , "getenv", "getEnv"
+  -- Command-line arguments and process exit
+  , "args_count", "numArgs"
+  , "args_get", "getArg"
+  , "args_progname", "getProgName"
+  , "exitWith"  -- "exit" is already listed above as a libc builtin
   -- IORef intrinsics (mutable single-cell, kk_ref_* runtime)
   , "new_ref", "newIORef", "ref"
   , "get_ref", "readIORef", "deref"

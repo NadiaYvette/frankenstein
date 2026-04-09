@@ -230,36 +230,39 @@ emitProgramText prog =
                               && returnsDataType prog d) defs
       mainReturnsString = any (\d -> nameText (qnameName (defName d)) == "main"
                                   && returnsStringType d) defs
+      -- The @main wrapper takes (argc, argv) and hands them off to
+      -- kk_args_init so programs can read command-line arguments via
+      -- the args_count / args_get intrinsics.
+      mainHeader =
+        [ "  func.func @main(%argc: i32, %argv: !llvm.ptr) -> i32 {"
+        , "    func.call @kk_args_init(%argc, %argv) : (i32, !llvm.ptr) -> ()"
+        ]
       mainWrapper = if hasMain
         then if mainPrints
-          then T.unlines
-            [ "  func.func @main() -> i32 {"
-            , "    func.call @_frankenstein_main() : () -> i64"
+          then T.unlines $ mainHeader ++
+            [ "    func.call @_frankenstein_main() : () -> i64"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
             ]
           else if mainReturnsString
-          then T.unlines
-            [ "  func.func @main() -> i32 {"
-            , "    %result = func.call @_frankenstein_main() : () -> i64"
+          then T.unlines $ mainHeader ++
+            [ "    %result = func.call @_frankenstein_main() : () -> i64"
             , "    func.call @kk_println_str(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
             ]
           else if mainReturnsADT
-          then T.unlines
-            [ "  func.func @main() -> i32 {"
-            , "    %result = func.call @_frankenstein_main() : () -> i64"
+          then T.unlines $ mainHeader ++
+            [ "    %result = func.call @_frankenstein_main() : () -> i64"
             , "    func.call @kk_println_con(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
             ]
-          else T.unlines
-            [ "  func.func @main() -> i32 {"
-            , "    %result = func.call @_frankenstein_main() : () -> i64"
+          else T.unlines $ mainHeader ++
+            [ "    %result = func.call @_frankenstein_main() : () -> i64"
             , "    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr"
             , "    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
             , "    %zero = arith.constant 0 : i32"
@@ -349,6 +352,11 @@ emitProgramText prog =
     , "  func.func private @kk_read_line() -> i64"
     , "  func.func private @kk_system(i64) -> i64"
     , "  func.func private @kk_getenv(i64) -> i64"
+    , "  func.func private @kk_args_count() -> i64"
+    , "  func.func private @kk_args_get(i64) -> i64"
+    , "  func.func private @kk_args_progname() -> i64"
+    , "  func.func private @kk_args_init(i32, !llvm.ptr) -> ()"
+    , "  func.func private @kk_exit(i64) -> ()"
     , ""
     , "  // IORef runtime declarations (mutable single-cell)"
     , "  func.func private @kk_ref_new(i64) -> i64"
@@ -848,12 +856,36 @@ emitExpr (EApp (EVar fn) [arg])
         [ "%" <> resultName <> " = func.call @kk_ref_get(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
 
--- Zero-arg intrinsics (e.g. stdin read_line)
+-- Zero-arg intrinsics (e.g. stdin read_line, args_count)
 emitExpr (EApp (EVar fn) [])
   | nameText fn `elem` ["read_line", "getLine"] = do
       resultName <- freshName "v"
       pure ( [ "%" <> resultName <> " = func.call @kk_read_line() : () -> i64" ]
            , resultName)
+  | nameText fn `elem` ["args_count", "numArgs"] = do
+      resultName <- freshName "v"
+      pure ( [ "%" <> resultName <> " = func.call @kk_args_count() : () -> i64" ]
+           , resultName)
+  | nameText fn `elem` ["args_progname", "getProgName"] = do
+      resultName <- freshName "v"
+      pure ( [ "%" <> resultName <> " = func.call @kk_args_progname() : () -> i64" ]
+           , resultName)
+
+-- Single-arg command-line / exit intrinsics
+emitExpr (EApp (EVar fn) [arg])
+  | nameText fn `elem` ["args_get", "getArg"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_args_get(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["exit", "exitWith"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "func.call @kk_exit(%" <> argName <> ") : (i64) -> ()"
+        , "%" <> resultName <> " = arith.constant 0 : i64  // unreachable (exit)"
+        ], resultName)
 
 emitExpr (EApp (EVar fn) [a, b])
   | nameText fn `elem` ["str_concat", "++s", "concat_str", "bytes_concat"] = do

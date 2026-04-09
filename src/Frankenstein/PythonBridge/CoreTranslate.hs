@@ -5,8 +5,11 @@
 -- subset we currently support (integer arithmetic, comparisons, ints
 -- as truthiness). Booleans use the standard 0/1 convention.
 --
--- Effects: Python's @raise@ would map to the @exn@ effect, but the
--- supported subset is exception-free, so all definitions are pure.
+-- Effects: Python's @raise expr@ becomes 'EPerform' on the single-op
+-- @exn@ effect, and @try: ... except: ...@ becomes an 'EHandle' wrapping
+-- the try-body with a handler lambda whose single 'int' parameter is
+-- the exception value. Only a bare @except:@ clause is supported in this
+-- subset (no type matching, no @as@ binding, no @else@/@finally@).
 -- Multiplicity is 'Many' (Python is GC'd / reference-shared).
 
 module Frankenstein.PythonBridge.CoreTranslate
@@ -36,9 +39,9 @@ translatePythonAst modName sexpr = do
   defs <- mapM (translateTopLevel modName classNameTexts) fnStmts
   pure Program
     { progName    = QName modName (Name "main" 0)
-    , progDefs    = defs
+    , progDefs    = pythonExnDefault : defs
     , progData    = datas
-    , progEffects = []
+    , progEffects = pythonEffects
     }
 
 -- | Walk the @(Module ...)@ form and split top-level statements into
@@ -144,6 +147,23 @@ translateBlock classes (s:ss) = case s of
       , Branch (PatWild intT)      Nothing thenE
       ]
 
+  -- raise <expr>: lower to a perform on the exn effect's single op.
+  -- Treated like `return`: any statements after a raise are dead code.
+  SList [SAtom "Raise", excE] -> do
+    exc <- translateExpr classes excE
+    pure $ EPerform (QName "exn" (Name "raise" 0)) [exc]
+
+  -- try: <body> except: <handler>: wrap body in an EHandle whose handler
+  -- lambda receives the raised value (an int code in this subset).
+  SList [SAtom "Try", SList tryStmts, SList exceptStmts] -> do
+    tryBody     <- translateBlock classes tryStmts
+    handlerBody <- translateBlock classes exceptStmts
+    rest        <- translateBlock classes ss
+    let handler = ELam [(Name "exc" 0, intT)] handlerBody
+        handled = EHandle exnEffectRow handler tryBody
+    -- Sequence the handled expression with whatever follows the try.
+    pure $ ELet [[Bind (Name "_try" 0) intT handled DefVal]] rest
+
   _ -> translateBlock classes ss  -- skip unsupported non-final stmts silently
 
 -- | Translate a statement that is the *last* statement in a block.
@@ -167,6 +187,16 @@ translateStmtTail classes s = case s of
     pure $ ELet [[Bind (Name nm 0) intT val DefVal]] (EVar (Name nm 0))
 
   SList [SAtom "ExprStmt", e] -> translateExpr classes e
+
+  SList [SAtom "Raise", excE] -> do
+    exc <- translateExpr classes excE
+    pure $ EPerform (QName "exn" (Name "raise" 0)) [exc]
+
+  SList [SAtom "Try", SList tryStmts, SList exceptStmts] -> do
+    tryBody     <- translateBlock classes tryStmts
+    handlerBody <- translateBlock classes exceptStmts
+    let handler = ELam [(Name "exc" 0, intT)] handlerBody
+    pure $ EHandle exnEffectRow handler tryBody
 
   other -> Left $ "Unsupported tail statement: " <> T.pack (showHead other)
 
@@ -241,6 +271,41 @@ pyCmpOp op      = Left $ "Unsupported comparison operator: " <> op
 
 intT :: Type
 intT = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+
+-- | The effect row used by Python's try/except sugar. Single-op @exn@
+-- effect; the row's QName flattens to @\"exn\"@ so it matches the
+-- @qnameModule@ of the @raise@ op (see 'Frankenstein.Core.Evidence').
+exnEffectRow :: EffectRow
+exnEffectRow = EffectRowExtend (QName "" (Name "exn" 0)) EffectRowEmpty
+
+-- | Effect declarations Python programs are translated against. We expose
+-- a single-op @exn@ effect with one operation, @raise :: int -> int@.
+-- The flattened name (@\"exn\"@) must match what 'effectRowName' produces
+-- for 'exnEffectRow' so the evidence pass can find this declaration.
+pythonEffects :: [EffectDecl]
+pythonEffects =
+  [ EffectDecl
+      { effectName  = QName "" (Name "exn" 0)
+      , effectParams = []
+      , effectOps   =
+          [ OpDecl (QName "exn" (Name "raise" 0))
+                   (TFun [(Many, intT)] EffectRowEmpty intT)
+          ]
+      }
+  ]
+
+-- | Default handler for an unhandled Python @raise@: returns 0. The
+-- evidence pass synthesises a call to a function literally named
+-- @\"<eff>_<op>\"@ when no handler is in scope, so this Def must be
+-- named @exn_raise@ to satisfy that fallthrough.
+pythonExnDefault :: Def
+pythonExnDefault = Def
+  { defName       = QName "" (Name "exn_raise" 0)
+  , defType       = TFun [(Many, intT)] EffectRowEmpty intT
+  , defExpr       = ELam [(Name "exc" 0, intT)] (ELit (LitInt 0))
+  , defSort       = DefFun
+  , defVisibility = Public
+  }
 
 expectStr :: PySExpr -> Either Text Text
 expectStr (SStr s) = Right s

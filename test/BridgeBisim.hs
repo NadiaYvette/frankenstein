@@ -205,7 +205,48 @@ pythonBisimTests = testGroup "Python Bridge"
       _ <- findDefOrFail "factorial" prog
       _ <- findDefOrFail "main" prog
       pure ()
+
+  , testCase "structural: raise.py produces EHandle/EPerform" $ do
+      prog <- compilePython "examples/raise.py"
+      def  <- findDefOrFail "main" prog
+      assertBool "main should contain an EHandle"
+        (containsEHandle (defExpr def))
+      assertBool "main should contain an EPerform"
+        (containsEPerform (defExpr def))
+
+  , testCase "structural: pythonEffects declares the exn effect" $ do
+      prog <- compilePython "examples/raise.py"
+      assertBool "progEffects should declare exn"
+        (any (\ed -> nameText (qnameName (effectName ed)) == "exn")
+             (progEffects prog))
+
+  , testCase "structural: default exn_raise handler is synthesised" $ do
+      prog <- compilePython "examples/raise.py"
+      _ <- findDefOrFail "exn_raise" prog
+      pure ()
   ]
+
+-- | True if @e@ contains any 'EHandle' subterm.
+containsEHandle :: Expr -> Bool
+containsEHandle e = case e of
+  EHandle{}      -> True
+  ELam _ b       -> containsEHandle b
+  EApp f as      -> containsEHandle f || any containsEHandle as
+  ELet bs b      -> any (any (containsEHandle . bindExpr)) bs || containsEHandle b
+  ECase s bs     -> containsEHandle s || any (containsEHandle . branchBody) bs
+  EPerform _ as  -> any containsEHandle as
+  _              -> False
+
+-- | True if @e@ contains any 'EPerform' subterm.
+containsEPerform :: Expr -> Bool
+containsEPerform e = case e of
+  EPerform{}     -> True
+  ELam _ b       -> containsEPerform b
+  EApp f as      -> containsEPerform f || any containsEPerform as
+  ELet bs b      -> any (any (containsEPerform . bindExpr)) bs || containsEPerform b
+  ECase s bs     -> containsEPerform s || any (containsEPerform . branchBody) bs
+  EHandle _ h b  -> containsEPerform h || containsEPerform b
+  _              -> False
 
 compilePython :: FilePath -> IO Program
 compilePython relPath = do

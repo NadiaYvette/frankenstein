@@ -23,6 +23,9 @@ plus simple records):
   Name(id)
   Attr(value, attr)                -- value.attr
   Call(callee_name, args)          -- callee must be a bare Name
+  Raise(expr)                      -- raise expr (expr is required)
+  Try(body-stmts, except-stmts)    -- single bare `except:` only;
+                                   --   no type, no `as`, no else/finally
 
 Anything else raises NotImplementedError.
 """
@@ -140,6 +143,31 @@ def emit(node: ast.AST) -> str:
 
     if isinstance(node, ast.Attribute):
         return f"(Attr {emit(node.value)} {quote(node.attr)})"
+
+    if isinstance(node, ast.Raise):
+        if node.exc is None:
+            raise NotImplementedError("bare `raise` (no expression) not supported")
+        if node.cause is not None:
+            raise NotImplementedError("`raise X from Y` not supported")
+        return f"(Raise {emit(node.exc)})"
+
+    if isinstance(node, ast.Try):
+        # MVP: exactly one bare `except:` clause, no `as`, no else/finally.
+        if node.orelse:
+            raise NotImplementedError("try/except `else:` clause not supported")
+        if node.finalbody:
+            raise NotImplementedError("try/except `finally:` clause not supported")
+        if len(node.handlers) != 1:
+            raise NotImplementedError("only a single `except:` handler supported")
+        h = node.handlers[0]
+        if h.type is not None:
+            raise NotImplementedError(
+                "typed `except SomeError:` not supported — use bare `except:`")
+        if h.name is not None:
+            raise NotImplementedError("`except ... as e:` binding not supported")
+        body = "(" + " ".join(emit(s) for s in node.body) + ")"
+        handler = "(" + " ".join(emit(s) for s in h.body) + ")"
+        return f"(Try {body} {handler})"
 
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name):

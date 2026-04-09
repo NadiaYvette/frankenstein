@@ -21,7 +21,10 @@ import Frankenstein.MlirEmit.Dialects (MlirOp(..), renderOp)
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
+import qualified Data.ByteString as BS
+import Data.Word (Word8)
 import Data.IORef
 import System.Process (readProcessWithExitCode, readProcess)
 import System.Exit (ExitCode(..))
@@ -318,12 +321,26 @@ emitProgramText prog =
     , "  func.func private @kk_field(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
     , ""
-    , "  // First-class string runtime declarations"
+    , "  // First-class string runtime declarations (rope, UTF-8)"
+    , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
+    , "  func.func private @kk_string_from_cstr(i64) -> i64"
+    , "  func.func private @kk_string_empty() -> i64"
     , "  func.func private @kk_println_str(i64) -> ()"
+    , "  func.func private @kk_print_str(i64) -> ()"
     , "  func.func private @kk_str_concat(i64, i64) -> i64"
     , "  func.func private @kk_str_len(i64) -> i64"
+    , "  func.func private @kk_str_char_len(i64) -> i64"
     , "  func.func private @kk_str_eq(i64, i64) -> i64"
+    , "  func.func private @kk_str_flatten(i64) -> i64"
     , "  func.func private @kk_str_show_int(i64) -> i64"
+    , "  func.func private @kk_str_retain(i64) -> ()"
+    , "  func.func private @kk_str_drop(i64) -> ()"
+    , "  // ByteString runtime declarations (byte-oriented)"
+    , "  func.func private @kk_bytes_from_literal(i64, i64) -> i64"
+    , "  func.func private @kk_bytes_len(i64) -> i64"
+    , "  func.func private @kk_bytes_concat(i64, i64) -> i64"
+    , "  func.func private @kk_bytes_index(i64, i64) -> i64"
+    , "  func.func private @kk_bytes_eq(i64, i64) -> i64"
     , ""
     , "  // Thunk runtime declarations (lazy evaluation)"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -540,12 +557,17 @@ emitExpr (ELit (LitString s)) = do
   globalName <- addStringLit s
   ptrName <- freshName "v"
   intName <- freshName "v"
-  -- Convert to i64 immediately so string values flow uniformly as i64
-  -- through call/return boundaries; callers that need a ptr can inttoptr.
+  lenName <- freshName "v"
+  strName <- freshName "v"
+  -- Wrap the static .rodata bytes in a kk_string_t leaf via the runtime.
+  -- byte_len is the UTF-8 byte length, not the Char count.
+  let byteLen = BS.length (TE.encodeUtf8 s)
   pure ( [ "%" <> ptrName <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"
          , "%" <> intName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
+         , "%" <> lenName <> " = arith.constant " <> T.pack (show byteLen) <> " : i64"
+         , "%" <> strName <> " = func.call @kk_string_from_literal(%" <> intName <> ", %" <> lenName <> ") : (i64, i64) -> i64"
          ]
-       , intName)
+       , strName)
 
 emitExpr (EVar n) = do
   -- Variable reference — look up in alias map; if not found and not a known
@@ -750,11 +772,23 @@ emitExpr (EApp (EVar fn) [arg])
         [ "func.call @kk_println_str(%" <> argName <> ") : (i64) -> ()"
         , "%" <> resultName <> " = arith.constant 0 : i64"
         ], resultName)
-  | nameText fn `elem` ["str_len", "strlen"] = do
+  | nameText fn `elem` ["str_len", "strlen", "bytes_len"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_len(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["str_char_len", "char_len", "char_count", "length"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_char_len(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["str_flatten", "flatten"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_flatten(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   | nameText fn `elem` ["show", "show_int", "str_show_int"] = do
       (argOps, argName) <- emitExpr arg
@@ -764,19 +798,26 @@ emitExpr (EApp (EVar fn) [arg])
         ], resultName)
 
 emitExpr (EApp (EVar fn) [a, b])
-  | nameText fn `elem` ["str_concat", "++s", "concat_str"] = do
+  | nameText fn `elem` ["str_concat", "++s", "concat_str", "bytes_concat"] = do
       (aOps, aName) <- emitExpr a
       (bOps, bName) <- emitExpr b
       resultName <- freshName "v"
       pure (aOps ++ bOps ++
         [ "%" <> resultName <> " = func.call @kk_str_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["str_eq", "==s"] = do
+  | nameText fn `elem` ["str_eq", "==s", "bytes_eq"] = do
       (aOps, aName) <- emitExpr a
       (bOps, bName) <- emitExpr b
       resultName <- freshName "v"
       pure (aOps ++ bOps ++
         [ "%" <> resultName <> " = func.call @kk_str_eq(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["bytes_index", "byte_at"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_bytes_index(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
         ], resultName)
 
 -- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)
@@ -1760,19 +1801,19 @@ nameToSsa n
   where t = nameText n
 
 -- | Escape a string for MLIR string literal (handle backslashes, quotes, newlines)
+-- | Escape a Text into MLIR's string-literal byte format. We iterate over
+-- UTF-8 *bytes*, not Unicode codepoints, so multi-byte chars are emitted
+-- as the correct sequence of \HH escapes — matching the byte length the
+-- runtime sees from kk_string_from_literal.
 escapeMLIRString :: Text -> Text
-escapeMLIRString = T.concatMap escChar
+escapeMLIRString t = T.concat (map escByte (BS.unpack (TE.encodeUtf8 t)))
   where
-    escChar '\\' = "\\\\"
-    escChar '"'  = "\\22"
-    escChar '\n' = "\\0A"
-    escChar '\r' = "\\0D"
-    escChar '\t' = "\\09"
-    escChar c
-      | c < ' ' || c > '~' =
-          let h = T.pack (printf "%02X" (fromEnum c :: Int))
-          in "\\" <> h
-      | otherwise = T.singleton c
+    escByte :: Word8 -> Text
+    escByte 0x5C = "\\\\"           -- backslash
+    escByte 0x22 = "\\22"           -- double quote
+    escByte b
+      | b >= 0x20 && b < 0x7F = T.singleton (toEnum (fromIntegral b))
+      | otherwise = T.pack ('\\' : printf "%02X" b)
 
 -- | Full compilation pipeline
 compileToExecutable :: EmitConfig -> Program -> IO (Either Text FilePath)

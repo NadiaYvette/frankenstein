@@ -161,64 +161,202 @@ void kk_println_con(int64_t v) {
     printf("\n");
 }
 
-/* First-class strings.
+/* First-class strings — rope-based, UTF-8.
  *
- * Representation: int64_t holding the address of a NUL-terminated char*.
- * Literals live in .rodata (llvm.mlir.global constant); helpers that
- * produce new strings malloc fresh buffers and return them. We do not
- * refcount strings here — a real implementation would track ownership
- * via the Perceus pass, but this is enough to demonstrate Text/String
- * flowing as values through the pipeline.
+ * A Frankenstein string is a heap-allocated kk_string_t header. The
+ * header carries a refcount and either a leaf (a contiguous UTF-8
+ * byte run, owned or borrowed) or a concat node (two child strings).
+ *
+ *   LEAF   { bytes, byte_len, owns_bytes }
+ *   CONCAT { left,  right,    cached_len }
+ *
+ * - kk_str_concat is O(1): it allocates one CONCAT header.
+ * - kk_str_len is O(1): the total byte length is cached in the header.
+ * - kk_str_char_len is O(n): walks the rope, counts UTF-8 lead bytes.
+ * - kk_str_flatten collapses a rope into a single owned LEAF.
+ * - kk_println_str fast-paths a leaf via fwrite; ropes are flattened
+ *   into a temporary buffer.
+ *
+ * Refcounting follows the same Perceus discipline as boxed values:
+ * each header starts at rc=1; kk_str_retain bumps it; kk_str_drop
+ * decrements and, on zero, recursively drops children and frees
+ * owned byte buffers. Static literals use owns_bytes=0 so the
+ * .rodata buffer is never freed.
+ *
+ * ByteStrings reuse the same kk_string_t representation but expose
+ * a byte-oriented API (random byte indexing, no UTF-8 awareness).
  */
 
-void kk_println_str(int64_t s) {
-    const char* p = (const char*)s;
-    if (p == NULL) {
-        printf("\n");
+#define KK_STR_LEAF   0
+#define KK_STR_CONCAT 1
+
+typedef struct kk_string_s kk_string_t;
+struct kk_string_s {
+    int64_t  rc;          /* refcount (Perceus) */
+    int64_t  byte_len;    /* total UTF-8 byte length, cached */
+    int32_t  kind;        /* KK_STR_LEAF | KK_STR_CONCAT */
+    int32_t  owns_bytes;  /* leaf only: 1 → free(bytes) on drop */
+    union {
+        const char* bytes;                              /* LEAF */
+        struct { kk_string_t* l; kk_string_t* r; } cat; /* CONCAT */
+    } u;
+};
+
+/* Forward declarations (the public header isn't included in this TU). */
+int64_t kk_string_empty(void);
+void    kk_str_drop(int64_t s_i);
+
+static kk_string_t* kk_str_alloc_leaf(const char* bytes, int64_t byte_len, int owns) {
+    kk_string_t* s = (kk_string_t*)malloc(sizeof(kk_string_t));
+    if (!s) return NULL;
+    s->rc         = 1;
+    s->byte_len   = byte_len;
+    s->kind       = KK_STR_LEAF;
+    s->owns_bytes = owns;
+    s->u.bytes    = bytes;
+    return s;
+}
+
+static kk_string_t* kk_str_alloc_concat(kk_string_t* l, kk_string_t* r) {
+    kk_string_t* s = (kk_string_t*)malloc(sizeof(kk_string_t));
+    if (!s) return NULL;
+    s->rc         = 1;
+    s->byte_len   = (l ? l->byte_len : 0) + (r ? r->byte_len : 0);
+    s->kind       = KK_STR_CONCAT;
+    s->owns_bytes = 0;
+    s->u.cat.l    = l;
+    s->u.cat.r    = r;
+    return s;
+}
+
+int64_t kk_string_from_literal(int64_t bytes_ptr, int64_t byte_len) {
+    return (int64_t)kk_str_alloc_leaf((const char*)bytes_ptr, byte_len, 0);
+}
+
+int64_t kk_string_from_cstr(int64_t cstr_ptr) {
+    const char* p = (const char*)cstr_ptr;
+    if (p == NULL) return kk_string_empty();
+    int64_t n = 0;
+    while (p[n] != '\0') n++;
+    return (int64_t)kk_str_alloc_leaf(p, n, 0);
+}
+
+int64_t kk_string_empty(void) {
+    return (int64_t)kk_str_alloc_leaf("", 0, 0);
+}
+
+int64_t kk_str_len(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    if (s == NULL) return 0;
+    return s->byte_len;
+}
+
+/* Walk a rope leaf-by-leaf, counting UTF-8 codepoints (lead bytes). */
+static int64_t kk_str_char_count_rec(kk_string_t* s) {
+    if (s == NULL) return 0;
+    if (s->kind == KK_STR_LEAF) {
+        const unsigned char* p = (const unsigned char*)s->u.bytes;
+        int64_t count = 0;
+        for (int64_t i = 0; i < s->byte_len; i++) {
+            /* Continuation bytes start with 0b10xxxxxx */
+            if ((p[i] & 0xC0) != 0x80) count++;
+        }
+        return count;
+    }
+    return kk_str_char_count_rec(s->u.cat.l) + kk_str_char_count_rec(s->u.cat.r);
+}
+
+int64_t kk_str_char_len(int64_t s_i) {
+    return kk_str_char_count_rec((kk_string_t*)s_i);
+}
+
+int64_t kk_str_concat(int64_t a_i, int64_t b_i) {
+    kk_string_t* a = (kk_string_t*)a_i;
+    kk_string_t* b = (kk_string_t*)b_i;
+    if (a == NULL || a->byte_len == 0) {
+        if (a != NULL) kk_str_drop(a_i);
+        return b_i;
+    }
+    if (b == NULL || b->byte_len == 0) {
+        if (b != NULL) kk_str_drop(b_i);
+        return a_i;
+    }
+    return (int64_t)kk_str_alloc_concat(a, b);
+}
+
+/* Copy a rope into a contiguous buffer at *out, advancing *out. */
+static void kk_str_copy_into(kk_string_t* s, char** out) {
+    if (s == NULL) return;
+    if (s->kind == KK_STR_LEAF) {
+        for (int64_t i = 0; i < s->byte_len; i++) (*out)[i] = s->u.bytes[i];
+        *out += s->byte_len;
     } else {
-        printf("%s\n", p);
+        kk_str_copy_into(s->u.cat.l, out);
+        kk_str_copy_into(s->u.cat.r, out);
     }
 }
 
-int64_t kk_str_len(int64_t s) {
-    const char* p = (const char*)s;
-    if (p == NULL) return 0;
-    size_t n = 0;
-    while (p[n] != '\0') n++;
-    return (int64_t)n;
+int64_t kk_str_flatten(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    if (s == NULL) return kk_string_empty();
+    if (s->kind == KK_STR_LEAF) return s_i;
+    int64_t n = s->byte_len;
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) return 0;
+    char* p = buf;
+    kk_str_copy_into(s, &p);
+    buf[n] = '\0';
+    return (int64_t)kk_str_alloc_leaf(buf, n, 1);
 }
 
-int64_t kk_str_concat(int64_t a, int64_t b) {
-    const char* pa = (const char*)a;
-    const char* pb = (const char*)b;
-    if (pa == NULL) pa = "";
-    if (pb == NULL) pb = "";
-    size_t la = 0; while (pa[la]) la++;
-    size_t lb = 0; while (pb[lb]) lb++;
-    char* out = (char*)malloc(la + lb + 1);
-    if (!out) return 0;
-    for (size_t i = 0; i < la; i++) out[i]      = pa[i];
-    for (size_t i = 0; i < lb; i++) out[la + i] = pb[i];
-    out[la + lb] = '\0';
-    return (int64_t)out;
+void kk_print_str(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    if (s == NULL) return;
+    if (s->kind == KK_STR_LEAF) {
+        if (s->byte_len > 0) fwrite(s->u.bytes, 1, (size_t)s->byte_len, stdout);
+        return;
+    }
+    /* Rope: flatten through a temporary buffer (no header allocation). */
+    int64_t n = s->byte_len;
+    char* buf = (char*)malloc((size_t)n);
+    if (!buf) return;
+    char* p = buf;
+    kk_str_copy_into(s, &p);
+    fwrite(buf, 1, (size_t)n, stdout);
+    free(buf);
 }
 
-int64_t kk_str_eq(int64_t a, int64_t b) {
-    const char* pa = (const char*)a;
-    const char* pb = (const char*)b;
-    if (pa == pb) return 1;
-    if (pa == NULL || pb == NULL) return 0;
-    size_t i = 0;
-    while (pa[i] != '\0' && pa[i] == pb[i]) i++;
-    return (pa[i] == pb[i]) ? 1 : 0;
+void kk_println_str(int64_t s_i) {
+    kk_print_str(s_i);
+    putchar('\n');
+}
+
+int64_t kk_str_eq(int64_t a_i, int64_t b_i) {
+    kk_string_t* a = (kk_string_t*)a_i;
+    kk_string_t* b = (kk_string_t*)b_i;
+    if (a == b) return 1;
+    int64_t la = (a ? a->byte_len : 0);
+    int64_t lb = (b ? b->byte_len : 0);
+    if (la != lb) return 0;
+    if (la == 0) return 1;
+    /* Flatten both into temporaries and compare. A smarter implementation
+     * would walk both ropes lazily; for now this is correct and simple. */
+    char* fa = (char*)malloc((size_t)la);
+    char* fb = (char*)malloc((size_t)lb);
+    if (!fa || !fb) { free(fa); free(fb); return 0; }
+    char* pa = fa; kk_str_copy_into(a, &pa);
+    char* pb = fb; kk_str_copy_into(b, &pb);
+    int eq = 1;
+    for (int64_t i = 0; i < la; i++) {
+        if (fa[i] != fb[i]) { eq = 0; break; }
+    }
+    free(fa);
+    free(fb);
+    return eq;
 }
 
 int64_t kk_str_show_int(int64_t n) {
-    /* Worst case: 20 digits + sign + NUL = 22 bytes */
-    char* buf = (char*)malloc(24);
-    if (!buf) return 0;
-    /* snprintf-free: format the integer manually so we don't need <stdio.h>
-     * behaviour guarantees that may drag in locale. */
+    /* Format a signed 64-bit integer as decimal digits, no libc deps. */
     int neg = 0;
     uint64_t u;
     if (n < 0) { neg = 1; u = (uint64_t)(-(n + 1)) + 1; }
@@ -226,14 +364,67 @@ int64_t kk_str_show_int(int64_t n) {
     char tmp[24];
     int len = 0;
     if (u == 0) { tmp[len++] = '0'; }
-    else {
-        while (u > 0) { tmp[len++] = (char)('0' + (u % 10)); u /= 10; }
-    }
+    else { while (u > 0) { tmp[len++] = (char)('0' + (u % 10)); u /= 10; } }
+    int total = len + (neg ? 1 : 0);
+    char* buf = (char*)malloc((size_t)total + 1);
+    if (!buf) return 0;
     int pos = 0;
     if (neg) buf[pos++] = '-';
     for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
-    buf[pos] = '\0';
-    return (int64_t)buf;
+    buf[total] = '\0';
+    return (int64_t)kk_str_alloc_leaf(buf, total, 1);
+}
+
+void kk_str_retain(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    if (s != NULL) s->rc++;
+}
+
+void kk_str_drop(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    if (s == NULL) return;
+    if (--s->rc > 0) return;
+    if (s->kind == KK_STR_LEAF) {
+        if (s->owns_bytes) free((void*)s->u.bytes);
+    } else {
+        kk_str_drop((int64_t)s->u.cat.l);
+        kk_str_drop((int64_t)s->u.cat.r);
+    }
+    free(s);
+}
+
+/* ByteString — same kk_string_t representation, byte-oriented API. */
+
+int64_t kk_bytes_from_literal(int64_t bytes_ptr, int64_t byte_len) {
+    return kk_string_from_literal(bytes_ptr, byte_len);
+}
+
+int64_t kk_bytes_len(int64_t b) {
+    return kk_str_len(b);
+}
+
+int64_t kk_bytes_concat(int64_t a, int64_t b) {
+    return kk_str_concat(a, b);
+}
+
+int64_t kk_bytes_eq(int64_t a, int64_t b) {
+    return kk_str_eq(a, b);
+}
+
+/* Random byte access — walks the rope to find the leaf containing index i. */
+static int64_t kk_bytes_index_rec(kk_string_t* s, int64_t i) {
+    if (s == NULL) return -1;
+    if (s->kind == KK_STR_LEAF) {
+        if (i < 0 || i >= s->byte_len) return -1;
+        return (int64_t)(unsigned char)s->u.bytes[i];
+    }
+    int64_t left_len = (s->u.cat.l ? s->u.cat.l->byte_len : 0);
+    if (i < left_len) return kk_bytes_index_rec(s->u.cat.l, i);
+    return kk_bytes_index_rec(s->u.cat.r, i - left_len);
+}
+
+int64_t kk_bytes_index(int64_t b_i, int64_t i) {
+    return kk_bytes_index_rec((kk_string_t*)b_i, i);
 }
 
 /* Write field[idx] of a boxed value */

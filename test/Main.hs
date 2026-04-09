@@ -580,6 +580,51 @@ mlirEmitTests = testGroup "MLIR Emission"
           (T.isInfixOf "func.call @kk_str_show_int" mlir)
         assertBool "main wrapper uses kk_println_str"
           (T.isInfixOf "func.call @kk_println_str" mlir)
+
+  , testCase "emitProgram: string literals wrapped via kk_string_from_literal" $
+      let stringTy = TCon (TypeCon (mkQName "std" "string") KindValue)
+          body     = ELit (LitString "hi")
+          mainDef  = (mkFunDef "" "main" body stringTy)
+                       { defType = TFun [] EffectRowEmpty stringTy }
+          prog     = mkProgram "" "p" [mainDef]
+          mlir     = emitProgram prog
+      in do
+        assertBool "declares kk_string_from_literal prototype"
+          (T.isInfixOf "func.func private @kk_string_from_literal" mlir)
+        assertBool "literal site calls kk_string_from_literal"
+          (T.isInfixOf "func.call @kk_string_from_literal" mlir)
+        assertBool "passes byte length 2 for \"hi\""
+          (T.isInfixOf "arith.constant 2 : i64" mlir)
+
+  , testCase "emitProgram: char_len intrinsic lowers to kk_str_char_len" $
+      let intTy   = TCon (TypeCon (mkQName "std" "int") KindValue)
+          body    = EApp (EVar (mkName "char_len")) [ELit (LitString "Grüße")]
+          mainDef = (mkFunDef "" "main" body intTy)
+                       { defType = TFun [] EffectRowEmpty intTy }
+          prog    = mkProgram "" "p" [mainDef]
+          mlir    = emitProgram prog
+      in do
+        assertBool "calls kk_str_char_len"
+          (T.isInfixOf "func.call @kk_str_char_len(" mlir)
+        assertBool "encodes UTF-8 byte ü as \\C3\\BC"
+          (T.isInfixOf "\\C3\\BC" mlir)
+        assertBool "byte length is 7 (not 5 codepoints)"
+          (T.isInfixOf "arith.constant 7 : i64" mlir)
+
+  , testCase "emitProgram: bytes_concat lowers to kk_str_concat (shared rope)" $
+      let intTy   = TCon (TypeCon (mkQName "std" "int") KindValue)
+          body    = EApp (EVar (mkName "bytes_len"))
+                         [EApp (EVar (mkName "bytes_concat"))
+                               [ELit (LitString "ab"), ELit (LitString "cd")]]
+          mainDef = (mkFunDef "" "main" body intTy)
+                       { defType = TFun [] EffectRowEmpty intTy }
+          prog    = mkProgram "" "p" [mainDef]
+          mlir    = emitProgram prog
+      in do
+        assertBool "bytes_concat → kk_str_concat"
+          (T.isInfixOf "func.call @kk_str_concat" mlir)
+        assertBool "bytes_len → kk_str_len"
+          (T.isInfixOf "func.call @kk_str_len" mlir)
   ]
 
 -------------------------------------------------------------------------------

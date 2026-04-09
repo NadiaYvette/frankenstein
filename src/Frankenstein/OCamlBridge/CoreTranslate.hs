@@ -2,18 +2,24 @@
 --
 -- Supported subset (mirroring the Swift/Scheme bridges):
 --
---   * @let [rec] name x y ... = expr@ at the top level, Int-only.
+--   * @let [rec] name x y ... = expr@ at the top level.
 --   * Expressions: integer literals, variable refs, binary ops
 --     (@+ - * / = <> < <= > >=@), @if e1 then e2 else e3@,
 --     @fun x -> body@, function application.
 --   * @let () = print_int (expr)@ at the end of the file becomes the
 --     body of @main@.
+--   * @type t = A | B of int * t * t | ...@ algebraic data type
+--     declarations: each variant becomes a 'ConDecl' in a fresh
+--     'DataDecl' added to 'progData'. The variant arity is the length
+--     of the @Ptype_variant@'s child list.
+--   * @C@ / @C (e1, e2, ...)@ constructor expressions translate to
+--     'ECon' / @EApp (ECon ...) [args]@.
+--   * @match e with | C1 -> b1 | C2 (x, y) -> b2 | _ -> ...@
+--     translates to 'ECase' with 'PatCon' branches; nested patterns
+--     are flattened later by 'FlattenPatterns'.
 --
--- Modules, functors, GADTs, records, pattern matching beyond simple
--- variables, and anything involving the OCaml stdlib beyond
--- @print_int@ are out of scope for this first bridge. The point is
--- "an eighth language through the Int pipeline," not an OCaml
--- implementation.
+-- Modules, functors, GADTs, records, and anything involving the OCaml
+-- stdlib beyond @print_int@ remain out of scope.
 module Frankenstein.OCamlBridge.CoreTranslate
   ( translateOCaml
   ) where
@@ -33,7 +39,7 @@ translateOCaml modName root = do
       items = case topLists of
         (l:_) -> findHeads "structure_item" l
         []    -> directItems
-  (defs, mMain) <- foldDefs modName items [] Nothing
+  (datas, defs, mMain) <- foldDefs modName items [] [] Nothing
   let mainDef = case mMain of
         Nothing -> []
         Just e ->
@@ -48,28 +54,40 @@ translateOCaml modName root = do
   pure Program
     { progName    = QName modName (Name "main" 0)
     , progDefs    = defs ++ mainDef
-    , progData    = []
+    , progData    = datas
     , progEffects = []
     }
 
 foldDefs
-  :: Text -> [OLine] -> [Def] -> Maybe Expr
-  -> Either Text ([Def], Maybe Expr)
-foldDefs _ [] accDefs accMain = Right (reverse accDefs, accMain)
-foldDefs modName (it:rest) accDefs accMain = do
+  :: Text -> [OLine] -> [DataDecl] -> [Def] -> Maybe Expr
+  -> Either Text ([DataDecl], [Def], Maybe Expr)
+foldDefs _ [] accData accDefs accMain =
+  Right (reverse accData, reverse accDefs, accMain)
+foldDefs modName (it:rest) accData accDefs accMain = do
   r <- translateStructureItem modName it
   case r of
-    Left d  -> foldDefs modName rest (d : accDefs) accMain
-    Right e ->
+    SData ds -> foldDefs modName rest (reverse ds ++ accData) accDefs accMain
+    SDef d   -> foldDefs modName rest accData (d : accDefs) accMain
+    SMain e  ->
       let accMain' = case accMain of
             Nothing   -> Just e
             Just prev -> Just (seqExpr prev e)
-      in foldDefs modName rest accDefs accMain'
+      in foldDefs modName rest accData accDefs accMain'
 
--- | A structure_item is either a named let (returns Left Def) or a
--- unit-bound effectful @let () = ...@ (returns Right Expr).
-translateStructureItem :: Text -> OLine -> Either Text (Either Def Expr)
-translateStructureItem modName item = do
+data StructResult
+  = SData [DataDecl]
+  | SDef Def
+  | SMain Expr
+
+-- | A structure_item is one of: a @type@ declaration (returns SData),
+-- a named let (returns SDef), or a unit-bound effectful @let () = ...@
+-- (returns SMain).
+translateStructureItem :: Text -> OLine -> Either Text StructResult
+translateStructureItem modName item
+  | any (T.isPrefixOf "Pstr_type" . oHead) (oChildren item) = do
+      ds <- translateTypeDecls modName item
+      pure (SData ds)
+  | otherwise = do
   -- structure_item children: [Pstr_value Rec/Nonrec, <list>]
   -- <list> children: [<def>, <def>, ...]
   -- <def> children: [pattern, expression]
@@ -89,7 +107,7 @@ translateStructureItem modName item = do
     Nothing -> do
       -- let () = <expr>: treat <expr> as a main-ish statement.
       e <- translateExpr expr
-      pure (Right (unwrapPrintInt e))
+      pure (SMain (unwrapPrintInt e))
     Just nm -> do
       (params, body) <- peelParams expr
       body' <- translateExpr body
@@ -101,13 +119,78 @@ translateStructureItem modName item = do
           defExpr'  = if null params
                       then body'
                       else ELam lamParams body'
-      pure $ Left Def
+      pure $ SDef Def
         { defName       = QName modName (Name nm 0)
         , defType       = fnTy
         , defExpr       = defExpr'
         , defSort       = if null params then DefVal else DefFun
         , defVisibility = Public
         }
+
+-- | Walk a structure_item containing a Pstr_type and produce one
+-- DataDecl per @type_declaration@ entry. We deliberately ignore
+-- ptype_params (no type-variable parameters), ptype_manifest, and
+-- private/public.
+translateTypeDecls :: Text -> OLine -> Either Text [DataDecl]
+translateTypeDecls modName item =
+  let lists = filter (T.isPrefixOf "<list>" . oHead) (oChildren item)
+      tyDecls = concatMap (filter (T.isPrefixOf "type_declaration" . oHead)
+                          . oChildren) lists
+  in mapM (translateTypeDecl modName) tyDecls
+
+translateTypeDecl :: Text -> OLine -> Either Text DataDecl
+translateTypeDecl modName td = do
+  tyName <- case oString td of
+    Just s  -> Right s
+    Nothing -> Left "type_declaration: missing name"
+  -- Find a Ptype_variant somewhere in the subtree, then its <list>
+  -- of variant entries.
+  let variants = case findPtypeVariant td of
+        Just v  -> case filter (T.isPrefixOf "<list>" . oHead) (oChildren v) of
+          (l:_) -> oChildren l
+          []    -> []
+        Nothing -> []
+  cons <- mapM (translateVariant modName) variants
+  pure DataDecl
+    { dataName   = QName modName (Name tyName 0)
+    , dataParams = []
+    , dataCons   = cons
+    , dataVis    = Public
+    }
+
+-- | The Ptype_variant marker is nested under @ptype_kind =@; walk the
+-- subtree until we find it.
+findPtypeVariant :: OLine -> Maybe OLine
+findPtypeVariant l =
+  case filter (T.isPrefixOf "Ptype_variant" . oHead) (oChildren l) of
+    (v:_) -> Just v
+    []    -> firstJust findPtypeVariant (oChildren l)
+  where
+    firstJust _ [] = Nothing
+    firstJust f (x:xs) = case f x of
+      Just r  -> Just r
+      Nothing -> firstJust f xs
+
+-- | A variant entry is a location-only line whose children are:
+-- @"Name"@, optionally a @<list>@ of core_type fields (or a literal
+-- @[]@ for nullary), and a @None@/@Some@ marker for GADT-style result.
+translateVariant :: Text -> OLine -> Either Text ConDecl
+translateVariant modName v = do
+  ctorName <- case [ s | c <- oChildren v
+                       , Just s <- [oString c]
+                       , "\"" `T.isPrefixOf` oHead c ] of
+    (n:_) -> Right n
+    []    -> Left "variant: missing constructor name"
+  -- Field core_types live inside the first <list> child (if any).
+  let fieldTypes = case filter (T.isPrefixOf "<list>" . oHead) (oChildren v) of
+        (l:_) -> filter (T.isPrefixOf "core_type" . oHead) (oChildren l)
+        []    -> []
+  pure ConDecl
+    { conName   = QName modName (Name ctorName 0)
+    , conFields = [ (Name ("f" <> T.pack (show i)) 0, intT)
+                  | (i, _) <- zip [0 :: Int ..] fieldTypes ]
+    , conVis    = Public
+    }
 
 -- | Extract the variable name from a pattern line. Returns 'Nothing'
 -- for unit pattern @()@.
@@ -214,6 +297,50 @@ translateExpr e = case oChildren e of
             _ -> Left "Pexp_constant: no PConst_int"
           _ -> Left "Pexp_constant: no constant sibling"
 
+    | "Pexp_construct" `T.isPrefixOf` oHead c -> do
+        -- Children of the expression: Pexp_construct "Name", then
+        -- None or Some <expression>. Some's expression may itself
+        -- be a Pexp_tuple holding multiple args.
+        nm <- case oString c of
+          Just s  -> Right s
+          Nothing -> Left "Pexp_construct: missing name"
+        if nm == "()"
+          then Right (ELit (LitInt 0))
+          else do
+            let con = ECon (QName "" (Name nm 0))
+            -- Look for a Some carrying argument expressions.
+            argExprs <- case filter (T.isPrefixOf "Some" . oHead) kids of
+              (s:_) -> case filter (T.isPrefixOf "expression" . oHead) (oChildren s) of
+                (argE:_) ->
+                  case oChildren argE of
+                    (h:_) | "Pexp_tuple" `T.isPrefixOf` oHead h -> do
+                      let listKids = case filter (T.isPrefixOf "<list>" . oHead) (oChildren argE) of
+                                       (l:_) -> filter (T.isPrefixOf "expression" . oHead) (oChildren l)
+                                       []    -> []
+                      mapM translateExpr listKids
+                    _ -> do
+                      a <- translateExpr argE
+                      pure [a]
+                [] -> Right []
+              [] -> Right []
+            if null argExprs
+              then Right con
+              else Right (EApp con argExprs)
+
+    | "Pexp_match" `T.isPrefixOf` oHead c -> do
+        -- After Pexp_match marker: an expression (scrutinee) followed
+        -- by a <list> of <case> entries. Each <case> has a pattern
+        -- and an expression child.
+        let exprs = filter (T.isPrefixOf "expression" . oHead) kids
+        scrut <- case exprs of
+          (s:_) -> translateExpr s
+          _     -> Left "Pexp_match: no scrutinee"
+        let caseListKids = case filter (T.isPrefixOf "<list>" . oHead) kids of
+              (l:_) -> filter (T.isPrefixOf "<case>" . oHead) (oChildren l)
+              []    -> []
+        branches <- mapM translateCase caseListKids
+        pure (ECase scrut branches)
+
     | "Pexp_ifthenelse" `T.isPrefixOf` oHead c -> do
         let exprs = filter (T.isPrefixOf "expression" . oHead) kids
         case exprs of
@@ -234,6 +361,64 @@ translateExpr e = case oChildren e of
               ]
           _ -> Left "Pexp_ifthenelse: missing branches"
     | otherwise -> translateExprHead c
+
+-- | Translate a single @<case>@ entry to a 'Branch'.
+translateCase :: OLine -> Either Text Branch
+translateCase cs = do
+  pat <- case filter (T.isPrefixOf "pattern" . oHead) (oChildren cs) of
+    (p:_) -> Right p
+    []    -> Left "<case>: no pattern"
+  expr <- case filter (T.isPrefixOf "expression" . oHead) (oChildren cs) of
+    (e:_) -> Right e
+    []    -> Left "<case>: no expression"
+  pat' <- translatePattern pat
+  body <- translateExpr expr
+  pure (Branch pat' Nothing body)
+
+-- | Translate a @pattern@ node to a Core 'Pattern'.
+translatePattern :: OLine -> Either Text Pattern
+translatePattern p = case oChildren p of
+  [] -> Right (PatWild intT)
+  (c:_)
+    | "Ppat_any" `T.isPrefixOf` oHead c -> Right (PatWild intT)
+    | "Ppat_var" `T.isPrefixOf` oHead c ->
+        case oString c of
+          Just s  -> Right (PatVar (Name s 0) intT)
+          Nothing -> Right (PatWild intT)
+    | "Ppat_constant" `T.isPrefixOf` oHead c -> do
+        let consts = filter (T.isPrefixOf "constant" . oHead) (oChildren p)
+        case consts of
+          (k:_) -> case oChildren k of
+            (x:_) | "PConst_int" `T.isPrefixOf` oHead x ->
+              case oInt x of
+                Just n  -> Right (PatLit (LitInt n))
+                Nothing -> Right (PatWild intT)
+            _ -> Right (PatWild intT)
+          _ -> Right (PatWild intT)
+    | "Ppat_construct" `T.isPrefixOf` oHead c -> do
+        nm <- case oString c of
+          Just s  -> Right s
+          Nothing -> Left "Ppat_construct: missing name"
+        if nm == "()"
+          then Right (PatLit (LitInt 0))
+          else do
+            -- Check for a Some carrying argument patterns.
+            argPats <- case filter (T.isPrefixOf "Some" . oHead) (oChildren p) of
+              (s:_) -> case filter (T.isPrefixOf "pattern" . oHead) (oChildren s) of
+                (argP:_) ->
+                  case oChildren argP of
+                    (h:_) | "Ppat_tuple" `T.isPrefixOf` oHead h -> do
+                      let listKids = case filter (T.isPrefixOf "<list>" . oHead) (oChildren argP) of
+                            (l:_) -> filter (T.isPrefixOf "pattern" . oHead) (oChildren l)
+                            []    -> []
+                      mapM translatePattern listKids
+                    _ -> do
+                      a <- translatePattern argP
+                      pure [a]
+                [] -> Right []
+              [] -> Right []
+            Right (PatCon (QName "" (Name nm 0)) argPats)
+    | otherwise -> Right (PatWild intT)
 
 translateExprHead :: OLine -> Either Text Expr
 translateExprHead c

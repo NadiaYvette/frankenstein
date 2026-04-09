@@ -342,6 +342,19 @@ emitProgramText prog =
     , "  func.func private @kk_bytes_index(i64, i64) -> i64"
     , "  func.func private @kk_bytes_eq(i64, i64) -> i64"
     , ""
+    , "  // File I/O, process, environment runtime declarations"
+    , "  func.func private @kk_read_file(i64) -> i64"
+    , "  func.func private @kk_write_file(i64, i64) -> i64"
+    , "  func.func private @kk_file_exists(i64) -> i64"
+    , "  func.func private @kk_read_line() -> i64"
+    , "  func.func private @kk_system(i64) -> i64"
+    , "  func.func private @kk_getenv(i64) -> i64"
+    , ""
+    , "  // IORef runtime declarations (mutable single-cell)"
+    , "  func.func private @kk_ref_new(i64) -> i64"
+    , "  func.func private @kk_ref_get(i64) -> i64"
+    , "  func.func private @kk_ref_set(i64, i64) -> i64"
+    , ""
     , "  // Thunk runtime declarations (lazy evaluation)"
     , "  func.func private @kk_thunk_create(i64) -> i64"
     , "  func.func private @kk_thunk_force(i64) -> i64"
@@ -796,6 +809,51 @@ emitExpr (EApp (EVar fn) [arg])
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_show_int(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
+  -- File I/O, process, environment intrinsics (1-arg)
+  | nameText fn `elem` ["read_file", "readFile"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_read_file(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["file_exists", "fileExists"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_file_exists(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["system", "shell"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_system(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["getenv", "getEnv"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_getenv(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  -- IORef intrinsics (1-arg)
+  | nameText fn `elem` ["new_ref", "newIORef", "ref"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_ref_new(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | nameText fn `elem` ["get_ref", "readIORef", "deref"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_ref_get(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+
+-- Zero-arg intrinsics (e.g. stdin read_line)
+emitExpr (EApp (EVar fn) [])
+  | nameText fn `elem` ["read_line", "getLine"] = do
+      resultName <- freshName "v"
+      pure ( [ "%" <> resultName <> " = func.call @kk_read_line() : () -> i64" ]
+           , resultName)
 
 emitExpr (EApp (EVar fn) [a, b])
   | nameText fn `elem` ["str_concat", "++s", "concat_str", "bytes_concat"] = do
@@ -818,6 +876,22 @@ emitExpr (EApp (EVar fn) [a, b])
       resultName <- freshName "v"
       pure (aOps ++ bOps ++
         [ "%" <> resultName <> " = func.call @kk_bytes_index(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- File I/O (2-arg): write_file(path, content) -> 0/-1
+  | nameText fn `elem` ["write_file", "writeFile"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_write_file(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- IORef set: returns 0 (kk_ref_set is void in C, wrapper returns 0)
+  | nameText fn `elem` ["set_ref", "writeIORef"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_ref_set(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
         ], resultName)
 
 -- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)
@@ -1856,8 +1930,10 @@ compileToExecutable config prog = do
               -- Derive cycle collector path from runtime path
               let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
                   cyclePath = rtDir ++ "kk_cycle.c"
+                  arenaPath = rtDir ++ "kk_arena.c"
                   rtObjPath = ecOutputPath config ++ ".rt.o"
                   cycleObjPath = ecOutputPath config ++ ".cycle.o"
+                  arenaObjPath = ecOutputPath config ++ ".arena.o"
                   optFlag = "-O" ++ show (ecOptLevel config)
                   includeFlag = "-I" ++ rtDir
               -- Compile runtime C files to .o
@@ -1871,13 +1947,18 @@ compileToExecutable config prog = do
                   case ec3c of
                     ExitFailure _ -> pure $ Left $ "clang (cycle) failed: " <> T.pack err3c
                     ExitSuccess -> do
-                      -- Link LLVM IR + runtime .o + cycle .o → executable
-                      (ec3b, _, err3b) <- readProcessWithExitCode (ecClangPath config)
-                        ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath,
-                         "-o", ecOutputPath config, optFlag] ""
-                      case ec3b of
-                        ExitFailure _ -> pure $ Left $ "clang (link) failed: " <> T.pack err3b
-                        ExitSuccess -> pure $ Right $ ecOutputPath config
+                      (ec3d, _, err3d) <- readProcessWithExitCode (ecClangPath config)
+                        ["-c", arenaPath, "-o", arenaObjPath, includeFlag, optFlag] ""
+                      case ec3d of
+                        ExitFailure _ -> pure $ Left $ "clang (arena) failed: " <> T.pack err3d
+                        ExitSuccess -> do
+                          -- Link LLVM IR + runtime .o + cycle .o + arena .o → executable
+                          (ec3b, _, err3b) <- readProcessWithExitCode (ecClangPath config)
+                            ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath,
+                             "-o", ecOutputPath config, optFlag] ""
+                          case ec3b of
+                            ExitFailure _ -> pure $ Left $ "clang (link) failed: " <> T.pack err3b
+                            ExitSuccess -> pure $ Right $ ecOutputPath config
             Nothing -> do
               (ec3, _, err3) <- readProcessWithExitCode (ecClangPath config)
                 [llPath, "-x", "ir", "-o", ecOutputPath config,

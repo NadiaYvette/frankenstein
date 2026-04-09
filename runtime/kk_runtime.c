@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "kk_cycle.h"
+#include "kk_arena.h"
 
 /* Raw allocation: size in bytes */
 void* kk_alloc(int64_t size) {
@@ -73,7 +74,7 @@ void kk_drop(int64_t ptr) {
             kk_drop(fields[i]);
         }
         kk_unregister_nfields(ptr);
-        free((void*)(ptr - 8));
+        kk_arena_free((void*)(ptr - 8));
     } else {
         /* Decrement but don't free — possible cycle root */
         *rc = (*rc & KK_COLOR_MASK) | (count - 1);
@@ -115,7 +116,12 @@ int64_t kk_field(int64_t ptr, int64_t idx) {
  * Layout: [rc=1] [tag] [f0] [f1] ... */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
     int64_t total = (2 + nfields) * 8;  /* rc + tag + fields */
-    int64_t* block = (int64_t*)malloc((size_t)total);
+    /* Constructor cells go into the bump arena by default. The arena
+     * returns NULL when KK_NO_ARENA is set, in which case we fall back
+     * to libc malloc and rely on the matching kk_arena_free in kk_drop
+     * to call free() (since kk_arena_owns will report not-owned). */
+    int64_t* block = (int64_t*)kk_arena_alloc((size_t)total);
+    if (!block) block = (int64_t*)malloc((size_t)total);
     if (!block) return 0;
     block[0] = KK_COLOR_BLACK | 1;  /* color=black, refcount = 1 */
     block[1] = tag;                  /* tag */
@@ -205,6 +211,7 @@ struct kk_string_s {
 /* Forward declarations (the public header isn't included in this TU). */
 int64_t kk_string_empty(void);
 void    kk_str_drop(int64_t s_i);
+void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);
 
 static kk_string_t* kk_str_alloc_leaf(const char* bytes, int64_t byte_len, int owns) {
     kk_string_t* s = (kk_string_t*)malloc(sizeof(kk_string_t));
@@ -425,6 +432,132 @@ static int64_t kk_bytes_index_rec(kk_string_t* s, int64_t i) {
 
 int64_t kk_bytes_index(int64_t b_i, int64_t i) {
     return kk_bytes_index_rec((kk_string_t*)b_i, i);
+}
+
+/* File I/O, process, environment.
+ *
+ * Frankenstein strings flow through these intrinsics as int64_t pointers
+ * to kk_string_t headers. Paths and contents are converted to NUL-
+ * terminated C strings via a small helper that flattens the rope into
+ * a freshly malloc'd buffer the caller must free. */
+
+static char* kk_str_dup_cstr(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    int64_t n = (s ? s->byte_len : 0);
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) return NULL;
+    char* p = buf;
+    if (s) kk_str_copy_into(s, &p);
+    buf[n] = '\0';
+    return buf;
+}
+
+int64_t kk_read_file(int64_t path_str) {
+    char* path = kk_str_dup_cstr(path_str);
+    if (!path) return kk_string_empty();
+    FILE* f = fopen(path, "rb");
+    free(path);
+    if (!f) return kk_string_empty();
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return kk_string_empty(); }
+    long size = ftell(f);
+    if (size < 0) { fclose(f); return kk_string_empty(); }
+    rewind(f);
+    char* buf = (char*)malloc((size_t)size + 1);
+    if (!buf) { fclose(f); return kk_string_empty(); }
+    size_t got = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+    buf[got] = '\0';
+    return (int64_t)kk_str_alloc_leaf(buf, (int64_t)got, 1);
+}
+
+int64_t kk_write_file(int64_t path_str, int64_t content_str) {
+    char* path = kk_str_dup_cstr(path_str);
+    if (!path) return -1;
+    FILE* f = fopen(path, "wb");
+    free(path);
+    if (!f) return -1;
+    kk_string_t* s = (kk_string_t*)content_str;
+    int64_t n = (s ? s->byte_len : 0);
+    if (n > 0) {
+        char* buf = (char*)malloc((size_t)n);
+        if (!buf) { fclose(f); return -1; }
+        char* p = buf;
+        kk_str_copy_into(s, &p);
+        size_t wrote = fwrite(buf, 1, (size_t)n, f);
+        free(buf);
+        if (wrote != (size_t)n) { fclose(f); return -1; }
+    }
+    fclose(f);
+    return 0;
+}
+
+int64_t kk_file_exists(int64_t path_str) {
+    char* path = kk_str_dup_cstr(path_str);
+    if (!path) return 0;
+    FILE* f = fopen(path, "rb");
+    free(path);
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+int64_t kk_read_line(void) {
+    /* Read up to a newline or EOF from stdin. Strip the trailing '\n'. */
+    size_t cap = 128, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return kk_string_empty();
+    int c;
+    while ((c = getchar()) != EOF && c != '\n') {
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); return kk_string_empty(); }
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+    buf[len] = '\0';
+    return (int64_t)kk_str_alloc_leaf(buf, (int64_t)len, 1);
+}
+
+int64_t kk_system(int64_t cmd_str) {
+    char* cmd = kk_str_dup_cstr(cmd_str);
+    if (!cmd) return -1;
+    int rc = system(cmd);
+    free(cmd);
+    return (int64_t)rc;
+}
+
+int64_t kk_getenv(int64_t name_str) {
+    char* name = kk_str_dup_cstr(name_str);
+    if (!name) return kk_string_empty();
+    const char* val = getenv(name);
+    free(name);
+    if (!val) return kk_string_empty();
+    /* Borrow the libc-owned string — getenv result is process-lifetime. */
+    int64_t n = 0;
+    while (val[n] != '\0') n++;
+    return (int64_t)kk_str_alloc_leaf(val, n, 0);
+}
+
+/* IORef — single-field mutable cell allocated as a kk_alloc_con box.
+ * Tag is "REF0"; payload index 0 holds the current value. */
+#define KK_REF_TAG 0x52454630
+
+int64_t kk_ref_new(int64_t initial) {
+    int64_t cell = kk_alloc_con(KK_REF_TAG, 1);
+    if (cell == 0) return 0;
+    kk_set_field(cell, 0, initial);
+    return cell;
+}
+
+int64_t kk_ref_get(int64_t ref) {
+    return kk_field(ref, 0);
+}
+
+int64_t kk_ref_set(int64_t ref, int64_t value) {
+    kk_set_field(ref, 0, value);
+    return 0;
 }
 
 /* Write field[idx] of a boxed value */

@@ -11,6 +11,7 @@
  */
 
 #include "kk_cycle.h"
+#include "kk_arena.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -230,10 +231,11 @@ static void collect_white(int64_t ptr) {
         collect_white(child);
     }
 
-    /* Unregister and free */
+    /* Unregister and free. Arena-owned cells are not individually
+     * reclaimed; kk_arena_free is a no-op for them. */
     kk_unregister_nfields(ptr);
     total_collected++;
-    free((void*)(ptr - 8));
+    kk_arena_free((void*)(ptr - 8));
 }
 
 /* ---- Public API ---- */

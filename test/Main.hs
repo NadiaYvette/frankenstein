@@ -8,6 +8,7 @@ import Test.Tasty (adjustOption)
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus, analyzeUsage, freeVars)
 import Frankenstein.Core.Evidence (evidencePass)
+import Frankenstein.Core.DeriveSelectors (deriveSelectors, recordSelectors)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
   , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive)
 import Frankenstein.Core.FlattenPatterns (flattenPatternsExpr)
@@ -78,6 +79,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , linkerTests
   , mlirEmitTests
   , flattenPatternsTests
+  , deriveSelectorsTests
   , conTagsTests
   , mercuryAdtTests
   , wasmEmitTests
@@ -625,6 +627,90 @@ mlirEmitTests = testGroup "MLIR Emission"
           (T.isInfixOf "func.call @kk_str_concat" mlir)
         assertBool "bytes_len → kk_str_len"
           (T.isInfixOf "func.call @kk_str_len" mlir)
+  ]
+
+-------------------------------------------------------------------------------
+-- F'. DeriveSelectors unit tests
+-------------------------------------------------------------------------------
+
+deriveSelectorsTests :: TestTree
+deriveSelectorsTests = testGroup "DeriveSelectors"
+  [ testCase "single-ctor record yields one selector per field" $
+      let pointTy = TCon (TypeCon (mkQName "" "Point") KindValue)
+          dd = DataDecl
+            { dataName   = mkQName "" "Point"
+            , dataParams = []
+            , dataCons   = [ ConDecl (mkQName "" "Point")
+                                     [(mkName "x", intType), (mkName "y", intType)]
+                                     Public ]
+            , dataVis    = Public
+            }
+          sels = recordSelectors Set.empty dd
+          _ = pointTy
+      in do
+        assertEqual "two selectors" 2 (length sels)
+        assertEqual "first selector named x"
+          "x" (nameText (qnameName (defName (sels !! 0))))
+        assertEqual "second selector named y"
+          "y" (nameText (qnameName (defName (sels !! 1))))
+
+  , testCase "multi-ctor data decl yields no selectors" $
+      let dd = DataDecl
+            { dataName   = mkQName "" "Maybe"
+            , dataParams = []
+            , dataCons   = [ ConDecl (mkQName "" "Nothing") [] Public
+                           , ConDecl (mkQName "" "Just")
+                                     [(mkName "value", intType)]
+                                     Public
+                           ]
+            , dataVis    = Public
+            }
+      in assertEqual "no selectors for multi-ctor" 0
+           (length (recordSelectors Set.empty dd))
+
+  , testCase "selector skipped when name already exists" $
+      let dd = DataDecl
+            { dataName   = mkQName "" "Box"
+            , dataParams = []
+            , dataCons   = [ ConDecl (mkQName "" "Box")
+                                     [(mkName "value", intType)] Public ]
+            , dataVis    = Public
+            }
+      in assertEqual "no selector when shadowed" 0
+           (length (recordSelectors (Set.singleton "value") dd))
+
+  , testCase "selector body is a case-of constructor" $
+      let dd = DataDecl
+            { dataName   = mkQName "" "Pair"
+            , dataParams = []
+            , dataCons   = [ ConDecl (mkQName "" "Pair")
+                                     [(mkName "fst", intType), (mkName "snd", intType)]
+                                     Public ]
+            , dataVis    = Public
+            }
+          sels = recordSelectors Set.empty dd
+          fstSel = sels !! 0
+      in case defExpr fstSel of
+           ELam [_] (ECase _ [Branch (PatCon _ [PatVar _ _, PatWild _]) _ _]) ->
+             pure ()
+           other -> assertFailure ("unexpected selector body: " ++ show other)
+
+  , testCase "deriveSelectors appends to progDefs" $
+      let dd = DataDecl
+            { dataName   = mkQName "" "Cell"
+            , dataParams = []
+            , dataCons   = [ ConDecl (mkQName "" "Cell")
+                                     [(mkName "contents", intType)] Public ]
+            , dataVis    = Public
+            }
+          mainDef = mkFunDef "" "main" (ELit (LitInt 0)) intType
+          prog0 = (mkProgram "" "p" [mainDef]) { progData = [dd] }
+          prog' = deriveSelectors prog0
+      in do
+        assertEqual "one main + one selector" 2 (length (progDefs prog'))
+        assertBool "selector named 'contents' present"
+          (any (\d -> nameText (qnameName (defName d)) == "contents")
+               (progDefs prog'))
   ]
 
 -------------------------------------------------------------------------------

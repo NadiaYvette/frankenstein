@@ -6,10 +6,12 @@ Reads a Python source file from argv[1] (or stdin if "-") and prints a
 single-line S-expression representing a small subset of the AST that the
 Haskell-side Python bridge knows how to translate to OrganIR.
 
-Supported subset (enough for arithmetic / recursive integer programs):
+Supported subset (enough for arithmetic / recursive integer programs
+plus simple records):
 
   Module(stmts)
   FunctionDef(name, params, body)
+  ClassDef(name, fields)           -- record-like: __init__ with self.X = X
   Return(expr|None)
   If(test, then-stmts, else-stmts)
   Assign(target_name, expr)        -- single Name target only
@@ -17,8 +19,9 @@ Supported subset (enough for arithmetic / recursive integer programs):
   BinOp(op_name, lhs, rhs)         -- Add Sub Mult FloorDiv Mod
   UnaryOp(op_name, operand)        -- USub
   Compare(lhs, op_name, rhs)       -- Eq NotEq Lt LtE Gt GtE  (single op)
-  Constant(int)                    -- ints only (for now)
+  Constant(int|str|bool)
   Name(id)
+  Attr(value, attr)                -- value.attr
   Call(callee_name, args)          -- callee must be a bare Name
 
 Anything else raises NotImplementedError.
@@ -55,6 +58,42 @@ def emit(node: ast.AST) -> str:
         params = "(" + " ".join(quote(a.arg) for a in node.args.args) + ")"
         body = "(" + " ".join(emit(s) for s in node.body) + ")"
         return f"(FunctionDef {quote(node.name)} {params} {body})"
+
+    if isinstance(node, ast.ClassDef):
+        # Record-like class: a single __init__ that does `self.X = X` for
+        # each parameter. We extract the field names in declaration order.
+        if node.bases or node.keywords or node.decorator_list:
+            raise NotImplementedError(
+                f"class {node.name}: bases/keywords/decorators not supported")
+        init = None
+        for stmt in node.body:
+            if isinstance(stmt, ast.FunctionDef) and stmt.name == "__init__":
+                init = stmt
+                break
+        if init is None:
+            raise NotImplementedError(
+                f"class {node.name}: must define __init__")
+        # Skip 'self' (first arg). Field order = positional arg order.
+        fields = [a.arg for a in init.args.args[1:]]
+        # Sanity check the body shape: every stmt must be `self.X = X`
+        # for some X in fields, in declaration order.
+        seen = []
+        for stmt in init.body:
+            if not isinstance(stmt, ast.Assign): continue
+            if len(stmt.targets) != 1: continue
+            tgt = stmt.targets[0]
+            if (isinstance(tgt, ast.Attribute)
+                and isinstance(tgt.value, ast.Name)
+                and tgt.value.id == "self"
+                and isinstance(stmt.value, ast.Name)
+                and stmt.value.id == tgt.attr):
+                seen.append(tgt.attr)
+        if seen != fields:
+            raise NotImplementedError(
+                f"class {node.name}: __init__ body must be only "
+                f"self.X = X assignments matching the parameters")
+        flds = "(" + " ".join(quote(f) for f in fields) + ")"
+        return f"(ClassDef {quote(node.name)} {flds})"
 
     if isinstance(node, ast.Return):
         if node.value is None:
@@ -98,6 +137,9 @@ def emit(node: ast.AST) -> str:
 
     if isinstance(node, ast.Name):
         return f"(Name {quote(node.id)})"
+
+    if isinstance(node, ast.Attribute):
+        return f"(Attr {emit(node.value)} {quote(node.attr)})"
 
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name):

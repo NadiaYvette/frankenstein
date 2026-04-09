@@ -19,6 +19,7 @@ library
         Frankenstein.Core.CycleAnalysis
         Frankenstein.Core.Evidence
         Frankenstein.Core.EffectOpt
+        Frankenstein.Core.DeriveSelectors
         Frankenstein.Core.FlattenPatterns
         Frankenstein.Core.ConTags
         Frankenstein.Core.Linker

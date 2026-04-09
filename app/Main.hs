@@ -5,6 +5,7 @@ import Frankenstein.Core.Perceus (insertPerceus)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..))
+import Frankenstein.Core.DeriveSelectors (deriveSelectors)
 import Frankenstein.Core.FlattenPatterns (flattenPatterns)
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, GhcCoreResult(..))
@@ -55,7 +56,9 @@ main = do
       -- Run per-module evidence pass before linking, so that EPerform/EHandle
       -- references are converted to plain function calls that the linker can resolve.
       let (errs, rawProgs) = partitionResults results
-          progs = map evidencePass rawProgs
+          -- Auto-derive record field selectors before the linker so they
+          -- count as defined symbols and the linker doesn't warn about them.
+          progs = map (evidencePass . deriveSelectors) rawProgs
       if not (null errs) then
         mapM_ (\(f, e) -> TIO.putStrLn $ "Error [" <> T.pack f <> "]: " <> e) errs
       else do
@@ -383,7 +386,9 @@ handleOutput :: Program -> Flags -> IO ()
 handleOutput progRaw flags = do
   -- Flatten nested patterns so downstream passes see only one level of
   -- constructor destructuring per case branch.
-  let prog0 = flattenPatterns progRaw
+  -- (deriveSelectors already ran before the linker; safe to re-run since
+  -- it skips fields whose selector name already exists.)
+  let prog0 = flattenPatterns (deriveSelectors progRaw)
   -- Run effect optimizations before evidence pass
   let (optProg, optStats) = effectOptimizeWithStats prog0
   -- Use global evidence pass: collects all effect declarations across merged

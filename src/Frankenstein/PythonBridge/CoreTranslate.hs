@@ -19,34 +19,62 @@ import Frankenstein.PythonBridge.AstParse
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Set as Set
 
 -- | Translate a Python module S-expression into a Frankenstein 'Program'.
+--
+-- Two-phase: first walk top-level statements collecting 'ClassDef' nodes
+-- into 'DataDecl's, then translate 'FunctionDef's with the resulting class
+-- table in scope so that @Foo(...)@ calls become 'ECon' applications and
+-- @obj.field@ becomes a selector call.
 translatePythonAst :: Text -> PySExpr -> Either Text Program
 translatePythonAst modName sexpr = do
-  defs <- translatePyModule modName sexpr
+  (datas, fnStmts) <- splitTopLevels sexpr
+  let classNames = Set.fromList [ qnameName (dataName d) | d <- datas
+                                                         , let _ = nameText ]
+      classNameTexts = Set.map nameText classNames
+  defs <- mapM (translateTopLevel modName classNameTexts) fnStmts
   pure Program
     { progName    = QName modName (Name "main" 0)
     , progDefs    = defs
-    , progData    = []
+    , progData    = datas
     , progEffects = []
     }
 
--- | Translate the @(Module ...)@ form to a list of top-level Defs.
-translatePyModule :: Text -> PySExpr -> Either Text [Def]
-translatePyModule modName (SList (SAtom "Module" : stmts)) =
-  mapM (translateTopLevel modName) stmts
-translatePyModule _ other =
+-- | Walk the @(Module ...)@ form and split top-level statements into
+-- ('DataDecl's from ClassDefs) and (FunctionDef nodes still to translate).
+splitTopLevels :: PySExpr -> Either Text ([DataDecl], [PySExpr])
+splitTopLevels (SList (SAtom "Module" : stmts)) = go stmts [] []
+  where
+    go []     ds fs = pure (reverse ds, reverse fs)
+    go (s:ss) ds fs = case s of
+      SList [SAtom "ClassDef", SStr name, SList rawFields] -> do
+        fieldNames <- mapM expectStr rawFields
+        let con = ConDecl
+              { conName   = QName T.empty (Name name 0)
+              , conFields = [ (Name f 0, intT) | f <- fieldNames ]
+              , conVis    = Public
+              }
+            dd = DataDecl
+              { dataName   = QName T.empty (Name name 0)
+              , dataParams = []
+              , dataCons   = [con]
+              , dataVis    = Public
+              }
+        go ss (dd : ds) fs
+      _ -> go ss ds (s : fs)
+splitTopLevels other =
   Left $ "Expected (Module ...), got: " <> T.pack (show other)
 
--- | Top-level statements must be FunctionDefs (we don't support module-level
--- code yet).
-translateTopLevel :: Text -> PySExpr -> Either Text Def
-translateTopLevel modName (SList [SAtom "FunctionDef", SStr name, SList params, SList body]) = do
+-- | Translate a deferred top-level statement; only FunctionDefs are
+-- expected here (ClassDefs were lifted out by 'splitTopLevels').
+translateTopLevel :: Text -> Set.Set Text -> PySExpr -> Either Text Def
+translateTopLevel modName classes (SList [SAtom "FunctionDef", SStr name, SList params, SList body]) = do
   paramNames <- mapM expectStr params
   let pNames = [(Name p 0, intT) | p <- paramNames]
       argTypes = [(Many, intT) | _ <- paramNames]
       fnTy = TFun argTypes EffectRowEmpty intT
-  bodyExpr <- translateBlock body
+  bodyExpr <- translateBlock classes body
   let lam = if null pNames then bodyExpr else ELam pNames bodyExpr
   pure Def
     { defName       = QName modName (Name name 0)
@@ -55,9 +83,17 @@ translateTopLevel modName (SList [SAtom "FunctionDef", SStr name, SList params, 
     , defSort       = DefFun
     , defVisibility = Public
     }
-translateTopLevel _ other =
+translateTopLevel _ _ other =
   Left $ "Top-level statement must be a FunctionDef, got: "
        <> T.pack (showHead other)
+
+-- | Backwards-compatible wrapper used by the test suite: assumes no
+-- classes are present, just translates FunctionDefs.
+translatePyModule :: Text -> PySExpr -> Either Text [Def]
+translatePyModule modName sexpr = do
+  (datas, fnStmts) <- splitTopLevels sexpr
+  let classNames = Set.fromList [ nameText (qnameName (dataName d)) | d <- datas ]
+  mapM (translateTopLevel modName classNames) fnStmts
 
 -- | Translate a sequence of Python statements to a single Core expression.
 --
@@ -79,91 +115,101 @@ translateTopLevel _ other =
 -- The @rest@ is duplicated into both arms when needed; this is acceptable
 -- for small programs and matches what GHC's desugarer does for simple
 -- early-return patterns.
-translateBlock :: [PySExpr] -> Either Text Expr
-translateBlock []  = Right (ELit (LitInt 0))
-translateBlock [s] = translateStmtTail s
-translateBlock (s:ss) = case s of
-  SList [SAtom "Return", _] -> translateStmtTail s  -- ss is dead code
+translateBlock :: Set.Set Text -> [PySExpr] -> Either Text Expr
+translateBlock _       []  = Right (ELit (LitInt 0))
+translateBlock classes [s] = translateStmtTail classes s
+translateBlock classes (s:ss) = case s of
+  SList [SAtom "Return", _] -> translateStmtTail classes s  -- ss is dead code
 
   SList [SAtom "Assign", SStr nm, valE] -> do
-    val  <- translateExpr valE
-    rest <- translateBlock ss
+    val  <- translateExpr classes valE
+    rest <- translateBlock classes ss
     pure $ ELet [[Bind (Name nm 0) intT val DefVal]] rest
 
   SList [SAtom "ExprStmt", e] -> do
-    eExpr <- translateExpr e
-    rest  <- translateBlock ss
+    eExpr <- translateExpr classes e
+    rest  <- translateBlock classes ss
     pure $ ELet [[Bind (Name "_" 0) intT eExpr DefVal]] rest
 
   SList [SAtom "If", testE, SList thenStmts, SList elseStmts] -> do
-    test  <- translateExpr testE
-    rest  <- translateBlock ss
+    test  <- translateExpr classes testE
+    rest  <- translateBlock classes ss
     -- Each branch uses its own statements; an empty branch falls through
     -- to the rest of the enclosing block.
-    thenE <- if null thenStmts then pure rest else translateBlock thenStmts
-    elseE <- if null elseStmts then pure rest else translateBlock elseStmts
+    thenE <- if null thenStmts then pure rest else translateBlock classes thenStmts
+    elseE <- if null elseStmts then pure rest else translateBlock classes elseStmts
     -- case test of 0 -> elseE ; _ -> thenE
     pure $ ECase test
       [ Branch (PatLit (LitInt 0)) Nothing elseE
       , Branch (PatWild intT)      Nothing thenE
       ]
 
-  _ -> translateBlock ss  -- skip unsupported non-final stmts silently
+  _ -> translateBlock classes ss  -- skip unsupported non-final stmts silently
 
 -- | Translate a statement that is the *last* statement in a block.
-translateStmtTail :: PySExpr -> Either Text Expr
-translateStmtTail s = case s of
+translateStmtTail :: Set.Set Text -> PySExpr -> Either Text Expr
+translateStmtTail classes s = case s of
   SList [SAtom "Return", SList [SAtom "None"]] ->
     Right (ELit (LitInt 0))
-  SList [SAtom "Return", e] -> translateExpr e
+  SList [SAtom "Return", e] -> translateExpr classes e
 
   SList [SAtom "If", testE, SList thenStmts, SList elseStmts] -> do
-    test  <- translateExpr testE
-    thenE <- translateBlock thenStmts
-    elseE <- translateBlock elseStmts
+    test  <- translateExpr classes testE
+    thenE <- translateBlock classes thenStmts
+    elseE <- translateBlock classes elseStmts
     pure $ ECase test
       [ Branch (PatLit (LitInt 0)) Nothing elseE
       , Branch (PatWild intT)      Nothing thenE
       ]
 
   SList [SAtom "Assign", SStr nm, valE] -> do
-    val <- translateExpr valE
+    val <- translateExpr classes valE
     pure $ ELet [[Bind (Name nm 0) intT val DefVal]] (EVar (Name nm 0))
 
-  SList [SAtom "ExprStmt", e] -> translateExpr e
+  SList [SAtom "ExprStmt", e] -> translateExpr classes e
 
   other -> Left $ "Unsupported tail statement: " <> T.pack (showHead other)
 
--- | Translate a Python expression node to a Core 'Expr'.
-translateExpr :: PySExpr -> Either Text Expr
-translateExpr (SList [SAtom "Constant", SInt n]) = Right (ELit (LitInt n))
-translateExpr (SList [SAtom "ConstantBool", SInt n]) = Right (ELit (LitInt n))
-translateExpr (SList [SAtom "ConstantStr", SStr s]) = Right (ELit (LitString s))
-translateExpr (SList [SAtom "Name", SStr nm]) = Right (EVar (Name nm 0))
+-- | Translate a Python expression node to a Core 'Expr'. The @classes@
+-- set carries the names of record classes in scope, so @Foo(...)@ becomes
+-- a constructor application instead of a plain function call.
+translateExpr :: Set.Set Text -> PySExpr -> Either Text Expr
+translateExpr _ (SList [SAtom "Constant", SInt n]) = Right (ELit (LitInt n))
+translateExpr _ (SList [SAtom "ConstantBool", SInt n]) = Right (ELit (LitInt n))
+translateExpr _ (SList [SAtom "ConstantStr", SStr s]) = Right (ELit (LitString s))
+translateExpr _ (SList [SAtom "Name", SStr nm]) = Right (EVar (Name nm 0))
 
-translateExpr (SList [SAtom "BinOp", SStr op, lE, rE]) = do
-  l <- translateExpr lE
-  r <- translateExpr rE
+translateExpr classes (SList [SAtom "BinOp", SStr op, lE, rE]) = do
+  l <- translateExpr classes lE
+  r <- translateExpr classes rE
   binOpFn <- pyBinOp op
   pure $ EApp (EVar (Name binOpFn 0)) [l, r]
 
-translateExpr (SList [SAtom "UnaryOp", SStr "USub", inner]) = do
-  v <- translateExpr inner
+translateExpr classes (SList [SAtom "UnaryOp", SStr "USub", inner]) = do
+  v <- translateExpr classes inner
   pure $ EApp (EVar (Name "negate" 0)) [v]
-translateExpr (SList [SAtom "UnaryOp", SStr op, _]) =
+translateExpr _ (SList [SAtom "UnaryOp", SStr op, _]) =
   Left $ "Unsupported unary op: " <> op
 
-translateExpr (SList [SAtom "Compare", lE, SStr op, rE]) = do
-  l <- translateExpr lE
-  r <- translateExpr rE
+translateExpr classes (SList [SAtom "Compare", lE, SStr op, rE]) = do
+  l <- translateExpr classes lE
+  r <- translateExpr classes rE
   cmpFn <- pyCmpOp op
   pure $ EApp (EVar (Name cmpFn 0)) [l, r]
 
-translateExpr (SList [SAtom "Call", SStr fname, SList args]) = do
-  argEs <- mapM translateExpr args
-  pure $ EApp (EVar (Name fname 0)) argEs
+-- Attribute access: obj.field becomes a selector call (the auto-derived
+-- selector function is generated by Frankenstein.Core.DeriveSelectors).
+translateExpr classes (SList [SAtom "Attr", objE, SStr field]) = do
+  obj <- translateExpr classes objE
+  pure $ EApp (EVar (Name field 0)) [obj]
 
-translateExpr other =
+translateExpr classes (SList [SAtom "Call", SStr fname, SList args]) = do
+  argEs <- mapM (translateExpr classes) args
+  if Set.member fname classes
+    then pure $ EApp (ECon (QName T.empty (Name fname 0))) argEs
+    else pure $ EApp (EVar (Name fname 0)) argEs
+
+translateExpr _ other =
   Left $ "Unsupported expression: " <> T.pack (showHead other)
 
 -- ---------------------------------------------------------------------------

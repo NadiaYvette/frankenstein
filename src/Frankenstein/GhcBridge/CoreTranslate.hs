@@ -52,6 +52,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
+import Data.Set (Set)
+import qualified Data.Set as Set
 
 -------------------------------------------------------------------------------
 -- Public API
@@ -148,9 +150,23 @@ trExpr (Lam b e)
           allParams = (translateName b, translateType (varType b)) : moreParams
       in F.ELam allParams (trExpr innerBody)
 
--- Let: translate binding groups
+-- Let: translate binding groups. If any binding produced an EDelay wrapper
+-- (lazy), wrap every use of that name inside the body with EForce so the
+-- thunk is actually forced before being used as a value.
 trExpr (Let bind body) =
-  F.ELet (translateBind bind) (trExpr body)
+  let groups   = translateBind bind
+      bodyCore = trExpr body
+      lazyNames = Set.fromList
+        [ F.bindName b
+        | g <- groups, b <- g
+        , case F.bindExpr b of
+            F.EDelay _ -> True
+            _          -> False
+        ]
+      forcedBody
+        | Set.null lazyNames = bodyCore
+        | otherwise          = wrapLazyUses lazyNames bodyCore
+  in F.ELet groups forcedBody
 
 -- Case: simplify I# unboxing pattern, then translate
 -- GHC Core: case scrut of { I# ds# -> rhs } → let ds# = scrut in rhs
@@ -435,15 +451,81 @@ decideLaziness :: Var -> CoreExpr -> F.Expr
 decideLaziness b e
   | isAbsDmd (idDemandInfo b)    = F.ELit (F.LitInt 0)  -- dead code
   | isStrictDmd (idDemandInfo b) = trExpr e              -- strict: no thunk
-  | isLambda e                   = trExpr e              -- lambda is a value, no thunk needed
+  | isCheapValue e               = trExpr e              -- already a value: no thunk needed
   | otherwise                     = F.EDelay (trExpr e)  -- lazy: wrap in thunk
 
--- | Check if a Core expression is a lambda (possibly under type abstraction/cast/tick)
-isLambda :: CoreExpr -> Bool
-isLambda (Lam _ _)   = True
-isLambda (Cast e _)  = isLambda e
-isLambda (Tick _ e)  = isLambda e
-isLambda _           = False
+-- | Wrap every reference to a lazy name with EForce, respecting shadowing.
+-- Used by the Let translator: when a let binding RHS was wrapped in EDelay,
+-- each use of that name in the body must force the thunk before use.
+wrapLazyUses :: Set F.Name -> F.Expr -> F.Expr
+wrapLazyUses s e = case e of
+  F.EVar n
+    | Set.member n s -> F.EForce (F.EVar n)
+    | otherwise       -> F.EVar n
+  F.ELit _            -> e
+  F.ECon _            -> e
+  F.EFunRef _         -> e
+  F.EApp f args       -> F.EApp (go f) (map go args)
+  F.ELam params body  ->
+    let s' = foldr (Set.delete . fst) s params
+    in F.ELam params (wrapLazyUses s' body)
+  F.ELet groups body  ->
+    -- Translate RHSs with the outer set minus names being rebound by this let.
+    -- (For non-recursive lets this is a conservative approximation; mutually
+    -- recursive groups may over-wrap if a bound name shadows a lazy outer one.)
+    let bound = Set.fromList [ F.bindName b | g <- groups, b <- g ]
+        s' = s `Set.difference` bound
+        groups' = map (map (\b -> b { F.bindExpr = wrapLazyUses s' (F.bindExpr b) })) groups
+    in F.ELet groups' (wrapLazyUses s' body)
+  F.ECase scrut brs ->
+    F.ECase (go scrut) (map goBranch brs)
+  F.ETypeApp e' ts    -> F.ETypeApp (go e') ts
+  F.ETypeLam tvs e'   -> F.ETypeLam tvs (go e')
+  F.EPerform q args   -> F.EPerform q (map go args)
+  F.EHandle eff h b   -> F.EHandle eff (go h) (go b)
+  F.ERetain e'        -> F.ERetain (go e')
+  F.ERelease e'       -> F.ERelease (go e')
+  F.EDrop e'          -> F.EDrop (go e')
+  F.EReuse r a        -> F.EReuse (go r) (go a)
+  F.EDelay e'         -> F.EDelay (go e')
+  F.EForce e'         -> F.EForce (go e')
+  where
+    go = wrapLazyUses s
+    goBranch br =
+      let pBound = patternBoundNames (F.branchPattern br)
+          s'     = s `Set.difference` pBound
+      in br { F.branchBody = wrapLazyUses s' (F.branchBody br) }
+
+-- | Collect names introduced by a pattern (so that branch bodies can shadow
+-- outer lazy bindings correctly).
+patternBoundNames :: F.Pattern -> Set F.Name
+patternBoundNames p = case p of
+  F.PatVar n _       -> Set.singleton n
+  F.PatCon _ subs    -> Set.unions (map patternBoundNames subs)
+  F.PatWild _        -> Set.empty
+  F.PatLit _         -> Set.empty
+
+-- | Check if a Core expression is already a value form that doesn't need
+-- thunking: lambdas, literals, and bare variables. Wrapping these in EDelay
+-- would only force a downstream EForce that we don't currently generate at
+-- use sites — so the value would be read as a raw thunk pointer.
+isCheapValue :: CoreExpr -> Bool
+isCheapValue (Lam _ _)   = True
+isCheapValue (Lit _)     = True
+isCheapValue (Var _)     = True
+isCheapValue (Cast e _)  = isCheapValue e
+isCheapValue (Tick _ e)  = isCheapValue e
+isCheapValue e@(App _ _) =
+  case collectArgs e of
+    -- I#(literal) is how GHC boxes small Int literals — cheap value.
+    (Var v, [Lit _]) | getOccString v == "I#" -> True
+    -- Type applications are cheap if the underlying expression is.
+    (fun, args) | all isTypeArg args -> isCheapValue fun
+    _ -> False
+  where
+    isTypeArg (Type _) = True
+    isTypeArg _        = False
+isCheapValue _           = False
 
 -------------------------------------------------------------------------------
 -- TyCon -> DataDecl translation

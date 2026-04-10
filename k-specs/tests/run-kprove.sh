@@ -37,6 +37,7 @@ PERCEUS_CLAIMS="$SPEC_DIR/perceus-claims.k"
 BRIDGE_CLAIMS="$SPEC_DIR/bridge-claims.k"
 EVIDENCE_CLAIMS="$SPEC_DIR/evidence-claims.k"
 LINKER_CLAIMS="$SPEC_DIR/linker-claims.k"
+EFFECTOPT_CLAIMS="$SPEC_DIR/effectopt-claims.k"
 
 # --- Sanity checks ---
 
@@ -128,12 +129,13 @@ case "$FILTER" in
     compile_def "$PERCEUS_DEF" "$ORGAN_IR" "ORGAN-IR" "ORGAN-IR-SYNTAX"
     run_claims "perceus-claims.k (20 claims)" "$PERCEUS_CLAIMS" "$PERCEUS_DEF"
     ;;
-  bridge|evidence|linker)
+  bridge|evidence|linker|effectopt)
     compile_def "$ALL_CLAIMS_DEF" "$ALL_CLAIMS_SRC" "ALL-CLAIMS-DEF" "ALL-CLAIMS-DEF-SYNTAX" "$ORGAN_IR" "$BRIDGE_PROPS"
     case "$FILTER" in
-      bridge)   run_claims "bridge-claims.k (67 claims)" "$BRIDGE_CLAIMS" "$ALL_CLAIMS_DEF" ;;
-      evidence) run_claims "evidence-claims.k (15 claims)" "$EVIDENCE_CLAIMS" "$ALL_CLAIMS_DEF" ;;
-      linker)   run_claims "linker-claims.k (18 claims)" "$LINKER_CLAIMS" "$ALL_CLAIMS_DEF" ;;
+      bridge)    run_claims "bridge-claims.k (67 claims)" "$BRIDGE_CLAIMS" "$ALL_CLAIMS_DEF" ;;
+      evidence)  run_claims "evidence-claims.k (15 claims)" "$EVIDENCE_CLAIMS" "$ALL_CLAIMS_DEF" ;;
+      linker)    run_claims "linker-claims.k (18 claims)" "$LINKER_CLAIMS" "$ALL_CLAIMS_DEF" ;;
+      effectopt) run_claims "effectopt-claims.k (41 claims)" "$EFFECTOPT_CLAIMS" "$ALL_CLAIMS_DEF" ;;
     esac
     ;;
   all)
@@ -143,10 +145,11 @@ case "$FILTER" in
     run_claims "bridge-claims.k (67 claims)" "$BRIDGE_CLAIMS" "$ALL_CLAIMS_DEF"
     run_claims "evidence-claims.k (15 claims)" "$EVIDENCE_CLAIMS" "$ALL_CLAIMS_DEF"
     run_claims "linker-claims.k (18 claims)" "$LINKER_CLAIMS" "$ALL_CLAIMS_DEF"
+    run_claims "effectopt-claims.k (41 claims)" "$EFFECTOPT_CLAIMS" "$ALL_CLAIMS_DEF"
     ;;
   *)
     echo "Unknown filter: $FILTER"
-    echo "Usage: $0 [perceus|bridge|evidence|linker|all]"
+    echo "Usage: $0 [perceus|bridge|evidence|linker|effectopt|all]"
     exit 1
     ;;
 esac

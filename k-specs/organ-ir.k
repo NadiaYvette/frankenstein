@@ -69,6 +69,7 @@ module ORGAN-IR-SYNTAX
 
   // --- Patterns ---
   syntax PatternList ::= List{Pattern, ","}
+  syntax PatternList ::= "noPatterns" [function, symbol(noPatterns)]
   syntax Pattern ::= PatCon(QName, PatternList)    [symbol(PatCon)]
                     | PatVar(Name, Type)             [symbol(PatVar)]
                     | PatWild(Type)                   [symbol(PatWild)]
@@ -196,6 +197,7 @@ module ORGAN-IR-TYPING
 
   // --- Empty expression list helper ---
   rule noArgs => .ExprList
+  rule noPatterns => .PatternList
 
   // --- Literal typing ---
   rule <k> typeOf(ELit(litInt(_)))    => #type(intType())    ...</k>

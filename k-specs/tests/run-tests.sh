@@ -230,6 +230,11 @@ check "eval: subtraction 10-3=7" \
   "eval(EApp(ECon($MINUS), ELit(litInt(10)), ELit(litInt(3))))" \
   '#val ( vlit ( litInt ( 7 ) ) )'
 
+GT='qname("builtin",name(">",0))'
+check "eval: greater-than 5>3=True" \
+  "eval(EApp(ECon($GT), ELit(litInt(5)), ELit(litInt(3))))" \
+  'conVal ( qname ( "std/core/types" , name ( "True" , 0 ) )'
+
 # --- String concatenation ---
 CONCAT='qname("builtin",name("++",0))'
 check "eval: string concatenation" \
@@ -357,6 +362,27 @@ check "effect: resume after let binding (3+10=13)" \
 check "effect: nested handlers, inner unused" \
   "eval(EHandle($CHOICE_EFF, ELam(param(name(\"k\",0), $T), EApp(EVar(name(\"k\",0)), ELit(litInt(1)))), EHandle($EXN_EFF, ELam(param(name(\"k2\",0), $T), ELit(litInt(0))), EApp(ECon($PLUS), EPerform($CHOICE_QN, noArgs), ELit(litInt(5))))))" \
   '#val ( vlit ( litInt ( 6 ) ) )'
+
+# --- Test: Mercury semidet pattern (success) ---
+# Semidet: case(69 > 60) { True -> 1; _ -> perform exn.fail }
+# 69 > 60 is True, so returns 1
+TRUE_CON='qname("std/core/types", name("True", 0))'
+check "effect: mercury semidet success (69 > 60)" \
+  "eval(EHandle($EXN_EFF, ELam(param(name(\"k\",0), $T), ELit(litInt(0))), ECase(EApp(ECon($GT), ELit(litInt(69)), ELit(litInt(60))), branch(PatCon($TRUE_CON, noPatterns), noGuard, ELit(litInt(1))) ; branch(PatWild($T), noGuard, EPerform($EXN_QN, noArgs)))))" \
+  '#val ( vlit ( litInt ( 1 ) ) )'
+
+# --- Test: Mercury semidet pattern (failure) ---
+# Semidet: case(5 > 60) { True -> 1; _ -> perform exn.fail }
+# 5 > 60 is False, so performs exn, handler returns 0
+check "effect: mercury semidet failure (5 > 60)" \
+  "eval(EHandle($EXN_EFF, ELam(param(name(\"k\",0), $T), ELit(litInt(0))), ECase(EApp(ECon($GT), ELit(litInt(5)), ELit(litInt(60))), branch(PatCon($TRUE_CON, noPatterns), noGuard, ELit(litInt(1))) ; branch(PatWild($T), noGuard, EPerform($EXN_QN, noArgs)))))" \
+  '#val ( vlit ( litInt ( 0 ) ) )'
+
+# --- Test: Mercury choice disjunction pattern ---
+# choose(choice) { 1 -> 10; _ -> 20 }  =>  handler resumes with 1, so case takes first branch => 10
+check "effect: mercury choice disjunction (resume with 1)" \
+  "eval(EHandle($CHOICE_EFF, ELam(param(name(\"k\",0), $T), EApp(EVar(name(\"k\",0)), ELit(litInt(1)))), ECase(EPerform($CHOICE_QN, noArgs), branch(PatLit(litInt(1)), noGuard, ELit(litInt(10))) ; branch(PatWild($T), noGuard, ELit(litInt(20))))))" \
+  '#val ( vlit ( litInt ( 10 ) ) )'
 
 echo ""
 echo "============================================================"

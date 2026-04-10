@@ -10,13 +10,13 @@ charts the path from working prototype to research contribution.
 
 ---
 
-## Phase 1: The Polyglot Promise Made Real
+## Phase 1: The Polyglot Promise Made Real ✓
 
 **Goal**: A single binary where 4 functions in 4 languages compose through
 shared algebraic effects. This is the demo that makes people understand
 what Frankenstein is.
 
-### 1a. Cross-Language Calling Convention
+### 1a. Cross-Language Calling Convention ✓
 
 Write a program where:
 - **Haskell** defines a pure recursive function (e.g., fibonacci)
@@ -32,7 +32,7 @@ cross-module effects, MLIR emitter handling all four bridges' output patterns.
 
 **Deliverable**: `frankenstein fib.hs accumulate.rs search.m main.kk --compile && ./a.out`
 
-### 1b. Polyglot Test Suite
+### 1b. Polyglot Test Suite ✓
 
 Create `examples/polyglot-demo/` with the 4-language program above plus
 a test script that:
@@ -43,48 +43,63 @@ a test script that:
 
 ---
 
-## Phase 2: K as the Living Specification
+## Phase 2: K as the Living Specification ✓
 
 **Goal**: Make K Framework the source of truth for the entire IR, not just
 Perceus. Every transformation verified against a formal model.
 
-### 2a. Full OrganIR Operational Semantics in K
+### 2a. Full OrganIR Operational Semantics in K ✓
 
-Extend `organ-ir.k` from typing rules + Perceus to a complete executable
-semantics:
-- **Evaluation rules**: `EApp`, `ELam` (beta-reduction), `ELet`, `ECase`
-  (pattern matching), `EDelay`/`EForce` (thunk semantics)
-- **Effect semantics**: `EPerform` searches the handler stack, `EHandle`
-  pushes/pops handlers, evidence-passing translation as K rewrite rules
-- **Memory model**: Heap allocation for `kk_alloc_con`, refcount tracking
-  for `kk_retain`/`kk_drop`, thunk memoization
+`organ-ir.k` (1229 lines, 240 rules) is a complete executable semantics:
+- **Evaluation rules** ✓: `EApp`, `ELam` (closure-based beta-reduction), `ELet`,
+  `ECase` (pattern matching with PatLit/PatCon/PatVar/PatWild), `EDelay`/`EForce`
+  (thunk capture/memoization), `ETypeApp`/`ETypeLam` (type erasure)
+- **Effect semantics** ✓: `EPerform` searches the handler stack via delimited
+  continuation capture, `EHandle` pushes/pops handlers on `<effectStack>`, full
+  abort and resume (tail-resumptive) patterns, nested handler support
+- **Memory model** ✓: Perceus operations (`ERetain`, `EDrop`, `ERelease`, `EReuse`)
+  as semantic no-ops in the reference interpreter, store-based variable binding
+- **Builtins** ✓: Arithmetic (`+`, `-`, `*`, `/`, `mod`), comparisons
+  (`==`, `<`, `>`, `<=`, `>=`), string concat (`++`), negate
+- **118 krun shell tests** passing (typing, free vars, usage counting,
+  Perceus transforms, evaluation, effects, Mercury semidet/choice patterns,
+  bridge properties)
 
-This turns `krun` into a reference interpreter for OrganIR.
+### 2b. Property-Based Testing via K Oracle ✓
 
-### 2b. Property-Based Testing via K Oracle
+`test/KOracle.hs` (479 lines):
+- 4 QuickCheck properties: random pure, arithmetic, let+case, effect expressions
+- Generators: `genArithExpr`, `genLetCaseExpr`, `genEffectExpr`
+- Compares `krun(eval(expr))` against MLIR pipeline → native binary output
+- Integrated into `cabal test` (13 krun tests in test suite, all passing)
 
-- Generate random OrganIR programs (QuickCheck-style)
-- Run through both `krun` (K reference) and Frankenstein MLIR pipeline
-- Compare outputs — any divergence is a compiler bug
-- Integrate into `cabal test` as a slow test suite
+### 2c. Bridge Bisimulation Proofs ✓
 
-### 2c. Bridge Bisimulation Proofs
+`test/BridgeBisim.hs`: 8 bridge test suites verifying translation preserves
+observable behavior:
+- **GHC bridge**: `krun(translateGHC(Arith.hs)) == 44`, factorial == 3628800,
+  krun == ghc native comparison
+- **Koka bridge**: `krun(translateKoka(arith.kk)) == 44`
+- **Rust bridge**: `krun(translateRust(arith.rs)) == 44`, krun == rustc native
+- **Mercury bridge**: structural tests (OrganIR defs produced)
+- **Python bridge**: `krun(translatePython(arith.py)) == 44`
+- **Go bridge**: `krun(translateGo(arith.go)) == 44`
+- **Futhark bridge**: `krun(translateFuthark(arith.fut)) == 44`
+- **Scheme bridge**: structural tests (main Def, call/cc)
 
-For each bridge, prove (or test) that the translation preserves observable
-behavior:
-- **GHC bridge**: For pure functions, `krun(translateGHC(e))` equals
-  GHC's evaluation of `e`
-- **Koka bridge**: `krun(translateKoka(e))` equals Koka's evaluation
-- Use K's LAMBDA semantics as the reference for the pure functional subset
-- Use the bundled IMP/SIMPLE semantics for imperative fragments
+### 2d. Extend kprove Claims ✓
 
-### 2d. Extend kprove Claims
-
-Beyond Perceus (20 claims verified), add claims for:
-- Evidence-passing preserves effect semantics
-- Linker name-rewriting preserves call graph
-- MLIR emission preserves evaluation order
-- Bridge-specific invariants (already 47 property tests, promote to claims)
+313 claims across 5 files, verifiable via `k-specs/tests/run-kprove.sh`:
+- **Perceus claims** (43): free var analysis, drop insertion, retain for
+  multi-use, lambda scope drops, identity properties
+- **Evidence claims** (30): no EHandle/EPerform post-pass, single-op/multi-op
+  projection with evv_select, unhandled-effect fallthrough
+- **Bridge claims** (155): GHC (lazy/strict/forall), Koka (constructor rewriting),
+  Rust (ownership/affine), Mercury (determinism mapping), Python, Go, Futhark, Scheme
+- **Linker claims** (44): name rewriting preserves local scope, main unmangled,
+  mangling deterministic, cross-module resolution
+- **EffectOpt claims** (41): identity handler detection, tail-resumptive detection,
+  handler inlining substitution correctness
 
 ---
 
@@ -585,9 +600,10 @@ produces 3628800. All 56 cabal tests pass plus 2 new Scheme structural tests.
 - **MLIR emitter**: func/arith/scf/llvm dialects, lambda lifting, closures with
   real function pointers, thunks, bool/char/int/float/string support
 - **Runtime**: Perceus RC (`kk_retain`/`kk_drop`), boxed values, thunks
-- **K specs**: OrganIR typing + Perceus + full effect semantics (organ-ir.k),
-  104 krun tests (incl. 9 algebraic effect tests), 47 bridge property tests,
-  120 kprove-verified claims (20 Perceus + 67 bridge + 13 evidence + 20 linker)
+- **K specs**: OrganIR typing + Perceus + full effect semantics (organ-ir.k,
+  1229 lines, 240 rules), 118 krun tests (incl. 42 algebraic effect tests
+  with Mercury semidet/choice patterns), 47 bridge property tests,
+  313 kprove claims (43 Perceus + 155 bridge + 30 evidence + 44 linker + 41 effectopt)
 - **Effect semantics in K**: Full `EPerform`/`EHandle` with delimited continuation
   capture, abort (exn) and resume (choice) patterns, nested handler support
 - **K oracle (Phase 2b)**: QuickCheck differential testing — random OrganIR programs
@@ -649,8 +665,11 @@ produces 3628800. All 56 cabal tests pass plus 2 new Scheme structural tests.
 - Phase 3c: Cycle detection — Bacon-Rajan collector, static analysis, C tests, K tests
 - Phase 3b: GHC Core patterns — primops, lambda-not-thunk, Bool→i64, negate, test programs
 - Phase 3a: Haskell RC feasibility — Factorial.hs E2E, I# simplification, print builtin, profiled runtime
-- Phase 2d: extended kprove claims (120 total: bridge, evidence, linker)
-- Phase 2c: bridge bisimulation proofs (GHC, Koka, Rust, Mercury)
+- `89367e2` — Phase 1: Fix polyglot demo — semidet test result, HLDS comment parsing, external runtime dispatch
+- `9ef75e4` — Redirect all diagnostic output to stderr for clean MLIR piping
+- `54e11e1` — Phase 4: Fix effect optimization traversals and --emit-effect-mlir pipeline
+- Phase 2d: extended kprove claims (313 total: perceus, bridge, evidence, linker, effectopt)
+- Phase 2c: bridge bisimulation proofs (GHC, Koka, Rust, Mercury, Python, Go, Futhark, Scheme)
 - `ac1a533` — Phase 1b: polyglot test suite, Mercury choice effect (multi-shot)
 - `093f0ce` — Closures, thunks, MIR parsing, linker, evidence, strings
 - `95f43c8` — Perceus retains, MLIR improvements, data decls, tests, kprove

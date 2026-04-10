@@ -24,7 +24,6 @@ module Frankenstein.Core.EffectOpt
 import Frankenstein.Core.Types
 
 import Data.Text (Text)
-import qualified Data.Text as T
 
 -- | Statistics from effect optimization passes
 data EffectOptStats = EffectOptStats
@@ -77,54 +76,22 @@ inlineLocalHandler :: EffectOptStats -> Expr -> (Expr, EffectOptStats)
 inlineLocalHandler stats expr = case expr of
   EHandle effRow handler@(ELam _params _handlerBody) body ->
     let effName = effectRowNameText effRow
-        -- Check if body has any performs for this effect
         performCount = countPerforms effName body
     in if performCount > 0
        then
-         -- Inline: replace each EPerform with handler application
+         -- Inline: replace each EPerform with handler application,
+         -- then recurse into the result to enable further inlining.
          let body' = substitutePerforms effName handler body
-             -- Recurse into the result (may enable further inlining)
              (body'', stats') = inlineLocalHandler
                (stats { eosInlined = eosInlined stats + performCount }) body'
          in (body'', stats')
        else
-         -- No performs in body — recurse into both handler and body
-         let (handler', s1) = inlineLocalHandler stats handler
-             (body', s2) = inlineLocalHandler s1 body
-         in (EHandle effRow handler' body', s2)
+         -- No performs in body — fall through to generic traversal,
+         -- which recurses into both handler and body.
+         mapChildren inlineLocalHandler stats expr
 
-  -- Recurse through all expression forms
-  EHandle effRow handler body ->
-    let (handler', s1) = inlineLocalHandler stats handler
-        (body', s2) = inlineLocalHandler s1 body
-    in (EHandle effRow handler' body', s2)
-
-  EApp fn as ->
-    let (fn', s1) = inlineLocalHandler stats fn
-        (as', s2) = foldExprs s1 as
-    in (EApp fn' as', s2)
-
-  ELam params body ->
-    let (body', s') = inlineLocalHandler stats body
-    in (ELam params body', s')
-
-  ELet bgs body ->
-    let (bgs', s1) = foldBindGroups stats bgs
-        (body', s2) = inlineLocalHandler s1 body
-    in (ELet bgs' body', s2)
-
-  ECase scrut branches ->
-    let (scrut', s1) = inlineLocalHandler stats scrut
-        (branches', s2) = foldBranches s1 branches
-    in (ECase scrut' branches', s2)
-
-  EDelay e -> let (e', s) = inlineLocalHandler stats e in (EDelay e', s)
-  EForce e -> let (e', s) = inlineLocalHandler stats e in (EForce e', s)
-  ERetain e -> let (e', s) = inlineLocalHandler stats e in (ERetain e', s)
-  EDrop e -> let (e', s) = inlineLocalHandler stats e in (EDrop e', s)
-
-  -- Leaves
-  _ -> (expr, stats)
+  -- All other shapes: recurse into children via the generic traversal.
+  _ -> mapChildren inlineLocalHandler stats expr
 
 -- | Count EPerform nodes for a given effect in an expression.
 countPerforms :: Text -> Expr -> Int
@@ -192,37 +159,12 @@ elimIdentityHandler :: EffectOptStats -> Expr -> (Expr, EffectOptStats)
 elimIdentityHandler stats expr = case expr of
   EHandle _effRow handler body
     | isIdentityHandler handler ->
-        let (body', stats') = elimIdentityHandler
-              (stats { eosEliminated = eosEliminated stats + 1 }) body
-        in (body', stats')
+        -- Drop the handler wrapper and recurse into the body.
+        elimIdentityHandler
+          (stats { eosEliminated = eosEliminated stats + 1 }) body
 
-  EHandle effRow handler body ->
-    let (handler', s1) = elimIdentityHandler stats handler
-        (body', s2) = elimIdentityHandler s1 body
-    in (EHandle effRow handler' body', s2)
-
-  EApp fn as ->
-    let (fn', s1) = elimIdentityHandler stats fn
-        (as', s2) = foldExprs s1 as
-    in (EApp fn' as', s2)
-
-  ELam params body ->
-    let (body', s') = elimIdentityHandler stats body
-    in (ELam params body', s')
-
-  ELet bgs body ->
-    let (bgs', s1) = foldBindGroups stats bgs
-        (body', s2) = elimIdentityHandler s1 body
-    in (ELet bgs' body', s2)
-
-  ECase scrut branches ->
-    let (scrut', s1) = elimIdentityHandler stats scrut
-        (branches', s2) = foldBranches s1 branches
-    in (ECase scrut' branches', s2)
-
-  EDelay e -> let (e', s) = elimIdentityHandler stats e in (EDelay e', s)
-  EForce e -> let (e', s) = elimIdentityHandler stats e in (EForce e', s)
-  _ -> (expr, stats)
+  -- All other shapes: recurse into children via the generic traversal.
+  _ -> mapChildren elimIdentityHandler stats expr
 
 -- | Check if a handler is the identity: \x k -> k(x)
 -- Forms we recognize:
@@ -253,35 +195,15 @@ annotateTailResumptive = fst . annotateTailRes emptyStats
 
 annotateTailRes :: EffectOptStats -> Expr -> (Expr, EffectOptStats)
 annotateTailRes stats expr = case expr of
-  EHandle effRow handler body ->
-    let isTailRes = isTailResumptiveHandler handler
-        stats' = if isTailRes
+  EHandle _effRow handler _body ->
+    -- Count this handler if it's tail-resumptive, then recurse.
+    let stats' = if isTailResumptiveHandler handler
                  then stats { eosTailRes = eosTailRes stats + 1 }
                  else stats
-        (handler', s1) = annotateTailRes stats' handler
-        (body', s2) = annotateTailRes s1 body
-    in (EHandle effRow handler' body', s2)
+    in mapChildren annotateTailRes stats' expr
 
-  EApp fn as ->
-    let (fn', s1) = annotateTailRes stats fn
-        (as', s2) = foldExprs s1 as
-    in (EApp fn' as', s2)
-
-  ELam params body ->
-    let (body', s') = annotateTailRes stats body
-    in (ELam params body', s')
-
-  ELet bgs body ->
-    let (bgs', s1) = foldBindGroups stats bgs
-        (body', s2) = annotateTailRes s1 body
-    in (ELet bgs' body', s2)
-
-  ECase scrut branches ->
-    let (scrut', s1) = annotateTailRes stats scrut
-        (branches', s2) = foldBranches s1 branches
-    in (ECase scrut' branches', s2)
-
-  _ -> (expr, stats)
+  -- All other shapes: recurse into children via the generic traversal.
+  _ -> mapChildren annotateTailRes stats expr
 
 -- | Check if a handler always calls resume (the last param) in tail position.
 -- Pattern: \(args..., resume) -> ... resume(result)
@@ -312,16 +234,99 @@ effectRowNameText (EffectRowExtend qn _) = qnameModule qn <> nameText (qnameName
 effectRowNameText (EffectRowVar tv) = nameText (tvName tv)
 effectRowNameText EffectRowEmpty = "pure"
 
-foldExprs :: EffectOptStats -> [Expr] -> ([Expr], EffectOptStats)
-foldExprs stats [] = ([], stats)
-foldExprs stats (e:es) =
-  -- Use inlineLocalHandler as the generic recursive transform
-  -- Actually, we need to thread the specific pass through. For simplicity,
-  -- just return unchanged — the top-level traversal handles recursion.
-  (e:es, stats)
+-- | Apply a pass function to every direct sub-expression of @e@, threading
+-- the 'EffectOptStats' state left-to-right. This is the workhorse that
+-- guarantees passes reach handlers/performs buried anywhere in the tree:
+-- earlier revisions only recursed through a handful of constructors and
+-- silently skipped 'EApp' arguments, 'ELet' bindings, and 'ECase' branches.
+mapChildren
+  :: (EffectOptStats -> Expr -> (Expr, EffectOptStats))
+  -> EffectOptStats -> Expr -> (Expr, EffectOptStats)
+mapChildren f s expr = case expr of
+  -- Leaves
+  EVar _    -> (expr, s)
+  ELit _    -> (expr, s)
+  ECon _    -> (expr, s)
+  EFunRef _ -> (expr, s)
 
-foldBindGroups :: EffectOptStats -> [BindGroup] -> ([BindGroup], EffectOptStats)
-foldBindGroups stats bgs = (bgs, stats)
+  EApp fn as ->
+    let (fn', s1) = f s fn
+        (as', s2) = mapList f s1 as
+    in (EApp fn' as', s2)
 
-foldBranches :: EffectOptStats -> [Branch] -> ([Branch], EffectOptStats)
-foldBranches stats brs = (brs, stats)
+  ELam params body ->
+    let (body', s') = f s body
+    in (ELam params body', s')
+
+  ELet bgs body ->
+    let (bgs', s1) = mapBindGroups f s bgs
+        (body', s2) = f s1 body
+    in (ELet bgs' body', s2)
+
+  ECase scrut branches ->
+    let (scrut', s1) = f s scrut
+        (branches', s2) = mapBranches f s1 branches
+    in (ECase scrut' branches', s2)
+
+  ETypeApp e tys ->
+    let (e', s') = f s e in (ETypeApp e' tys, s')
+  ETypeLam tvs e ->
+    let (e', s') = f s e in (ETypeLam tvs e', s')
+
+  EPerform qn args ->
+    let (args', s') = mapList f s args
+    in (EPerform qn args', s')
+  EHandle effRow handler body ->
+    let (handler', s1) = f s handler
+        (body', s2) = f s1 body
+    in (EHandle effRow handler' body', s2)
+
+  ERetain  e -> let (e', s') = f s e in (ERetain  e', s')
+  ERelease e -> let (e', s') = f s e in (ERelease e', s')
+  EDrop    e -> let (e', s') = f s e in (EDrop    e', s')
+  EReuse a b ->
+    let (a', s1) = f s a
+        (b', s2) = f s1 b
+    in (EReuse a' b', s2)
+
+  EDelay e -> let (e', s') = f s e in (EDelay e', s')
+  EForce e -> let (e', s') = f s e in (EForce e', s')
+
+mapList
+  :: (EffectOptStats -> Expr -> (Expr, EffectOptStats))
+  -> EffectOptStats -> [Expr] -> ([Expr], EffectOptStats)
+mapList _ s []     = ([], s)
+mapList f s (e:es) =
+  let (e', s1)  = f s e
+      (es', s2) = mapList f s1 es
+  in (e' : es', s2)
+
+mapBindGroups
+  :: (EffectOptStats -> Expr -> (Expr, EffectOptStats))
+  -> EffectOptStats -> [BindGroup] -> ([BindGroup], EffectOptStats)
+mapBindGroups _ s []     = ([], s)
+mapBindGroups f s (g:gs) =
+  let (g', s1)  = mapBindGroup f s g
+      (gs', s2) = mapBindGroups f s1 gs
+  in (g' : gs', s2)
+
+mapBindGroup
+  :: (EffectOptStats -> Expr -> (Expr, EffectOptStats))
+  -> EffectOptStats -> BindGroup -> (BindGroup, EffectOptStats)
+mapBindGroup _ s []     = ([], s)
+mapBindGroup f s (b:bs) =
+  let (be, s1)  = f s (bindExpr b)
+      (bs', s2) = mapBindGroup f s1 bs
+  in (b { bindExpr = be } : bs', s2)
+
+mapBranches
+  :: (EffectOptStats -> Expr -> (Expr, EffectOptStats))
+  -> EffectOptStats -> [Branch] -> ([Branch], EffectOptStats)
+mapBranches _ s []       = ([], s)
+mapBranches f s (br:rest) =
+  let (body', s1) = f s (branchBody br)
+      (guard', s2) = case branchGuard br of
+        Nothing -> (Nothing, s1)
+        Just g  -> let (g', s') = f s1 g in (Just g', s')
+      (rest', s3) = mapBranches f s2 rest
+  in (br { branchBody = body', branchGuard = guard' } : rest', s3)

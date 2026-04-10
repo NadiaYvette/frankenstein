@@ -55,10 +55,13 @@ main = do
       results <- mapM (compileFile (flagFromJson flags)) files
       -- Run per-module evidence pass before linking, so that EPerform/EHandle
       -- references are converted to plain function calls that the linker can resolve.
+      -- Skip this when --emit-effect-mlir: we want raw effects in the output.
       let (errs, rawProgs) = partitionResults results
           -- Auto-derive record field selectors before the linker so they
           -- count as defined symbols and the linker doesn't warn about them.
-          progs = map (evidencePass . deriveSelectors) rawProgs
+          progs = if flagEmitEffectMlir flags
+                  then map deriveSelectors rawProgs
+                  else map (evidencePass . deriveSelectors) rawProgs
       if not (null errs) then
         mapM_ (\(f, e) -> TIO.putStrLn $ "Error [" <> T.pack f <> "]: " <> e) errs
       else do
@@ -400,9 +403,9 @@ handleOutput progRaw flags = do
         , ecKokaRuntimePath = Just "runtime/kk_runtime.c"
         , ecTarget = flagTarget flags
         }
-  -- Print optimization stats if any optimizations fired
+  -- Print optimization stats if any optimizations fired (not for effect-dialect mode)
   let totalOpts = eosInlined optStats + eosEliminated optStats + eosTailRes optStats
-  if totalOpts > 0
+  if totalOpts > 0 && not (flagEmitEffectMlir flags)
     then TIO.putStrLn $ "Effect opts: " <> T.pack (show (eosInlined optStats)) <> " inlined, "
                 <> T.pack (show (eosEliminated optStats)) <> " eliminated, "
                 <> T.pack (show (eosTailRes optStats)) <> " tail-resumptive"
@@ -421,8 +424,10 @@ handleOutput progRaw flags = do
             Left err -> TIO.putStrLn $ "Compilation error: " <> err
             Right path -> TIO.putStrLn $ "Compiled: " <> T.pack path
       | flagEmitEffectMlir flags -> do
-          -- Emit MLIR with frankenstein.* dialect ops (no evidence pass)
-          let effectProg = insertPerceus optProg
+          -- Emit MLIR with frankenstein.* dialect ops — skip both the
+          -- effect optimizer (which would inline handlers) and the
+          -- evidence pass, so EHandle/EPerform appear as dialect ops.
+          let effectProg = insertPerceus prog0
           TIO.putStrLn $ emitProgramWithEffects effectProg
       | flagEmitCore flags -> do
           TIO.putStrLn "=== Frankenstein Core ==="

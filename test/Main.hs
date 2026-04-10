@@ -325,6 +325,44 @@ effectOptTests = testGroup "Effect Optimization"
         EHandle {} -> pure ()
         _          -> assertFailure "should preserve non-identity handler"
 
+  , testCase "eliminateIdentityHandlers: reaches handler inside ELet body" $
+      -- Regression: previously the pass used stub traversals that skipped
+      -- ELet bindings and ECase branches, so buried handlers were missed.
+      let exnEff = QName "std" (mkName "exn")
+          handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (EApp (EVar (Name "k" 2)) [EVar (Name "x" 1)])
+          innerBody = ELit (LitInt 42)
+          handleExpr = EHandle (EffectRowExtend exnEff EffectRowEmpty) handler innerBody
+          -- Wrap the handle inside a let-body
+          outerExpr = ELet [[Bind (mkName "dummy") intType (ELit (LitInt 0)) DefVal]]
+                        handleExpr
+          result = eliminateIdentityHandlers outerExpr
+      in case result of
+        ELet _ (ELit (LitInt 42)) -> pure ()  -- handler eliminated
+        _ -> assertFailure $ "expected identity handler inside ELet to be eliminated, got: "
+              ++ show result
+
+  , testCase "eliminateIdentityHandlers: reaches handler inside ECase branch" $
+      let exnEff = QName "std" (mkName "exn")
+          handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (EApp (EVar (Name "k" 2)) [EVar (Name "x" 1)])
+          handleExpr = EHandle (EffectRowExtend exnEff EffectRowEmpty) handler (ELit (LitInt 99))
+          caseExpr = ECase (ELit (LitInt 0))
+                       [Branch (PatWild intType) Nothing handleExpr]
+          result = eliminateIdentityHandlers caseExpr
+      in assertBool "identity handler in case branch should be eliminated"
+           (not (containsHandle result))
+
+  , testCase "eliminateIdentityHandlers: reaches handler inside EApp argument" $
+      let exnEff = QName "std" (mkName "exn")
+          handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (EApp (EVar (Name "k" 2)) [EVar (Name "x" 1)])
+          handleExpr = EHandle (EffectRowExtend exnEff EffectRowEmpty) handler (ELit (LitInt 7))
+          appExpr = EApp (EVar (mkName "f")) [handleExpr]
+          result = eliminateIdentityHandlers appExpr
+      in assertBool "identity handler in app argument should be eliminated"
+           (not (containsHandle result))
+
   , testCase "effectOptimizeWithStats: reports zero stats for no-effect program" $
       let prog = mkProgram "test" "t"
             [ mkFunDef "test" "id"

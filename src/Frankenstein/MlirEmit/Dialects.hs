@@ -173,8 +173,8 @@ renderOp EvvPop = "func.call @kk_evv_pop() : () -> ()"
 renderOp (EvvLookup v) = "func.call @kk_evv_lookup(" <> valName v <> ") : (i64) -> i64"
 -- Frankenstein effect dialect (high-level, unregistered dialect ops)
 renderOp (FrankHandle eff handlerSsa bodySsa) =
-  "\"frankenstein.handle\"(%" <> handlerSsa <> ") {effect = \"" <> eff <> "\"}"
-  <> " // body result: %" <> bodySsa
+  "\"frankenstein.handle\"(%" <> handlerSsa <> ") {effect = \"" <> eff
+  <> "\", body_result = \"%" <> bodySsa <> "\"} : (i64) -> ()"
 renderOp (FrankPerform eff op argSsas) =
   "\"frankenstein.perform\"(" <> T.intercalate ", " ["%" <> a | a <- argSsas]
   <> ") {effect = \"" <> eff <> "\", op = \"" <> op <> "\"} : ("

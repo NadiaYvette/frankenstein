@@ -554,6 +554,8 @@ runtimeNames = Set.fromList
   , "new_ref", "newIORef", "ref"
   , "get_ref", "readIORef", "deref"
   , "set_ref", "writeIORef"
+  -- Mercury choice effect runtime (iterative path enumeration)
+  , "mercury_choose", "mercury_collect_choices"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

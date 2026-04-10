@@ -212,8 +212,9 @@ emitProgramText prog =
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
-                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
-                         (buildTopFnArity renamedDefs)
+                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs)
+                          `Set.union` externalRuntimeFns)
+                         (buildTopFnArity renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
                          (assignProgramTags prog)
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
@@ -402,8 +403,9 @@ emitProgramWithEffects prog =
       stripTopDelay e           = e
       -- Key difference: esEffectDialect = True
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
-                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
-                         (buildTopFnArity renamedDefs)
+                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs)
+                          `Set.union` externalRuntimeFns)
+                         (buildTopFnArity renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
                          (assignProgramTags prog)
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
@@ -1924,6 +1926,47 @@ buildTopFnArity defs = Map.fromList
     topLamArity (ELam ps _)     = length ps
     topLamArity (ETypeLam _ e)  = topLamArity e
     topLamArity _               = 0
+
+-- | External C runtime functions that are declared as `func.func private`
+-- in MLIR and must be called directly (not through closure-indirect dispatch).
+externalRuntimeFns :: Set Text
+externalRuntimeFns = Set.fromList
+  [ "kk_drop", "kk_retain", "kk_release", "kk_reuse", "kk_is_unique"
+  , "kk_alloc_con", "kk_set_field", "kk_field", "kk_tag"
+  , "kk_thunk_create", "kk_thunk_force"
+  , "kk_evv_create", "kk_evv_set", "kk_evv_get", "kk_unhandled_effect"
+  , "printf", "puts", "exit", "exitWith", "malloc", "free"
+  , "println_str", "print_str", "putStrLn"
+  , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
+  , "read_line", "getLine", "read_file", "write_file"
+  , "args_count", "args_get", "args_progname"
+  , "new_ref", "get_ref", "set_ref"
+  , "kk_println_con"
+  -- Mercury choice effect runtime
+  , "mercury_choose", "mercury_collect_choices"
+  , "mercury_exn_fail", "mercury_fail"
+  ]
+
+externalRuntimeArity :: Map Text Int
+externalRuntimeArity = Map.fromList
+  [ ("kk_drop", 1), ("kk_retain", 1), ("kk_release", 1)
+  , ("kk_reuse", 2), ("kk_is_unique", 1)
+  , ("kk_alloc_con", 2), ("kk_set_field", 3), ("kk_field", 2), ("kk_tag", 1)
+  , ("kk_thunk_create", 1), ("kk_thunk_force", 1)
+  , ("kk_evv_create", 1), ("kk_evv_set", 3), ("kk_evv_get", 2)
+  , ("kk_unhandled_effect", 0)
+  , ("printf", 2), ("puts", 1), ("exit", 1), ("exitWith", 1)
+  , ("println_str", 1), ("print_str", 1), ("putStrLn", 1)
+  , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
+  , ("show_int", 1)
+  , ("read_line", 0), ("getLine", 0)
+  , ("read_file", 1), ("write_file", 2)
+  , ("args_count", 0), ("args_get", 1), ("args_progname", 0)
+  , ("new_ref", 1), ("get_ref", 1), ("set_ref", 2)
+  , ("kk_println_con", 3)
+  , ("mercury_choose", 0), ("mercury_collect_choices", 1)
+  , ("mercury_exn_fail", 0), ("mercury_fail", 0)
+  ]
 
 -- | Convert a Name to a unique MLIR SSA name.
 -- For names like "_" or "ds" that commonly collide, append the unique ID.

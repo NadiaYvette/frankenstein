@@ -190,11 +190,17 @@ translatePred pred' = do
       -- For semidet predicates: wrap in "if test then 1 else perform exn.fail"
       goalBody = case predDet pred' of
         Semidet ->
-          ECase rawGoalBody
-            [ Branch (PatLit (LitInt 1)) Nothing (ELit (LitInt 1))
-            , Branch (PatWild boolType) Nothing
-                (EPerform (QName "mercury" (Name "fail" 0)) [])
-            ]
+          -- For semidet with no output var, the CPS terminator is 0 and
+          -- the test result gets discarded. Use translateGoalAsTest which
+          -- yields the test result directly as the scrutinee.
+          let testExpr = case (outputName, predGoal pred') of
+                (Nothing, Just goal) -> translateGoalAsTest initialEnv goal
+                _                    -> rawGoalBody
+          in ECase testExpr
+               [ Branch (PatLit (LitInt 1)) Nothing (ELit (LitInt 1))
+               , Branch (PatWild boolType) Nothing
+                   (EPerform (QName "mercury" (Name "fail" 0)) [])
+               ]
         _ -> rawGoalBody
       boolType = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
 
@@ -231,6 +237,42 @@ detToEffectRow Erroneous = EffectRowExtend (QName "mercury" (Name "exn" 0)) Effe
 detToEffectRow CCMulti   = EffectRowExtend (QName "mercury" (Name "choice" 0)) EffectRowEmpty
 detToEffectRow CCNondet  = EffectRowExtend (QName "mercury" (Name "exn" 0))
                              (EffectRowExtend (QName "mercury" (Name "choice" 0)) EffectRowEmpty)
+
+-- | Translate a Mercury goal as a test expression that yields the
+-- boolean result directly (1 = success, 0 = failure). Used for semidet
+-- predicates with no output variable, where the goal IS the test.
+-- For conjunctions, evaluates each goal and returns the last result.
+-- For a single comparison, returns the comparison result.
+translateGoalAsTest :: Set Text -> MercuryGoal -> Expr
+translateGoalAsTest env (GoalCall predName' args)
+  | Just op <- T.stripPrefix "int." predName'
+  , [lhs, rhs] <- args =
+      EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
+  | otherwise =
+      EApp (EVar (Name predName' 0))
+           (map (\a -> EVar (Name a 0)) args)
+translateGoalAsTest env (GoalConj goals) = case goals of
+  []  -> ELit (LitInt 1)
+  [g] -> translateGoalAsTest env g
+  _   -> -- For multi-goal conjunctions, bind intermediate goals and
+         -- return the last. Use CPS for all but the last goal.
+         let initGoals = init goals
+             lastGoal  = last goals
+             envsFor   = scanl extendBindingsFor env goals
+             initPairs = zip initGoals envsFor
+             lastEnv   = envsFor !! (length goals - 1)
+             innerExpr = translateGoalAsTest lastEnv lastGoal
+         in foldr (\(g, e) acc -> translateGoalK e g acc) innerExpr initPairs
+translateGoalAsTest env (GoalIfThenElse cond then' else') =
+  ECase (translateGoalAsTest env cond)
+    [ Branch (PatLit (LitInt 1)) Nothing (translateGoalAsTest env then')
+    , Branch (PatWild boolTy)    Nothing (translateGoalAsTest env else')
+    ]
+  where boolTy = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
+translateGoalAsTest env goal =
+  -- Fallback: use CPS with the result as terminator — this handles
+  -- unification and other goal types correctly.
+  translateGoalK env goal (ELit (LitInt 1))
 
 -- | Translate a Mercury goal to a Frankenstein expression (legacy
 -- zero-knowledge entry point). Prefer 'translateGoalK' which threads

@@ -276,8 +276,12 @@ parseGoalLines ls =
       | otherwise -> parseSingleGoal (T.unlines (filter (not . isComment) stripped))
 
 isComment :: Text -> Bool
-isComment t = "%" `T.isPrefixOf` T.strip t || T.null (T.strip t) ||
-              "(" == T.strip t || ")" == T.strip t || ")." == T.strip t
+isComment t = let s = T.strip t
+              in "%" `T.isPrefixOf` s || T.null s ||
+                 s == "(" || s == ")" || s == ")." ||
+                 -- Mercury wraps disjunctions in "( % disjunction ... )" —
+                 -- treat the opening paren+comment as a comment line.
+                 ("(" `T.isPrefixOf` s && "%" `T.isInfixOf` s)
 
 -- Split a list of lines on a delimiter that appears as a standalone line
 splitOnMarker :: Text -> [Text] -> [[Text]]

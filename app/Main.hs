@@ -3,7 +3,7 @@ module Main (main) where
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
-import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
+import Frankenstein.Core.Evidence (evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..))
 import Frankenstein.Core.DeriveSelectors (deriveSelectors)
 import Frankenstein.Core.FlattenPatterns (flattenPatterns)
@@ -54,15 +54,22 @@ main = do
     SwiftCrossCheck files -> mapM_ swiftCrossCheck files
     CompileFiles files flags -> do
       results <- mapM (compileFile (flagFromJson flags)) files
-      -- Run per-module evidence pass before linking, so that EPerform/EHandle
-      -- references are converted to plain function calls that the linker can resolve.
-      -- Skip this when --emit-effect-mlir: we want raw effects in the output.
+      -- Run evidence pass with a GLOBAL effect registry (from all modules)
+      -- BEFORE the linker mangles names.  This enables cross-module effect
+      -- dispatch: Module A can perform an effect handled by Module B.
       let (errs, rawProgs) = partitionResults results
           -- Auto-derive record field selectors before the linker so they
           -- count as defined symbols and the linker doesn't warn about them.
+          derived = map deriveSelectors rawProgs
+          -- Build a global effect registry from ALL modules' declarations,
+          -- enabling cross-module effect dispatch (Module A performs, Module B handles).
+          allEffectDecls = concatMap progEffects derived
+          globalEffects = collectGlobalEffects
+            (Program (QName "" (Name "" 0)) [] [] allEffectDecls)
+          -- Run evidence pass on each module using the global registry
           progs = if flagEmitEffectMlir flags
-                  then map deriveSelectors rawProgs
-                  else map (evidencePass . deriveSelectors) rawProgs
+                  then derived  -- keep raw EHandle/EPerform for dialect output
+                  else map (evidencePassGlobal globalEffects) derived
       if not (null errs) then
         mapM_ (\(f, e) -> TIO.putStrLn $ "Error [" <> T.pack f <> "]: " <> e) errs
       else do
@@ -396,8 +403,9 @@ handleOutput progRaw flags = do
   let prog0 = flattenPatterns (deriveSelectors progRaw)
   -- Run effect optimizations before evidence pass
   let (optProg, optStats) = effectOptimizeWithStats prog0
-  -- Use global evidence pass: collects all effect declarations across merged
-  -- modules, then threads evidence parameters for cross-module effects.
+  -- Run global evidence pass again on the merged program.  The pre-linker
+  -- pass resolves most effects; this catches any that survived (e.g. effects
+  -- introduced by flattenPatterns or deriveSelectors re-run).
   let globalEffects = collectGlobalEffects optProg
       prog = insertPerceus (evidencePassGlobal globalEffects optProg)
       config = defaultEmitConfig

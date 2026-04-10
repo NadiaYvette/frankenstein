@@ -589,13 +589,43 @@ produces 3628800. All 56 cabal tests pass plus 2 new Scheme structural tests.
 
 ---
 
-## Current State (2026-04-08, Phase 10a+10b complete)
+## Cross-Module Effect Dispatch ✓
+
+**Goal**: Module A performs an effect, Module B handles it — effects work across
+language boundaries after linking.
+
+**The problem**: The evidence pass ran per-module *before* the linker, so Module A's
+`EPerform(exn/fail)` was resolved to a default handler call `exn_fail()` — never
+reaching Module B's `EHandle(exn, ...)`.
+
+**The fix**: Build a global effect registry from all modules' `progEffects` and
+run `evidencePassGlobal` with that registry on each module *before* the linker
+mangles names. This gives every module visibility into every other module's effect
+declarations while keeping names unmangles for correct resolution.
+
+```
+BEFORE: compile → evidencePass (per-module, local effects only) → linker → emit
+AFTER:  compile → evidencePassGlobal (global registry) → linker → emit
+```
+
+Pipeline change in `Main.hs`:
+- Collect `allEffectDecls = concatMap progEffects` across all compiled modules
+- Build global registry via `collectGlobalEffects` on the combined declarations
+- Run `evidencePassGlobal globalEffects` on each module before linking
+- The `--emit-effect-mlir` path still preserves raw `EHandle`/`EPerform`
+
+**Result**: All 97 cabal tests pass (including new cross-module unit test),
+5/5 polyglot E2E tests pass, `--demo --compile` → 3628800.
+
+---
+
+## Current State (2026-04-11, cross-module effects complete)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
 - **Core IR**: Multiplicity, effect rows, Perceus ops, laziness ops
 - **Perceus pass**: Drop + retain insertion, formally verified (20 kprove claims)
-- **Evidence pass**: Single-op and multi-op effect dispatch, 13 kprove claims
+- **Evidence pass**: Single-op and multi-op effect dispatch with cross-module resolution, 13 kprove claims
 - **Linker**: Multi-module merging with cross-module name rewriting, 20 kprove claims
 - **MLIR emitter**: func/arith/scf/llvm dialects, lambda lifting, closures with
   real function pointers, thunks, bool/char/int/float/string support
@@ -645,12 +675,14 @@ produces 3628800. All 56 cabal tests pass plus 2 new Scheme structural tests.
 - **Phase 5: Wasm Backend** ✓: `--compile --target wasm32` produces `.wasm` binaries.
   485-byte factorial demo runs in Node.js and browser. Freestanding Wasm runtime with
   bump allocator. Browser demo at `web/index.html`. Pipeline: MLIR → llc(wasm32) → wasm-ld.
-- **Test suite**: 56 cabal tests (46 + 4 Wasm + 2 Python + 2 Go + 2 Futhark), 5 polyglot E2E, 3 Wasm validation tests,
-  K test oracle, 112 krun tests, 10 cycle collector C tests
+- **Test suite**: 97 cabal tests (incl. cross-module effect test), 5 polyglot E2E, 3 Wasm validation tests,
+  K test oracle, 116 krun tests, 10 cycle collector C tests
 - **End-to-end**: `--demo --compile` → 3628800, `--demo --compile --target wasm32` → 3628800 in Node.js,
   4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Cross-module effect dispatch — global effect registry enables Module A to perform effects handled by Module B. Pipeline reorder: `evidencePassGlobal` with combined registry runs before linker name-mangling. 97 cabal tests, 5/5 polyglot E2E.
+- `ae4f4ee` — Phase 2: K as living specification, 116 krun tests, noPatterns function, Mercury semidet/choice krun tests
 - Phase 9: Go + Futhark frontends (6th and 7th languages) — Two new bridges added in one go. **Go** (`Frankenstein.GoBridge.{AstParse,CoreTranslate}`) shells out to a small Go helper at `go-bridge/ast_to_sexp.go` that uses the standard library `go/parser` + `go/ast` to dump a tightly-restricted S-expression. The Haskell side runs the helper (auto-builds it via `go build` on first invocation), parses S-exprs (mirrors the Python S-expr parser), and translates the same statement-block early-return shape used by the Python bridge. Supported subset: `func`, `return`, `if/else`, `Assign`, `BasicLit` (int), `Ident`, `BinaryExpr`, `UnaryExpr`, `CallExpr`, `ParenExpr`, `GenDecl→Skip`. Op tokens align directly with canonical primitives (`+`, `<=`, `%→mod`, `&→andI#`, etc.). Goroutines/channels/methods/interfaces/structs/slices are explicitly out of scope. **Futhark** (`Frankenstein.FutharkBridge.{Parser,CoreTranslate}`) is fully in-tree — no external `futhark` binary dependency. A ~270-line hand-rolled Pratt/precedence-climbing parser in `Parser.hs` accepts top-level `let name (p: t) ... : ret = expr` definitions, integer literals, identifiers, function application by juxtaposition, parens, binary ops (`+ - * / %` arith, `== != < <= > >=` comparisons, `& | ^` bitwise) with proper precedence levels (2/3/4), unary minus, `if/then/else`, and `let x = e in body`. Type annotations are accepted and discarded (everything is `i64`). Arrays, SOACs, modules, lambdas, records, tuples are deliberately rejected. Both bridges wired into `compileFile` via `.go` and `.fut` extensions. End-to-end: `examples/factorial.go --compile` and `examples/factorial.fut --compile` each produce native binaries that print `3628800`. Test suite: 56 cabal tests (52 prior + 4: arith.go K-bisim, arith.fut K-bisim, factorial.go structural, factorial.fut structural). The factorial K-bisim is structural-only for the same reason as Python (early-return → `case (n<=1) of 0 -> ... ; _ -> ...` doesn't match the K oracle's constructor-pattern expectation), but the native pipeline handles them correctly.
 - Phase 8: Python frontend (5th language) — `Frankenstein.PythonBridge.{AstParse,CoreTranslate}` shells out to a small `python-bridge/ast_to_sexp.py` helper that walks `ast.parse()` and emits a tightly-restricted S-expression. The Haskell side parses S-exprs (35 lines, no aeson dep) and translates to OrganIR. Supported subset: `def`, `return`, `if/else` (early-return pattern), `Assign`, integer literals, `Name`, `Call`, binary ops `+ - * // %`, comparisons `== != < <= > >=`, unary negate. All values typed as `int`, multiplicity `Many`. Operator names map directly to the canonical primitives the MLIR emitter recognises (`+`, `<=`, etc.) so no special-casing was needed in `Emitter.hs`. Wired into `compileFile` via `.py` extension. End-to-end: `examples/factorial.py --compile` produces a 19 KB ELF that prints `3628800`. Test suite: 52 cabal tests (50 prior + arith.py K-bisim + factorial.py structural). The factorial K-bisim is structural-only because the early-return pattern desugars to `case (n<=1) of 0 -> ... ; _ -> ...` and the K oracle expects constructor patterns, not `PatLit` on comparison results — the native pipeline handles it correctly.
 - Phase 7: K-verify EffectOpt — 18 kprove claims for the three EffectOpt passes (`inlineLocalHandlers`, `eliminateIdentityHandlers`, `annotateTailResumptive`) in `effectopt-claims.k`. Helper predicates added to `EFFECTOPT-CHECKERS` module in `all-claims-def.k`: `isIdentityHandler` (uncurried + curried `\(x,k) -> k(x)`), `isTailCall`/`allBranchesTailCall` (recursive structural check through `ELet`/`ECase`), `isTailResumptiveHandler`, `countPerforms`/`countPerformsList` (per-effect-module count), `noPerformsOf`. Claim groups: EO1 identity-handler recogniser (5 claims, positive + negative cases), EO2 tail-call detection (4 claims), EO3 tail-resumptive detection (4 claims), EO4 perform counting (5 claims). All 18 claims `#Top` under kprove (Haskell backend), no rewrites needed — pure functional checks. Existing perceus/evidence/linker/bridge claim files still pass against the regenerated definition.

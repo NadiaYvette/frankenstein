@@ -7,7 +7,7 @@ import Test.Tasty (adjustOption)
 
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus, analyzeUsage, freeVars)
-import Frankenstein.Core.Evidence (evidencePass)
+import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.DeriveSelectors (deriveSelectors, recordSelectors)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
   , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive)
@@ -264,6 +264,43 @@ evidenceTests = testGroup "Evidence"
           resultExpr = defExpr (head (progDefs result))
       in assertBool "unhandled perform should become EApp (function call)"
            (isEApp resultExpr)
+
+  , testCase "cross-module: evidencePassGlobal resolves effects across modules" $
+      -- Module B: declares exn effect, has checker fn that performs it
+      let exnEffDecl = EffectDecl
+            { effectName   = mkQName "mercury" "exn"
+            , effectParams = []
+            , effectOps    = [OpDecl (mkQName "mercury" "raise") anyType]
+            }
+          modB = (mkProgram "modB" "checker"
+            [ mkFunDef "modB" "checker"
+                (EPerform (mkQName "mercuryexn" "raise") [ELit (LitInt 42)])
+                anyType
+            ]) { progEffects = [exnEffDecl] }
+          -- Module A: main handles exn, calls checker from modB
+          modA = mkProgram "modA" "main"
+            [ mkFunDef "modA" "main"
+                (EHandle
+                  (EffectRowExtend (mkQName "mercury" "exn") EffectRowEmpty)
+                  (ELam [(mkName "e", anyType)] (ELit (LitInt 0)))
+                  (EApp (EVar (mkName "checker")) []))
+                anyType
+            ]
+      in case linkProgramsWith False [modA, modB] of
+          Left errs -> assertFailure $ "Link failed: " ++ show errs
+          Right lr ->
+            let merged = lrProgram lr
+                globalEffects = collectGlobalEffects merged
+                result = evidencePassGlobal globalEffects merged
+                mainDef = head
+                  [ d | d <- progDefs result
+                  , T.isInfixOf "main" (nameText (qnameName (defName d)))
+                  ]
+            in do
+              assertBool "cross-module: no EHandle after global evidence pass"
+                (not (containsHandle (defExpr mainDef)))
+              assertBool "cross-module: no EPerform after global evidence pass"
+                (not (containsPerform (defExpr mainDef)))
   ]
 
 containsHandle :: Expr -> Bool

@@ -40,6 +40,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Environment (getArgs)
 import System.FilePath (takeExtension, takeBaseName)
+import System.IO (hPutStrLn, stderr)
 import Data.List (partition, dropWhile)
 
 main :: IO ()
@@ -71,11 +72,12 @@ main = do
           Right lr -> do
             let prog = lrProgram lr
             when (length progs > 1) $
-              TIO.putStrLn $ "Linked " <> T.pack (show (length progs))
-                          <> " modules (main in " <> lrMainModule lr <> ")"
-            -- Print linker validation warnings
+              hPutStrLn stderr $ "Linked " <> show (length progs)
+                          <> " modules (main in " <> T.unpack (lrMainModule lr) <> ")"
+            -- Print linker validation warnings to stderr so they don't
+            -- pollute MLIR output piped to mlir-opt.
             when (not (null (lrWarnings lr))) $ do
-              mapM_ TIO.putStrLn (lrWarnings lr)
+              mapM_ (hPutStrLn stderr . T.unpack) (lrWarnings lr)
             handleOutput prog flags
   where
     when True  m = m
@@ -182,7 +184,7 @@ compileFile fromJson path = do
 
 compileHaskell :: FilePath -> IO (Either Text Program)
 compileHaskell inputFile = do
-  TIO.putStrLn $ "Compiling Haskell: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Haskell: " <> inputFile
   result <- compileToCore inputFile
   case result of
     Left err -> do
@@ -193,7 +195,7 @@ compileHaskell inputFile = do
 
 compileMercury :: FilePath -> IO (Either Text Program)
 compileMercury inputFile = do
-  TIO.putStrLn $ "Compiling Mercury: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Mercury: " <> inputFile
   result <- dumpHlds inputFile
   case result of
     Left err -> do
@@ -207,7 +209,7 @@ compileMercury inputFile = do
 
 compileKoka :: FilePath -> IO (Either Text Program)
 compileKoka inputFile = do
-  TIO.putStrLn $ "Compiling Koka: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Koka: " <> inputFile
   result <- compileKokaFile inputFile
   case result of
     Left err -> do
@@ -218,7 +220,7 @@ compileKoka inputFile = do
 
 compileRust :: FilePath -> IO (Either Text Program)
 compileRust inputFile = do
-  TIO.putStrLn $ "Compiling Rust: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Rust: " <> inputFile
   result <- dumpMir inputFile
   case result of
     Left err -> do
@@ -232,7 +234,7 @@ compileRust inputFile = do
 
 compilePython :: FilePath -> IO (Either Text Program)
 compilePython inputFile = do
-  TIO.putStrLn $ "Compiling Python: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Python: " <> inputFile
   result <- parsePython inputFile
   case result of
     Left err -> pure $ Left $ "Python bridge error: " <> err
@@ -242,7 +244,7 @@ compilePython inputFile = do
 
 compileGo :: FilePath -> IO (Either Text Program)
 compileGo inputFile = do
-  TIO.putStrLn $ "Compiling Go: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Go: " <> inputFile
   result <- parseGo inputFile
   case result of
     Left err -> pure $ Left $ "Go bridge error: " <> err
@@ -250,7 +252,7 @@ compileGo inputFile = do
 
 compileFuthark :: FilePath -> IO (Either Text Program)
 compileFuthark inputFile = do
-  TIO.putStrLn $ "Compiling Futhark: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Futhark: " <> inputFile
   result <- parseFutharkFile inputFile
   case result of
     Left err -> pure $ Left $ "Futhark bridge error: " <> err
@@ -260,7 +262,7 @@ compileFuthark inputFile = do
 
 compileScheme :: FilePath -> IO (Either Text Program)
 compileScheme inputFile = do
-  TIO.putStrLn $ "Compiling Scheme: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Scheme: " <> inputFile
   result <- readSchemeFile inputFile
   case result of
     Left err -> pure $ Left $ "Scheme bridge error: " <> err
@@ -270,7 +272,7 @@ compileScheme inputFile = do
 
 compileSwift :: FilePath -> IO (Either Text Program)
 compileSwift inputFile = do
-  TIO.putStrLn $ "Compiling Swift: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Swift: " <> inputFile
   result <- readSwiftFile inputFile
   case result of
     Left err -> pure $ Left $ "Swift bridge error: " <> err
@@ -280,7 +282,7 @@ compileSwift inputFile = do
 
 compileOCaml :: FilePath -> IO (Either Text Program)
 compileOCaml inputFile = do
-  TIO.putStrLn $ "Compiling OCaml: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling OCaml: " <> inputFile
   result <- readOCamlFile inputFile
   case result of
     Left err -> pure $ Left $ "OCaml bridge error: " <> err
@@ -290,7 +292,7 @@ compileOCaml inputFile = do
 
 compileErlang :: FilePath -> IO (Either Text Program)
 compileErlang inputFile = do
-  TIO.putStrLn $ "Compiling Erlang: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Erlang: " <> inputFile
   result <- readErlangFile inputFile
   case result of
     Left err -> pure $ Left $ "Erlang bridge error: " <> err
@@ -300,7 +302,7 @@ compileErlang inputFile = do
 
 compileFSharp :: FilePath -> IO (Either Text Program)
 compileFSharp inputFile = do
-  TIO.putStrLn $ "Compiling F#: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling F#: " <> inputFile
   result <- readFSharpFile inputFile
   case result of
     Left err -> pure $ Left $ "F# bridge error: " <> err
@@ -310,7 +312,7 @@ compileFSharp inputFile = do
 
 compileIdris :: FilePath -> IO (Either Text Program)
 compileIdris inputFile = do
-  TIO.putStrLn $ "Compiling Idris2: " <> T.pack inputFile
+  hPutStrLn stderr $ "Compiling Idris2: " <> inputFile
   result <- readIdrisFile inputFile
   case result of
     Left err -> pure $ Left $ "Idris2 bridge error: " <> err
@@ -375,7 +377,7 @@ swiftCrossCheck path = do
 compileOrganIR :: FilePath -> IO (Either Text Program)
 compileOrganIR inputFile = do
   let label = if inputFile == "-" then "<stdin>" else inputFile
-  TIO.putStrLn $ "Compiling OrganIR: " <> T.pack label
+  hPutStrLn stderr $ "Compiling OrganIR: " <> label
   jsonText <- if inputFile == "-"
               then TIO.getContents
               else TIO.readFile inputFile

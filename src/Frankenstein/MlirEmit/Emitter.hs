@@ -72,6 +72,7 @@ data EmitState = EmitState
   , esPapWrappers   :: !(Set Text)        -- PAP wrapper names already emitted
   , esConTags       :: !(Map Text Int)    -- constructor name -> deterministic tag (see Core.ConTags.assignProgramTags)
   , esModulePrefix  :: !Text              -- module prefix for lifted lambda/thunk names (avoids cross-module symbol collisions)
+  , esExternDecls   :: !(Map (Text, Int) ())  -- (external name, arity) pairs collected during emission
   }
 
 type Emit a = State EmitState a
@@ -85,6 +86,18 @@ freshName prefix = do
 
 addLiftedFn :: Text -> Emit ()
 addLiftedFn fn = modify (\s -> s { esLiftedFns = fn : esLiftedFns s })
+
+-- | Record an external function declaration (for unresolved imports).
+-- These are emitted as `func.func private @name$N(i64, ...) -> i64` in the MLIR header,
+-- where N is the call-site arity. The same base name can appear with different arities
+-- (due to Haskell's curried application), each getting its own declaration.
+addExternDecl :: Text -> Int -> Emit ()
+addExternDecl name nArgs =
+  modify (\s -> s { esExternDecls = Map.insert (name, nArgs) () (esExternDecls s) })
+
+-- | Mangle an external name with its call-site arity: "map" with 2 args -> "map$2"
+externMangled :: Text -> Int -> Text
+externMangled name nArgs = name <> "$" <> T.pack (show nArgs)
 
 -- | Emit a PAP (partial application) closure for an undersaturated call
 -- to a top-level function. Allocates a heap closure via kk_alloc_con whose
@@ -221,8 +234,18 @@ emitProgramText prog =
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
+                         Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
+      externDecls = Map.keys (esExternDecls finalState)
+      externDeclText = if null externDecls then ""
+        else T.unlines
+          (  ["  // External import declarations (resolved at link time)"]
+          ++ [ "  func.func private @" <> externMangled nm arity <> "("
+               <> T.intercalate ", " (replicate arity "i64")
+               <> ") -> i64"
+             | (nm, arity) <- externDecls ]
+          ++ [""])
       stringGlobals = T.unlines
         [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
           <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
@@ -382,6 +405,7 @@ emitProgramText prog =
     , "  func.func private @mercury_choose() -> i64"
     , "  func.func private @mercury_collect_choices(i64) -> i64"
     , ""
+    , externDeclText
     , "  // Lifted functions"
     , liftedFns
     , ""
@@ -415,8 +439,18 @@ emitProgramWithEffects prog =
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
+                         Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
+      externDecls = Map.keys (esExternDecls finalState)
+      externDeclText = if null externDecls then ""
+        else T.unlines
+          (  ["  // External import declarations (resolved at link time)"]
+          ++ [ "  func.func private @" <> externMangled nm arity <> "("
+               <> T.intercalate ", " (replicate arity "i64")
+               <> ") -> i64"
+             | (nm, arity) <- externDecls ]
+          ++ [""])
       stringGlobals = T.unlines
         [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
           <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
@@ -495,8 +529,18 @@ emitProgramWasm prog =
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
+                         Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
+      externDecls = Map.keys (esExternDecls finalState)
+      externDeclText = if null externDecls then ""
+        else T.unlines
+          (  ["  // External import declarations (resolved at link time)"]
+          ++ [ "  func.func private @" <> externMangled nm arity <> "("
+               <> T.intercalate ", " (replicate arity "i64")
+               <> ") -> i64"
+             | (nm, arity) <- externDecls ]
+          ++ [""])
       stringGlobals = T.unlines
         [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
           <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
@@ -539,6 +583,7 @@ emitProgramWasm prog =
     , "  func.func private @mercury_choose() -> i64"
     , "  func.func private @mercury_collect_choices(i64) -> i64"
     , ""
+    , externDeclText
     , "  // Lifted functions"
     , liftedFns
     , ""
@@ -638,9 +683,11 @@ emitExpr (EVar n) = do
   topFns <- gets esTopFns
   if T.any (== '/') (nameText n)
     then do
+      -- Qualified name with '/' separator — treat as external.
+      addExternDecl sanitized 0
       stubName <- freshName "v"
-      pure (["// unresolved external: " <> nameText n
-            , "%" <> stubName <> " = arith.constant 0 : i64"], stubName)
+      pure (["%" <> stubName <> " = func.call @" <> externMangled sanitized 0
+             <> "() : () -> i64"], stubName)
     else case Map.lookup sname aliases of
       Just target -> pure ([], target)
       Nothing
@@ -655,12 +702,12 @@ emitExpr (EVar n) = do
                   , "%" <> stubName <> " = arith.constant 0 : i64"
                   ], stubName)
         | otherwise -> do
-            -- Unresolved external: emit a stub constant so downstream
-            -- operations have a valid SSA value to consume.
+            -- Unresolved external: emit as direct func.call so it becomes
+            -- a real linker symbol. Called with 0 args (value reference).
+            addExternDecl sanitized 0
             stubName <- freshName "v"
-            pure ([ "// unresolved external: " <> nameText n
-                  , "%" <> stubName <> " = arith.constant 0 : i64"
-                  ], stubName)
+            pure (["%" <> stubName <> " = func.call @" <> externMangled sanitized 0
+                   <> "() : () -> i64"], stubName)
 
 -- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
@@ -1028,37 +1075,39 @@ emitExpr (EApp (EVar fn) args) = do
                      <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
         pure (allOps ++ [callOp], resultName)
     else do
-      -- Closure-indirect call: fn is a local value holding a heap closure ptr.
-      -- If the name isn't actually in scope, it's an unresolved external —
-      -- fall back to a stub (the whole call becomes undefined behavior, but
-      -- the MLIR stays well-formed so later passes can still run).
+      -- The function name is not in esTopFns. Two cases:
+      -- (a) It's a local variable holding a closure → closure-indirect call
+      -- (b) It's an unresolved external import → emit direct func.call
       aliases <- gets esAliases
       let rawName = nameToSsa fn
-      closName <- case Map.lookup rawName aliases of
-        Just target -> pure target
+      case Map.lookup rawName aliases of
+        Just closName -> do
+          -- Case (a): local closure-indirect call
+          idxZeroName <- freshName "v"
+          fptrIntName <- freshName "v"
+          fptrPtrName <- freshName "v"
+          resultName  <- freshName "v"
+          let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- argNames])
+              closArgTypes = T.intercalate ", " ("i64" : argTypes)
+              extractOps =
+                [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
+                , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+                , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
+                , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+                  <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
+                ]
+          pure (allOps ++ extractOps, resultName)
         Nothing -> do
-          stubName <- freshName "v"
-          modify (\s -> s { esLiftedFns = esLiftedFns s })
-          -- Inline the stub op into the call sequence via allOps prefix below.
-          pure stubName
-      let closOps = case Map.lookup rawName aliases of
-            Just _  -> []
-            Nothing -> [ "// unresolved external call: " <> nameText fn
-                       , "%" <> closName <> " = arith.constant 0 : i64" ]
-      idxZeroName <- freshName "v"
-      fptrIntName <- freshName "v"
-      fptrPtrName <- freshName "v"
-      resultName  <- freshName "v"
-      let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- argNames])
-          closArgTypes = T.intercalate ", " ("i64" : argTypes)
-          extractOps =
-            [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
-            , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
-            , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-            , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
-              <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
-            ]
-      pure (allOps ++ closOps ++ extractOps, resultName)
+          -- Case (b): unresolved external — emit direct func.call as a real
+          -- linker symbol so C shims or GHC library objects can satisfy it.
+          -- Name is mangled with arity: map called with 2 args -> map$2
+          let extName = sanitized
+          addExternDecl extName nArgs
+          resultName <- freshName "v"
+          let mangledName = externMangled extName nArgs
+              callOp = "%" <> resultName <> " = func.call @" <> mangledName
+                       <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
+          pure (allOps ++ [callOp], resultName)
 
 -- Application of a non-var, non-con expression (e.g. the result of a
 -- closure allocation or a let-bound closure value). The function value
@@ -1924,7 +1973,7 @@ effectRowNameEmit EffectRowEmpty          = "pure"
 
 -- Sanitize names for MLIR (replace special chars)
 sanitizeName :: Text -> Text
-sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~(),[]{}'\"\\ \t" :: [Char]) then '_' else c)
+sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~.,()[]{}'\"\\ \t" :: [Char]) then '_' else c)
 
 -- | Build arity map from top-level defs: sanitized-name -> number of ELam params.
 -- Nullary defs (arity 0) are also recorded so oversaturated calls can be

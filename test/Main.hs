@@ -539,8 +539,8 @@ mlirEmitTests = testGroup "MLIR Emission"
       let prog = demoFactorialWithMain
           mlir = emitProgram prog
       in do
-        assertBool "should contain func.func @factorial"
-          (T.isInfixOf "func.func @factorial" mlir)
+        assertBool "should contain func.func @demo_factorial (module-qualified)"
+          (T.isInfixOf "func.func @demo_factorial" mlir)
         assertBool "should contain func.func @main"
           (T.isInfixOf "func.func @main" mlir)
 
@@ -580,8 +580,8 @@ mlirEmitTests = testGroup "MLIR Emission"
           (T.isInfixOf "kk_tag" mlir)
         assertBool "should contain scf.if for case dispatch"
           (T.isInfixOf "scf.if" mlir)
-        assertBool "should contain func.func @orZero"
-          (T.isInfixOf "func.func @orZero" mlir)
+        assertBool "should contain func.func @test_orZero (module-qualified)"
+          (T.isInfixOf "func.func @test_orZero" mlir)
 
   , testCase "emitProgram: Int-returning main uses printf, not kk_println_con" $
       let prog = mkProgram "" "p"
@@ -1222,8 +1222,8 @@ wasmEmitTests = testGroup "Wasm Emission"
       let prog = demoFactorialWithMain
           mlir = emitProgramWasm prog
       in do
-        assertBool "should contain func.func @factorial"
-          (T.isInfixOf "func.func @factorial" mlir)
+        assertBool "should contain func.func @demo_factorial (module-qualified)"
+          (T.isInfixOf "func.func @demo_factorial" mlir)
         assertBool "should contain module wrapper"
           (T.isInfixOf "module {" mlir)
   ]

@@ -72,7 +72,7 @@ data EmitState = EmitState
   , esPapWrappers   :: !(Set Text)        -- PAP wrapper names already emitted
   , esConTags       :: !(Map Text Int)    -- constructor name -> deterministic tag (see Core.ConTags.assignProgramTags)
   , esModulePrefix  :: !Text              -- module prefix for lifted lambda/thunk names (avoids cross-module symbol collisions)
-  , esExternDecls   :: !(Map (Text, Int) ())  -- (external name, arity) pairs collected during emission
+  , esExternDecls   :: !(Map Text Int)         -- MLIR symbol name -> param count for func.func private declarations
   }
 
 type Emit a = State EmitState a
@@ -96,12 +96,11 @@ qualifyTop name = do
   pure (pfx <> name)
 
 -- | Record an external function declaration (for unresolved imports).
--- These are emitted as `func.func private @name$N(i64, ...) -> i64` in the MLIR header,
--- where N is the call-site arity. The same base name can appear with different arities
--- (due to Haskell's curried application), each getting its own declaration.
+-- Stores the actual MLIR symbol name (may be arity-mangled or module-qualified)
+-- and the number of parameters for the func.func declaration.
 addExternDecl :: Text -> Int -> Emit ()
-addExternDecl name nArgs =
-  modify (\s -> s { esExternDecls = Map.insert (name, nArgs) () (esExternDecls s) })
+addExternDecl mlirName nArgs =
+  modify (\s -> s { esExternDecls = Map.insert mlirName nArgs (esExternDecls s) })
 
 -- | Mangle an external name with its call-site arity: "map" with 2 args -> "map$2"
 externMangled :: Text -> Int -> Text
@@ -236,7 +235,16 @@ emitProgramText prog =
       modPrefix = let m = qnameModule (progName prog)
                     in if T.null m then "" else sanitizeName m <> "_"
       qualMainName = modPrefix <> "_frankenstein_main"
-      qualifiedTopNames = Set.fromList (map ((modPrefix <>) . sanitizeName . nameText . qnameName . defName) renamedDefs)
+      -- Top-level names may already be module-mangled by the Linker
+      -- (e.g. "Frankenstein.Core.Perceus_perceusExpr") — in that case
+      -- sanitizeName alone produces the fully qualified symbol.  Only
+      -- prepend modPrefix when the name is still short (demo path or
+      -- names the linker left unmangled).
+      qualifyDefName d = let t = nameText (qnameName (defName d))
+                             san = sanitizeName t
+                         in if T.any (== '/') t || T.isPrefixOf modPrefix san
+                            then san else modPrefix <> san
+      qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
@@ -246,11 +254,11 @@ emitProgramText prog =
                          Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
-      externDecls = Map.keys (esExternDecls finalState)
+      externDecls = Map.toList (esExternDecls finalState)
       externDeclText = if null externDecls then ""
         else T.unlines
           (  ["  // External import declarations (resolved at link time)"]
-          ++ [ "  func.func private @" <> externMangled nm arity <> "("
+          ++ [ "  func.func private @" <> nm <> "("
                <> T.intercalate ", " (replicate arity "i64")
                <> ") -> i64"
              | (nm, arity) <- externDecls ]
@@ -441,7 +449,11 @@ emitProgramWithEffects prog =
       -- Key difference: esEffectDialect = True
       modPrefix = let m = qnameModule (progName prog)
                     in if T.null m then "" else sanitizeName m <> "_"
-      qualifiedTopNames = Set.fromList (map ((modPrefix <>) . sanitizeName . nameText . qnameName . defName) renamedDefs)
+      qualifyDefName d = let t = nameText (qnameName (defName d))
+                             san = sanitizeName t
+                         in if T.any (== '/') t || T.isPrefixOf modPrefix san
+                            then san else modPrefix <> san
+      qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
@@ -451,11 +463,11 @@ emitProgramWithEffects prog =
                          Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
-      externDecls = Map.keys (esExternDecls finalState)
+      externDecls = Map.toList (esExternDecls finalState)
       externDeclText = if null externDecls then ""
         else T.unlines
           (  ["  // External import declarations (resolved at link time)"]
-          ++ [ "  func.func private @" <> externMangled nm arity <> "("
+          ++ [ "  func.func private @" <> nm <> "("
                <> T.intercalate ", " (replicate arity "i64")
                <> ") -> i64"
              | (nm, arity) <- externDecls ]
@@ -532,7 +544,11 @@ emitProgramWasm prog =
       stripTopDelay e           = e
       modPrefix = let m = qnameModule (progName prog)
                     in if T.null m then "" else sanitizeName m <> "_"
-      qualifiedTopNames = Set.fromList (map ((modPrefix <>) . sanitizeName . nameText . qnameName . defName) renamedDefs)
+      qualifyDefName d = let t = nameText (qnameName (defName d))
+                             san = sanitizeName t
+                         in if T.any (== '/') t || T.isPrefixOf modPrefix san
+                            then san else modPrefix <> san
+      qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
                          qualifiedTopNames
                          (buildTopFnArity modPrefix renamedDefs)
@@ -542,11 +558,11 @@ emitProgramWasm prog =
                          Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
-      externDecls = Map.keys (esExternDecls finalState)
+      externDecls = Map.toList (esExternDecls finalState)
       externDeclText = if null externDecls then ""
         else T.unlines
           (  ["  // External import declarations (resolved at link time)"]
-          ++ [ "  func.func private @" <> externMangled nm arity <> "("
+          ++ [ "  func.func private @" <> nm <> "("
                <> T.intercalate ", " (replicate arity "i64")
                <> ") -> i64"
              | (nm, arity) <- externDecls ]
@@ -615,7 +631,10 @@ emitDef def = do
       -- would emit a 0-param func while the call site uses arity = length ps.
       stripTypeLam (ETypeLam _ e) = stripTypeLam e
       stripTypeLam e              = e
-  qualName <- qualifyTop (sanitizeName name)
+  qualName <- do
+    let san = sanitizeName name
+    pfx <- gets esModulePrefix
+    pure $ if T.any (== '/') name || T.isPrefixOf pfx san then san else pfx <> san
   case stripTypeLam (defExpr def) of
     ELam params body -> do
       -- Use uniform i64 for all top-level fn params (matches the closure ABI
@@ -687,39 +706,41 @@ emitExpr (ELit (LitString s)) = do
 
 emitExpr (EVar n) = do
   -- Variable reference — look up in alias map; if not found and not a known
-  -- top-level function, emit a stub (unresolved external reference).
+  -- top-level function, emit a direct func.call (for cross-module or external refs).
   let sname = nameToSsa n
       sanitized = sanitizeName (nameText n)
   aliases <- gets esAliases
   topFns <- gets esTopFns
-  qualSanitized <- qualifyTop sanitized
-  if T.any (== '/') (nameText n)
-    then do
-      -- Qualified name with '/' separator — treat as external.
-      addExternDecl sanitized 0
-      stubName <- freshName "v"
-      pure (["%" <> stubName <> " = func.call @" <> externMangled sanitized 0
-             <> "() : () -> i64"], stubName)
-    else case Map.lookup sname aliases of
-      Just target -> pure ([], target)
-      Nothing
-        | Set.member qualSanitized topFns -> do
-            -- Top-level function used as a value (not applied). We don't
-            -- know its arity here, and `llvm.mlir.addressof` can't reference
-            -- a `func.func`. Emit a stub — callers that treat top-level
-            -- fns as first-class values need a proper closure wrapper
-            -- (not yet implemented).
-            stubName <- freshName "v"
-            pure ([ "// top-level fn passed as value (stub): @" <> qualSanitized
-                  , "%" <> stubName <> " = arith.constant 0 : i64"
-                  ], stubName)
-        | otherwise -> do
-            -- Unresolved external: emit as direct func.call so it becomes
-            -- a real linker symbol. Called with 0 args (value reference).
-            addExternDecl sanitized 0
-            stubName <- freshName "v"
-            pure (["%" <> stubName <> " = func.call @" <> externMangled sanitized 0
-                   <> "() : () -> i64"], stubName)
+  -- If the name already has a module qualifier or was linker-mangled, it's
+  -- already fully qualified — don't prepend esModulePrefix again.
+  qualSanitized <- do
+    pfx <- gets esModulePrefix
+    pure $ if T.any (== '/') (nameText n) || T.isPrefixOf pfx sanitized
+           then sanitized else pfx <> sanitized
+  case Map.lookup sname aliases of
+    Just target -> pure ([], target)
+    Nothing
+      | Set.member qualSanitized topFns -> do
+          -- Top-level function used as a value (not applied).
+          stubName <- freshName "v"
+          pure ([ "// top-level fn passed as value (stub): @" <> qualSanitized
+                , "%" <> stubName <> " = arith.constant 0 : i64"
+                ], stubName)
+      | Set.member sanitized topFns -> do
+          -- Same-module top-level fn referenced by its unqualified name
+          stubName <- freshName "v"
+          pure ([ "// top-level fn passed as value (stub): @" <> sanitized
+                , "%" <> stubName <> " = arith.constant 0 : i64"
+                ], stubName)
+      | otherwise -> do
+          -- Unresolved external: emit as direct func.call so it becomes
+          -- a real linker symbol. Called with 0 args (value reference).
+          -- Always arity-mangle unresolved externals for consistency.
+          let callName = externMangled qualSanitized 0
+          addExternDecl callName 0
+          stubName <- freshName "v"
+          pure (["%" <> stubName <> " = func.call @" <> callName
+                 <> "() : () -> i64"], stubName)
 
 -- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
@@ -1042,11 +1063,16 @@ emitExpr (EApp (EVar fn) args) = do
       argNames = map snd argResults
       argList = T.intercalate ", " ["%" <> n | n <- argNames]
       sanitized = sanitizeName (nameText fn)
+      hasModule = T.any (== '/') (nameText fn)
   argTypes <- mapM lookupType argNames
   let argTypeList = T.intercalate ", " argTypes
   topFns <- gets esTopFns
   arityMap <- gets esTopFnArity
-  qualSanitized <- qualifyTop sanitized
+  -- If the name already has a module qualifier or was linker-mangled, it's
+  -- already fully qualified — don't prepend esModulePrefix again.
+  qualSanitized <- do
+    pfx <- gets esModulePrefix
+    pure $ if hasModule || T.isPrefixOf pfx sanitized then sanitized else pfx <> sanitized
   let nArgs = length args
       mArity = Map.lookup qualSanitized arityMap
   if Set.member qualSanitized topFns
@@ -1113,12 +1139,14 @@ emitExpr (EApp (EVar fn) args) = do
         Nothing -> do
           -- Case (b): unresolved external — emit direct func.call as a real
           -- linker symbol so C shims or GHC library objects can satisfy it.
-          -- Name is mangled with arity: map called with 2 args -> map$2
-          let extName = sanitized
-          addExternDecl extName nArgs
+          -- Always arity-mangle unresolved externals, even cross-module ones
+          -- (e.g. GHC.Internal.Base/map called with 1 or 2 args), because
+          -- different call sites may use different arities and we need
+          -- distinct declarations for each.
+          let callName = externMangled qualSanitized nArgs
+          addExternDecl callName nArgs
           resultName <- freshName "v"
-          let mangledName = externMangled extName nArgs
-              callOp = "%" <> resultName <> " = func.call @" <> mangledName
+          let callOp = "%" <> resultName <> " = func.call @" <> callName
                        <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
           pure (allOps ++ [callOp], resultName)
 
@@ -1241,7 +1269,8 @@ emitExpr (ELam params body) = do
   currentAliases <- gets esAliases
   topFns <- gets esTopFns
   modPfx <- gets esModulePrefix
-  let qualName n = modPfx <> sanitizeName (nameText n)
+  let qualName n = let san = sanitizeName (nameText n)
+                   in if T.any (== '/') (nameText n) then san else modPfx <> san
       isInScope n = let s = nameToSsa n
                     in Map.member s currentAliases
                        || Set.member (qualName n) topFns
@@ -1368,9 +1397,11 @@ emitExpr (EDelay e) = do
   currentAliases <- gets esAliases
   topFns <- gets esTopFns
   modPfx <- gets esModulePrefix
-  let isCaptured n = let s = nameToSsa n
+  let qualName n = let san = sanitizeName (nameText n)
+                   in if T.any (== '/') (nameText n) then san else modPfx <> san
+      isCaptured n = let s = nameToSsa n
                      in Map.member s currentAliases
-                        && not (Set.member (modPfx <> sanitizeName (nameText n)) topFns)
+                        && not (Set.member (qualName n) topFns)
       hasCaptures = any isCaptured (Set.toList bodyFree)
   if hasCaptures
     then do
@@ -1995,8 +2026,11 @@ sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~.,()[]{}'\"\\ \t" :: [
 -- detected and routed through the closure-indirect path.
 buildTopFnArity :: Text -> [Def] -> Map Text Int
 buildTopFnArity modPfx defs = Map.fromList
-  [ (modPfx <> sanitizeName (nameText (qnameName (defName d))), topLamArity (defExpr d))
+  [ (qualKey, topLamArity (defExpr d))
   | d <- defs
+  , let t = nameText (qnameName (defName d))
+        san = sanitizeName t
+        qualKey = if T.any (== '/') t || T.isPrefixOf modPfx san then san else modPfx <> san
   ]
   where
     topLamArity (ELam ps _)     = length ps

@@ -398,9 +398,11 @@ handleOutput :: Program -> Flags -> IO ()
 handleOutput progRaw flags = do
   -- Flatten nested patterns so downstream passes see only one level of
   -- constructor destructuring per case branch.
-  -- (deriveSelectors already ran before the linker; safe to re-run since
-  -- it skips fields whose selector name already exists.)
-  let prog0 = flattenPatterns (deriveSelectors progRaw)
+  -- NOTE: deriveSelectors already ran before the linker — do NOT re-run
+  -- here because the linker mangles existing selector names (e.g.
+  -- "progName" -> "Frankenstein.Core.Types_progName") and re-running
+  -- would create duplicate selectors that only match the unmangled name.
+  let prog0 = flattenPatterns progRaw
   -- Run effect optimizations before evidence pass
   let (optProg, optStats) = effectOptimizeWithStats prog0
   -- Run global evidence pass again on the merged program.  The pre-linker

@@ -311,9 +311,17 @@ translateLit (LitRubbish _ _)  = F.LitInt 0  -- undefined/bottom placeholder
 
 translateName :: Var -> F.Name
 translateName v = F.Name
-  { F.nameText   = T.pack (getOccString v)
+  { F.nameText   = qualText
   , F.nameUnique = fromIntegral (getKey (nameUnique (varName v)))
   }
+  where
+    occName = T.pack (getOccString v)
+    -- Preserve module origin for imported names so the emitter can generate
+    -- qualified cross-module calls (e.g. Frankenstein.Core.Types/nameText).
+    qualText = case nameModule_maybe (varName v) of
+      Just m  -> let modStr = T.pack (moduleNameString (moduleName m))
+                 in modStr <> "/" <> occName
+      Nothing -> occName
 
 translateTyVar :: Var -> F.TypeVar
 translateTyVar v = F.TypeVar
@@ -322,8 +330,17 @@ translateTyVar v = F.TypeVar
   , F.tvMultiplicity = F.Many
   }
 
+-- | Create a QName for a top-level definition. Uses the module from GHC's name.
+-- Note: translateName already embeds the module in the Name text for variable
+-- references (EVar), but for definitions we use the short occurrence name and
+-- store the module in QName.module instead, so the emitter can prefix correctly.
 qualifyName :: Var -> F.QName
-qualifyName v = F.QName T.empty (translateName v)
+qualifyName v = F.QName modName (F.Name (T.pack (getOccString v))
+                                        (fromIntegral (getKey (nameUnique (varName v)))))
+  where
+    modName = case nameModule_maybe (varName v) of
+      Just m  -> T.pack (moduleNameString (moduleName m))
+      Nothing -> T.empty
 
 -------------------------------------------------------------------------------
 -- Type translation

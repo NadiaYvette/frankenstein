@@ -71,6 +71,7 @@ data EmitState = EmitState
   , esTopFnArity    :: !(Map Text Int)    -- arity of each top-level function
   , esPapWrappers   :: !(Set Text)        -- PAP wrapper names already emitted
   , esConTags       :: !(Map Text Int)    -- constructor name -> deterministic tag (see Core.ConTags.assignProgramTags)
+  , esModulePrefix  :: !Text              -- module prefix for lifted lambda/thunk names (avoids cross-module symbol collisions)
   }
 
 type Emit a = State EmitState a
@@ -211,12 +212,15 @@ emitProgramText prog =
         else defs
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
+      modPrefix = let m = qnameModule (progName prog)
+                    in if T.null m then "" else sanitizeName m <> "_"
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs)
                           `Set.union` externalRuntimeFns)
                          (buildTopFnArity renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
                          (assignProgramTags prog)
+                         modPrefix
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -402,12 +406,15 @@ emitProgramWithEffects prog =
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
       -- Key difference: esEffectDialect = True
+      modPrefix = let m = qnameModule (progName prog)
+                    in if T.null m then "" else sanitizeName m <> "_"
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs)
                           `Set.union` externalRuntimeFns)
                          (buildTopFnArity renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
                          (assignProgramTags prog)
+                         modPrefix
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -480,11 +487,14 @@ emitProgramWasm prog =
         else defs
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
+      modPrefix = let m = qnameModule (progName prog)
+                    in if T.null m then "" else sanitizeName m <> "_"
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
                          (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
                          (buildTopFnArity renamedDefs)
                          Set.empty
                          (assignProgramTags prog)
+                         modPrefix
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       stringGlobals = T.unlines
@@ -1175,7 +1185,8 @@ emitExpr (ELam params body) = do
                             && not (Set.member (sanitizeName (nameText n)) topFns))
                         candidateCaptures
       nCaptured = length captured
-  liftedName <- freshName "lambda"
+  modPfx <- gets esModulePrefix
+  liftedName <- freshName (modPfx <> "lambda")
   -- Allocate fresh SSA param names (closure + regular params).
   closFresh <- freshName "clos"
   paramFresh <- mapM (\_ -> freshName "p") params
@@ -1307,7 +1318,8 @@ emitExpr (EDelay e) = do
       pure ( ("// degraded thunk (had captures): inlined body" : eOps)
            , eName)
     else do
-      liftedName <- freshName "thunk_body"
+      modPfx <- gets esModulePrefix
+      liftedName <- freshName (modPfx <> "thunk_body")
       let mlirRetTy = "i64"
       (bodyOps, bodyResult) <- emitExpr e
       let fnText = T.unlines $

@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 
 FRKN="cabal-3.16.1.0 -v0 run frankenstein -w /usr/lib64/ghc-9.14.1/bin/ghc --"
 OUT=self-host/obj
+rm -rf "$OUT"
 mkdir -p "$OUT"
 
 # All self-hostable modules (the 17 that Phase 6e proved + newer ones)
@@ -93,15 +94,13 @@ echo "Driver compiled."
 
 echo ""
 echo "=== Phase 5: Link self-hosted binary ==="
-# --allow-multiple-definition: top-level functions like anyType, translateExpr
-# are defined in multiple modules. A proper fix requires module-qualified symbol
-# names in the emitter. Lambda/thunk names are already module-prefixed.
+# Top-level function names are now module-qualified (e.g. Frankenstein_Core_Perceus_anyType)
+# so no --allow-multiple-definition is needed.
 # --unresolved-symbols=ignore-in-object-files: external imports (map$2, foldr$3, etc.)
 # are real linker symbols now (not null-pointer loads), but C shims don't exist yet.
 # The self-test only exercises Types.o selectors which have zero external deps.
 OBJS=$(ls "$OUT"/*.o 2>/dev/null)
 clang -O2 -o self-host/frankenstein-self $OBJS -lm \
-  -Wl,--allow-multiple-definition \
   -Wl,--unresolved-symbols=ignore-in-object-files
 echo "Linked: self-host/frankenstein-self ($(stat -c%s self-host/frankenstein-self) bytes)"
 

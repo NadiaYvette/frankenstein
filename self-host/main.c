@@ -9,19 +9,32 @@
 #include <string.h>
 #include "../runtime/kk_runtime.h"
 
-/* Self-hosted selectors from Types.o */
-extern int64_t nameText(int64_t);
-extern int64_t nameUnique(int64_t);
-extern int64_t qnameName(int64_t);
-extern int64_t qnameModule(int64_t);
-extern int64_t defName(int64_t);
-extern int64_t defExpr(int64_t);
-extern int64_t defVisibility(int64_t);
-extern int64_t progName(int64_t);
-extern int64_t progDefs(int64_t);
-extern int64_t effectName(int64_t);
-extern int64_t conName(int64_t);
-extern int64_t dataName(int64_t);
+/* Self-hosted selectors from Types.o — module-qualified symbol names */
+#define T(name) Frankenstein_Core_Types_##name
+extern int64_t T(nameText)(int64_t);
+extern int64_t T(nameUnique)(int64_t);
+extern int64_t T(qnameName)(int64_t);
+extern int64_t T(qnameModule)(int64_t);
+extern int64_t T(defName)(int64_t);
+extern int64_t T(defExpr)(int64_t);
+extern int64_t T(defVisibility)(int64_t);
+extern int64_t T(progName)(int64_t);
+extern int64_t T(progDefs)(int64_t);
+extern int64_t T(effectName)(int64_t);
+extern int64_t T(conName)(int64_t);
+extern int64_t T(dataName)(int64_t);
+#define nameText      T(nameText)
+#define nameUnique    T(nameUnique)
+#define qnameName     T(qnameName)
+#define qnameModule   T(qnameModule)
+#define defName       T(defName)
+#define defExpr       T(defExpr)
+#define defVisibility T(defVisibility)
+#define progName      T(progName)
+#define progDefs      T(progDefs)
+#define effectName    T(effectName)
+#define conName       T(conName)
+#define dataName      T(dataName)
 
 static int pass = 0, fail = 0;
 #define CHECK(desc, cond) do { \

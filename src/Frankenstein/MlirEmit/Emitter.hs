@@ -87,6 +87,14 @@ freshName prefix = do
 addLiftedFn :: Text -> Emit ()
 addLiftedFn fn = modify (\s -> s { esLiftedFns = fn : esLiftedFns s })
 
+-- | Module-qualify a sanitized top-level function name using esModulePrefix.
+-- E.g. with prefix "Frankenstein_Core_Perceus_", "anyType" -> "Frankenstein_Core_Perceus_anyType"
+-- This prevents cross-module symbol collisions when linking multiple self-hosted .o files.
+qualifyTop :: Text -> Emit Text
+qualifyTop name = do
+  pfx <- gets esModulePrefix
+  pure (pfx <> name)
+
 -- | Record an external function declaration (for unresolved imports).
 -- These are emitted as `func.func private @name$N(i64, ...) -> i64` in the MLIR header,
 -- where N is the call-site arity. The same base name can appear with different arities
@@ -227,10 +235,11 @@ emitProgramText prog =
       stripTopDelay e           = e
       modPrefix = let m = qnameModule (progName prog)
                     in if T.null m then "" else sanitizeName m <> "_"
+      qualMainName = modPrefix <> "_frankenstein_main"
+      qualifiedTopNames = Set.fromList (map ((modPrefix <>) . sanitizeName . nameText . qnameName . defName) renamedDefs)
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
-                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs)
-                          `Set.union` externalRuntimeFns)
-                         (buildTopFnArity renamedDefs `Map.union` externalRuntimeArity)
+                         (qualifiedTopNames `Set.union` externalRuntimeFns)
+                         (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
@@ -268,14 +277,14 @@ emitProgramText prog =
       mainWrapper = if hasMain
         then if mainPrints
           then T.unlines $ mainHeader ++
-            [ "    func.call @_frankenstein_main() : () -> i64"
+            [ "    func.call @" <> qualMainName <> "() : () -> i64"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
             ]
           else if mainReturnsString
           then T.unlines $ mainHeader ++
-            [ "    %result = func.call @_frankenstein_main() : () -> i64"
+            [ "    %result = func.call @" <> qualMainName <> "() : () -> i64"
             , "    func.call @kk_println_str(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
@@ -283,14 +292,14 @@ emitProgramText prog =
             ]
           else if mainReturnsADT
           then T.unlines $ mainHeader ++
-            [ "    %result = func.call @_frankenstein_main() : () -> i64"
+            [ "    %result = func.call @" <> qualMainName <> "() : () -> i64"
             , "    func.call @kk_println_con(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
             ]
           else T.unlines $ mainHeader ++
-            [ "    %result = func.call @_frankenstein_main() : () -> i64"
+            [ "    %result = func.call @" <> qualMainName <> "() : () -> i64"
             , "    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr"
             , "    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
             , "    %zero = arith.constant 0 : i32"
@@ -432,10 +441,10 @@ emitProgramWithEffects prog =
       -- Key difference: esEffectDialect = True
       modPrefix = let m = qnameModule (progName prog)
                     in if T.null m then "" else sanitizeName m <> "_"
+      qualifiedTopNames = Set.fromList (map ((modPrefix <>) . sanitizeName . nameText . qnameName . defName) renamedDefs)
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
-                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs)
-                          `Set.union` externalRuntimeFns)
-                         (buildTopFnArity renamedDefs `Map.union` externalRuntimeArity)
+                         (qualifiedTopNames `Set.union` externalRuntimeFns)
+                         (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
@@ -523,9 +532,10 @@ emitProgramWasm prog =
       stripTopDelay e           = e
       modPrefix = let m = qnameModule (progName prog)
                     in if T.null m then "" else sanitizeName m <> "_"
+      qualifiedTopNames = Set.fromList (map ((modPrefix <>) . sanitizeName . nameText . qnameName . defName) renamedDefs)
       initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
-                         (Set.fromList (map (sanitizeName . nameText . qnameName . defName) renamedDefs))
-                         (buildTopFnArity renamedDefs)
+                         qualifiedTopNames
+                         (buildTopFnArity modPrefix renamedDefs)
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
@@ -605,6 +615,7 @@ emitDef def = do
       -- would emit a 0-param func while the call site uses arity = length ps.
       stripTypeLam (ETypeLam _ e) = stripTypeLam e
       stripTypeLam e              = e
+  qualName <- qualifyTop (sanitizeName name)
   case stripTypeLam (defExpr def) of
     ELam params body -> do
       -- Use uniform i64 for all top-level fn params (matches the closure ABI
@@ -621,7 +632,7 @@ emitDef def = do
       bodyText <- emitBody body mlirRetTy
       modify (\s -> s { esAliases = savedA })
       pure $ T.unlines
-        [ "  func.func @" <> sanitizeName name <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {"
+        [ "  func.func @" <> qualName <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {"
         , bodyText
         , "  }"
         ]
@@ -630,7 +641,7 @@ emitDef def = do
       let mlirRetTy = "i64"
       bodyText <- emitBody expr mlirRetTy
       pure $ T.unlines
-        [ "  func.func @" <> sanitizeName name <> "() -> " <> mlirRetTy <> " {"
+        [ "  func.func @" <> qualName <> "() -> " <> mlirRetTy <> " {"
         , bodyText
         , "  }"
         ]
@@ -681,6 +692,7 @@ emitExpr (EVar n) = do
       sanitized = sanitizeName (nameText n)
   aliases <- gets esAliases
   topFns <- gets esTopFns
+  qualSanitized <- qualifyTop sanitized
   if T.any (== '/') (nameText n)
     then do
       -- Qualified name with '/' separator — treat as external.
@@ -691,14 +703,14 @@ emitExpr (EVar n) = do
     else case Map.lookup sname aliases of
       Just target -> pure ([], target)
       Nothing
-        | Set.member sanitized topFns -> do
+        | Set.member qualSanitized topFns -> do
             -- Top-level function used as a value (not applied). We don't
             -- know its arity here, and `llvm.mlir.addressof` can't reference
             -- a `func.func`. Emit a stub — callers that treat top-level
             -- fns as first-class values need a proper closure wrapper
             -- (not yet implemented).
             stubName <- freshName "v"
-            pure ([ "// top-level fn passed as value (stub): @" <> sanitized
+            pure ([ "// top-level fn passed as value (stub): @" <> qualSanitized
                   , "%" <> stubName <> " = arith.constant 0 : i64"
                   ], stubName)
         | otherwise -> do
@@ -1034,13 +1046,14 @@ emitExpr (EApp (EVar fn) args) = do
   let argTypeList = T.intercalate ", " argTypes
   topFns <- gets esTopFns
   arityMap <- gets esTopFnArity
+  qualSanitized <- qualifyTop sanitized
   let nArgs = length args
-      mArity = Map.lookup sanitized arityMap
-  if Set.member sanitized topFns
+      mArity = Map.lookup qualSanitized arityMap
+  if Set.member qualSanitized topFns
     then case mArity of
       Just arity | nArgs < arity -> do
         -- Undersaturated: build a PAP closure.
-        (papOps, resultName) <- emitPapClosure sanitized arity argNames
+        (papOps, resultName) <- emitPapClosure qualSanitized arity argNames
         pure (allOps ++ papOps, resultName)
       Just arity | nArgs > arity -> do
         -- Oversaturated: call the top-level fn with the first `arity` args
@@ -1052,7 +1065,7 @@ emitExpr (EApp (EVar fn) args) = do
             satTyList = T.intercalate ", " satTys
         closName <- freshName "v"
         let topCallTy = if arity == 0 then "() -> i64" else "(" <> satTyList <> ") -> i64"
-            topCallOp = "%" <> closName <> " = func.call @" <> sanitized
+            topCallOp = "%" <> closName <> " = func.call @" <> qualSanitized
                         <> "(" <> satList <> ") : " <> topCallTy
         -- Closure-indirect call with the remaining args
         idxZeroName <- freshName "v"
@@ -1071,7 +1084,7 @@ emitExpr (EApp (EVar fn) args) = do
         pure (allOps ++ [topCallOp] ++ extractOps, resultName)
       _ -> do
         resultName <- freshName "v"
-        let callOp = "%" <> resultName <> " = func.call @" <> sanitized
+        let callOp = "%" <> resultName <> " = func.call @" <> qualSanitized
                      <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
         pure (allOps ++ [callOp], resultName)
     else do
@@ -1227,14 +1240,15 @@ emitExpr (ELam params body) = do
   -- it will be resolved at the reference site inside the lambda body.
   currentAliases <- gets esAliases
   topFns <- gets esTopFns
-  let isInScope n = let s = nameToSsa n
+  modPfx <- gets esModulePrefix
+  let qualName n = modPfx <> sanitizeName (nameText n)
+      isInScope n = let s = nameToSsa n
                     in Map.member s currentAliases
-                       || Set.member (sanitizeName (nameText n)) topFns
+                       || Set.member (qualName n) topFns
       captured = filter (\n -> isInScope n
-                            && not (Set.member (sanitizeName (nameText n)) topFns))
+                            && not (Set.member (qualName n) topFns))
                         candidateCaptures
       nCaptured = length captured
-  modPfx <- gets esModulePrefix
   liftedName <- freshName (modPfx <> "lambda")
   -- Allocate fresh SSA param names (closure + regular params).
   closFresh <- freshName "clos"
@@ -1353,9 +1367,10 @@ emitExpr (EDelay e) = do
   let bodyFree = freeVarsExpr e
   currentAliases <- gets esAliases
   topFns <- gets esTopFns
+  modPfx <- gets esModulePrefix
   let isCaptured n = let s = nameToSsa n
                      in Map.member s currentAliases
-                        && not (Set.member (sanitizeName (nameText n)) topFns)
+                        && not (Set.member (modPfx <> sanitizeName (nameText n)) topFns)
       hasCaptures = any isCaptured (Set.toList bodyFree)
   if hasCaptures
     then do
@@ -1978,9 +1993,9 @@ sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~.,()[]{}'\"\\ \t" :: [
 -- | Build arity map from top-level defs: sanitized-name -> number of ELam params.
 -- Nullary defs (arity 0) are also recorded so oversaturated calls can be
 -- detected and routed through the closure-indirect path.
-buildTopFnArity :: [Def] -> Map Text Int
-buildTopFnArity defs = Map.fromList
-  [ (sanitizeName (nameText (qnameName (defName d))), topLamArity (defExpr d))
+buildTopFnArity :: Text -> [Def] -> Map Text Int
+buildTopFnArity modPfx defs = Map.fromList
+  [ (modPfx <> sanitizeName (nameText (qnameName (defName d))), topLamArity (defExpr d))
   | d <- defs
   ]
   where

@@ -41,6 +41,8 @@
                  U Data_ByteString_unpack$1
                  U Data_Map_Internal_elems$1
                  U Data_Map_Internal_empty$0
+                 U Data_Map_Internal__fEqMap$0
+                 U Data_Map_Internal_findWithDefault$2
                  U Data_Map_Internal_findWithDefault$3
                  U Data_Map_Internal_lookup$2
                  U Data_Map_Internal_member$2
@@ -123,22 +125,6 @@
                  U Data_Text_unlines$1
                  U Frankenstein_Core_ConTags_assignProgramTags$1
                  U Frankenstein_Core_ConTags_conKey$1
-                 U Frankenstein_Core_ConTags_go$0
-                 U Frankenstein_Core_ConTags_go$1
-                 U Frankenstein_Core_ConTags_pat_$0
-                 U Frankenstein_Core_CycleAnalysis_go$0
-                 U Frankenstein_Core_CycleAnalysis_go$1
-                 U Frankenstein_Core_Evidence_go$2
-                 U Frankenstein_Core_FlattenPatterns_go$2
-                 U Frankenstein_Core_FlattenPatterns_patNested$0
-                 U Frankenstein_Core_Linker_go$0
-                 U Frankenstein_Core_Linker_go$1
-                 U Frankenstein_Core_Linker_go$2
-                 U Frankenstein_Core_Linker_nub$1
-                 U Frankenstein_Core_Linker_patternBinds$0
-                 U Frankenstein_Core_Linker_rewritePattern$0
-                 U Frankenstein_Core_Perceus_go$0
-                 U Frankenstein_Core_Perceus_go$1
                  U Frankenstein_Core_Types_bindExpr$0
                  U Frankenstein_Core_Types_bindExpr$1
                  U Frankenstein_Core_Types_bindName$1
@@ -178,13 +164,9 @@
                  U Frankenstein_Core_Types_tcName$1
                  U Frankenstein_Core_Types_tvKind$1
                  U Frankenstein_Core_Types_tvName$1
-                 U Frankenstein_GhcBridge_CoreTranslate_go$2
                  U Frankenstein_GhcBridge_CoreTranslate_translateProgram$3
-                 U Frankenstein_KokaBridge_CoreTranslate_go$0
-                 U Frankenstein_KokaBridge_CoreTranslate_go$1
                  U Frankenstein_KokaBridge_CoreTranslate_translateProgram$0
                  U Frankenstein_KokaBridge_CoreTranslate_translateProgram$1
-                 U Frankenstein_MercuryBridge_HldsParse_go$3
                  U Frankenstein_MercuryBridge_HldsParse_hldsModule$1
                  U Frankenstein_MercuryBridge_HldsParse_hldsPreds$1
                  U Frankenstein_MercuryBridge_HldsParse_hldsTypes$1
@@ -193,20 +175,13 @@
                  U Frankenstein_MercuryBridge_HldsParse_predGoal$1
                  U Frankenstein_MercuryBridge_HldsParse_predModes$1
                  U Frankenstein_MercuryBridge_HldsParse_predName$1
-                 U Frankenstein_MercuryBridge_HldsParse_tryOp$1
                  U Frankenstein_MercuryBridge_HldsParse_typeDeclCtors$1
                  U Frankenstein_MercuryBridge_HldsParse_typeDeclName$1
                  U Frankenstein_MercuryBridge_HldsParse_typeDeclParams$1
                  U Frankenstein_MlirEmit_Dialects_renderOp$1
-                 U Frankenstein_MlirEmit_Emitter_exprCallsPrint$1
-                 U Frankenstein_MlirEmit_Emitter_stripTypeLam$1
-                 U Frankenstein_MlirEmit_Emitter_tconName$1
-                 U Frankenstein_MlirEmit_Emitter_topLamArity$1
                  U Frankenstein_RustBridge_MirParse_bbIndex$1
                  U Frankenstein_RustBridge_MirParse_bbStatements$1
                  U Frankenstein_RustBridge_MirParse_bbTerminator$1
-                 U Frankenstein_RustBridge_MirParse_go$2
-                 U Frankenstein_RustBridge_MirParse_go$4
                  U Frankenstein_RustBridge_MirParse_localIndex$1
                  U Frankenstein_RustBridge_MirParse_localType$1
                  U Frankenstein_RustBridge_MirParse_mirArgCount$1
@@ -286,6 +261,7 @@
                  U GHC_Internal_Data_Foldable_find$2
                  U GHC_Internal_Data_Foldable_foldl$3
                  U GHC_Internal_Data_Foldable_foldr$3
+                 U GHC_Internal_Data_Foldable_forM_$1
                  U GHC_Internal_Data_Foldable_length$1
                  U GHC_Internal_Data_Foldable_maximum$1
                  U GHC_Internal_Data_Foldable_null$1
@@ -297,6 +273,7 @@
                  U GHC_Internal_Data_Maybe_mapMaybe$2
                  U GHC_Internal_Data_Maybe_maybe$3
                  U GHC_Internal_Data_OldList_isPrefixOf$2
+                 U GHC_Internal_Data_OldList_partition$2
                  U GHC_Internal_Data_String_fromString$1
                  U GHC_Internal_Data_Traversable_mapM$2
                  U GHC_Internal_Data_Traversable_mapM$3

@@ -28,11 +28,14 @@ import Data.Word (Word8)
 import Data.IORef
 import System.Process (readProcessWithExitCode, readProcess)
 import System.Exit (ExitCode(..))
+import Control.Monad (forM_)
 import Control.Monad.State
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.List (partition)
+-- import Debug.Trace (trace)
 import Text.Printf (printf)
 
 data CompileTarget = TargetNative | TargetWasm32 deriving (Show, Eq)
@@ -73,6 +76,8 @@ data EmitState = EmitState
   , esConTags       :: !(Map Text Int)    -- constructor name -> deterministic tag (see Core.ConTags.assignProgramTags)
   , esModulePrefix  :: !Text              -- module prefix for lifted lambda/thunk names (avoids cross-module symbol collisions)
   , esExternDecls   :: !(Map Text Int)         -- MLIR symbol name -> param count for func.func private declarations
+  , esPromotedFns      :: !(Map Text Text)        -- nameToSsa key -> promoted function MLIR name (for let-bound lambdas)
+  , esPromotedCaptures :: !(Map Text [Text])      -- promoted MLIR name -> extra capture SSA names to pass at call site
   }
 
 type Emit a = State EmitState a
@@ -251,6 +256,8 @@ emitProgramText prog =
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
+                         Map.empty
+                         Map.empty
                          Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
@@ -461,6 +468,8 @@ emitProgramWithEffects prog =
                          (assignProgramTags prog)
                          modPrefix
                          Map.empty
+                         Map.empty
+                         Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -555,6 +564,8 @@ emitProgramWasm prog =
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
+                         Map.empty
+                         Map.empty
                          Map.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
@@ -733,14 +744,23 @@ emitExpr (EVar n) = do
                 , "%" <> stubName <> " = arith.constant 0 : i64"
                 ], stubName)
       | otherwise -> do
-          -- Unresolved external: emit as direct func.call so it becomes
-          -- a real linker symbol. Called with 0 args (value reference).
-          -- Always arity-mangle unresolved externals for consistency.
-          let callName = externMangled qualSanitized 0
-          addExternDecl callName 0
-          stubName <- freshName "v"
-          pure (["%" <> stubName <> " = func.call @" <> callName
-                 <> "() : () -> i64"], stubName)
+          -- Check if this is a promoted let-bound lambda used as a value.
+          promoted <- gets esPromotedFns
+          case Map.lookup sname promoted of
+            Just promotedName -> do
+              -- Promoted fn used as value — same stub as top-level fn.
+              stubName <- freshName "v"
+              pure ([ "// promoted let-bound fn passed as value: @" <> promotedName
+                    , "%" <> stubName <> " = arith.constant 0 : i64"
+                    ], stubName)
+            Nothing -> do
+              -- Unresolved external: emit as direct func.call so it becomes
+              -- a real linker symbol. Called with 0 args (value reference).
+              let callName = externMangled qualSanitized 0
+              addExternDecl callName 0
+              stubName <- freshName "v"
+              pure (["%" <> stubName <> " = func.call @" <> callName
+                     <> "() : () -> i64"], stubName)
 
 -- Constructor reference: allocate a boxed value via the runtime
 emitExpr (ECon qn) = do
@@ -1137,18 +1157,63 @@ emitExpr (EApp (EVar fn) args) = do
                 ]
           pure (allOps ++ extractOps, resultName)
         Nothing -> do
-          -- Case (b): unresolved external — emit direct func.call as a real
-          -- linker symbol so C shims or GHC library objects can satisfy it.
-          -- Always arity-mangle unresolved externals, even cross-module ones
-          -- (e.g. GHC.Internal.Base/map called with 1 or 2 args), because
-          -- different call sites may use different arities and we need
-          -- distinct declarations for each.
-          let callName = externMangled qualSanitized nArgs
-          addExternDecl callName nArgs
-          resultName <- freshName "v"
-          let callOp = "%" <> resultName <> " = func.call @" <> callName
-                       <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
-          pure (allOps ++ [callOp], resultName)
+          -- Check if this is a promoted let-bound lambda (e.g. go, goBranch).
+          promoted <- gets esPromotedFns
+          case Map.lookup rawName promoted of
+            Just promotedName -> do
+              -- Promoted let-bound lambda: emit direct func.call to the
+              -- top-level function we created via emitBindAsTopFn.
+              -- Prepend captured values as extra leading arguments.
+              capKeys <- gets (Map.findWithDefault [] promotedName . esPromotedCaptures)
+              capAliases <- gets esAliases
+              let capSsaNames = [ Map.findWithDefault k k capAliases | k <- capKeys ]
+                  allArgNames = capSsaNames ++ argNames
+                  allArgList = T.intercalate ", " ["%" <> n | n <- allArgNames]
+              allArgTypes <- mapM lookupType allArgNames
+              let allArgTypeList = T.intercalate ", " allArgTypes
+                  totalArgs = length allArgNames
+                  pArity = Map.lookup promotedName arityMap
+              case pArity of
+                Just ar | totalArgs < ar -> do
+                  (papOps, resultName) <- emitPapClosure promotedName ar allArgNames
+                  pure (allOps ++ papOps, resultName)
+                Just ar | totalArgs > ar -> do
+                  let (satArgs, extraArgs) = splitAt ar allArgNames
+                      (satTys, extraTys)   = splitAt ar allArgTypes
+                      satList = T.intercalate ", " ["%" <> n | n <- satArgs]
+                      satTyList = T.intercalate ", " satTys
+                  closName <- freshName "v"
+                  let topCallTy = if ar == 0 then "() -> i64" else "(" <> satTyList <> ") -> i64"
+                      topCallOp = "%" <> closName <> " = func.call @" <> promotedName
+                                  <> "(" <> satList <> ") : " <> topCallTy
+                  idxZeroName <- freshName "v"
+                  fptrIntName <- freshName "v"
+                  fptrPtrName <- freshName "v"
+                  resultName  <- freshName "v"
+                  let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- extraArgs])
+                      closArgTypes = T.intercalate ", " ("i64" : extraTys)
+                      extractOps =
+                        [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
+                        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+                        , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
+                        , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+                          <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
+                        ]
+                  pure (allOps ++ [topCallOp] ++ extractOps, resultName)
+                _ -> do
+                  resultName <- freshName "v"
+                  let callOp = "%" <> resultName <> " = func.call @" <> promotedName
+                               <> "(" <> allArgList <> ") : (" <> allArgTypeList <> ") -> i64"
+                  pure (allOps ++ [callOp], resultName)
+            Nothing -> do
+              -- Unresolved external — emit direct func.call as a real
+              -- linker symbol so C shims or GHC library objects can satisfy it.
+              let callName = externMangled qualSanitized nArgs
+              addExternDecl callName nArgs
+              resultName <- freshName "v"
+              let callOp = "%" <> resultName <> " = func.call @" <> callName
+                           <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
+              pure (allOps ++ [callOp], resultName)
 
 -- Application of a non-var, non-con expression (e.g. the result of a
 -- closure allocation or a let-bound closure value). The function value
@@ -1236,17 +1301,62 @@ emitExpr (ELet [binds] body) = do
   -- Save aliases so let-bindings don't leak out of this scope
   -- (e.g. into sibling scf.if branches).
   savedA <- gets esAliases
-  bindOps <- concat <$> mapM emitBind binds
+  savedTopFns <- gets esTopFns
+  savedArity  <- gets esTopFnArity
+  savedPromoted <- gets esPromotedFns
+  savedCaptures <- gets esPromotedCaptures
+  -- Promote recursive let-bound lambdas to top-level functions.
+  -- GHC floats where-bound helpers (go, goBranch, etc.) to the module
+  -- scope, but they remain as let-bindings in the Core IR. When these
+  -- are recursive, the lambda-lifting pass can't capture the self/mutual
+  -- references (the alias isn't registered yet). Fix: pre-register them
+  -- as top-level functions so the body emits direct func.call for
+  -- the recursion, and emitBindAsTopFn emits them as real func.func defs.
+  modPfx <- gets esModulePrefix
+  let (recBinds, plainBinds) = partition (isRecLetLambda modPfx) binds
+  -- Pre-register the recursive binds in esTopFns/esTopFnArity/esPromotedFns.
+  forM_ recBinds $ \bnd -> do
+    let qualN = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
+        arity = countLamParams (bindExpr bnd)
+        ssaKey = nameToSsa (Frankenstein.Core.Types.bindName bnd)
+    modify (\s -> s { esTopFns      = Set.insert qualN (esTopFns s)
+                    , esTopFnArity  = Map.insert qualN arity (esTopFnArity s)
+                    , esPromotedFns = Map.insert ssaKey qualN (esPromotedFns s) })
+  -- Pre-compute captures for all promoted binds (fixed-point iteration).
+  precomputeCaptures modPfx recBinds
+  -- Emit recursive binds as top-level func.func definitions.
+  recOps <- concat <$> mapM (emitBindAsTopFn modPfx) recBinds
+  -- Emit remaining binds normally.
+  plainOps <- concat <$> mapM emitBind plainBinds
   (bodyOps, bodyName) <- emitExpr body
-  modify (\s -> s { esAliases = savedA })
-  pure (bindOps ++ bodyOps, bodyName)
+  modify (\s -> s { esAliases = savedA, esTopFns = savedTopFns
+                  , esTopFnArity = savedArity, esPromotedFns = savedPromoted
+                  , esPromotedCaptures = savedCaptures })
+  pure (recOps ++ plainOps ++ bodyOps, bodyName)
 
 emitExpr (ELet (bg:bgs) body) = do
   savedA <- gets esAliases
-  bindOps <- concat <$> mapM emitBind bg
+  savedTopFns <- gets esTopFns
+  savedArity  <- gets esTopFnArity
+  savedPromoted <- gets esPromotedFns
+  savedCaptures <- gets esPromotedCaptures
+  modPfx <- gets esModulePrefix
+  let (recBinds, plainBinds) = partition (isRecLetLambda modPfx) bg
+  forM_ recBinds $ \bnd -> do
+    let qualN = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
+        arity = countLamParams (bindExpr bnd)
+        ssaKey = nameToSsa (Frankenstein.Core.Types.bindName bnd)
+    modify (\s -> s { esTopFns      = Set.insert qualN (esTopFns s)
+                    , esTopFnArity  = Map.insert qualN arity (esTopFnArity s)
+                    , esPromotedFns = Map.insert ssaKey qualN (esPromotedFns s) })
+  precomputeCaptures modPfx recBinds
+  recOps <- concat <$> mapM (emitBindAsTopFn modPfx) recBinds
+  plainOps <- concat <$> mapM emitBind plainBinds
   (restOps, restName) <- emitExpr (ELet bgs body)
-  modify (\s -> s { esAliases = savedA })
-  pure (bindOps ++ restOps, restName)
+  modify (\s -> s { esAliases = savedA, esTopFns = savedTopFns
+                  , esTopFnArity = savedArity, esPromotedFns = savedPromoted
+                  , esPromotedCaptures = savedCaptures })
+  pure (recOps ++ plainOps ++ restOps, restName)
 
 emitExpr (ELet [] body) = emitExpr body
 
@@ -1268,35 +1378,55 @@ emitExpr (ELam params body) = do
   -- it will be resolved at the reference site inside the lambda body.
   currentAliases <- gets esAliases
   topFns <- gets esTopFns
+  promoted <- gets esPromotedFns
+  promotedCaps <- gets esPromotedCaptures
   modPfx <- gets esModulePrefix
   let qualName n = let san = sanitizeName (nameText n)
                    in if T.any (== '/') (nameText n) then san else modPfx <> san
       isInScope n = let s = nameToSsa n
                     in Map.member s currentAliases
                        || Set.member (qualName n) topFns
+                       || Map.member s promoted
       captured = filter (\n -> isInScope n
-                            && not (Set.member (qualName n) topFns))
+                            && not (Set.member (qualName n) topFns)
+                            && not (Map.member (nameToSsa n) promoted))
                         candidateCaptures
-      nCaptured = length captured
+      -- Also capture values needed by promoted function calls in the body.
+      -- When the body calls a promoted fn that has captures, those capture
+      -- SSA keys must be available in the lambda body. Add them as extra
+      -- captures if they're aliased in the current scope.
+      promotedRefs = filter (\n -> Map.member (nameToSsa n) promoted) candidateCaptures
+      extraCapKeys = concatMap (\n -> case Map.lookup (nameToSsa n) promoted of
+                                        Just pName -> Map.findWithDefault [] pName promotedCaps
+                                        Nothing    -> []) promotedRefs
+      capturedSsaKeys = Set.fromList (map nameToSsa captured)
+      extraCaps = filter (\k -> not (Set.member k capturedSsaKeys)
+                              && Map.member k currentAliases) extraCapKeys
+      -- Deduplicate extra captures (SSA keys for promoted fn capture deps)
+      extraCapsUniq = Set.toList (Set.fromList extraCaps)
+      nCaptured = length captured + length extraCapsUniq
   liftedName <- freshName (modPfx <> "lambda")
   -- Allocate fresh SSA param names (closure + regular params).
   closFresh <- freshName "clos"
   paramFresh <- mapM (\_ -> freshName "p") params
   -- For each captured variable, allocate a fresh SSA name we'll bind in the prologue.
   capFresh <- mapM (\_ -> freshName "cap") captured
+  extraCapFresh <- mapM (\_ -> freshName "cap") extraCapsUniq
   -- Save aliases; install body-local aliases (originals → fresh names).
   savedAliases <- gets esAliases
   let capAliases = zip (map nameToSsa captured) capFresh
+      extraCapAliases = zip extraCapsUniq extraCapFresh
       paramAliases = zip (map (nameToSsa . fst) params) paramFresh
   modify (\s -> s { esAliases = foldr (\(k,v) m -> Map.insert k v m)
                                       (esAliases s)
-                                      (capAliases ++ paramAliases) })
+                                      (capAliases ++ extraCapAliases ++ paramAliases) })
   -- Build prologue ops that extract captured fields from %closure.
-  let prologue = concat
+  let allCapFresh = capFresh ++ extraCapFresh
+      prologue = concat
         [ [ "%idx_" <> cfn <> " = arith.constant " <> T.pack (show i) <> " : i64"
           , "%" <> cfn <> " = func.call @kk_field(%" <> closFresh <> ", %idx_" <> cfn <> ") : (i64, i64) -> i64"
           ]
-        | (i, cfn) <- zip [(1::Int)..] capFresh
+        | (i, cfn) <- zip [(1::Int)..] allCapFresh
         ]
   (bodyOps, bodyResult) <- emitExpr body
   -- Restore alias map (body-local aliases shouldn't leak out).
@@ -1346,11 +1476,14 @@ emitExpr (ELam params body) = do
                             aliases <- gets esAliases
                             let sname = nameToSsa cn
                             pure (Map.findWithDefault sname sname aliases)) captured
+  -- Resolve extra capture SSA keys from current aliases (before they're saved).
+  let extraCapturedNames = map (\k -> Map.findWithDefault k k currentAliases) extraCapsUniq
+      allCapturedNames = capturedNames ++ extraCapturedNames
   capSetOps <- mapM (\(i, cnName) -> do
     idxN <- freshName "v"
     pure [ "%" <> idxN <> " = arith.constant " <> T.pack (show i) <> " : i64"
          , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxN <> ", %" <> cnName <> ") : (i64, i64, i64) -> ()"
-         ]) (zip [(1::Int)..] capturedNames)
+         ]) (zip [(1::Int)..] allCapturedNames)
   pure (allocOps ++ concat capSetOps, ptrName)
 
 -- Perceus operations — emit real runtime calls
@@ -1798,6 +1931,105 @@ emitBind bnd = do
       modify (\s -> s { esAliases = Map.insert bname resultName (esAliases s) })
       pure $ ops ++ ["// let " <> bname <> " = %" <> resultName]
 
+-- | Pre-compute captures for all promoted binds in a Rec group.
+-- We iterate to a fixed point because transitive captures (A calls B,
+-- B's captures must also be A's captures) require multiple passes when
+-- the processing order doesn't match the dependency order.
+precomputeCaptures :: Text -> [Bind] -> Emit ()
+precomputeCaptures modPfx recBinds = do
+  currentAliases <- gets esAliases
+  topFns <- gets esTopFns
+  promoted <- gets esPromotedFns
+  priorCaps <- gets esPromotedCaptures
+  let qualName n = let san = sanitizeName (nameText n)
+                   in if T.any (== '/') (nameText n) then san else modPfx <> san
+      isInScope' n = let s = nameToSsa n
+                     in Map.member s currentAliases
+                        || Set.member (qualName n) topFns
+                        || Map.member s promoted
+      -- For each bind, compute direct captures (free vars that are in scope
+      -- but NOT top-level fns and NOT other promoted fns).
+      bindInfo = [ (qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd),
+                    bnd, directCaps, promotedRefs', paramSsaNames)
+                 | bnd <- recBinds
+                 , let ELam params body = unwrapLambda (bindExpr bnd)
+                       bodyFree = freeVarsExpr body
+                       paramNames = Set.fromList (map fst params)
+                       paramSsaNames = Set.fromList (map (nameToSsa . fst) params)
+                       candidates = Set.toList (bodyFree `Set.difference` paramNames)
+                       directCaps = filter (\n -> isInScope' n
+                                               && not (Set.member (qualName n) topFns)
+                                               && not (Map.member (nameToSsa n) promoted))
+                                           candidates
+                       promotedRefs' = filter (\n -> Map.member (nameToSsa n) promoted) candidates
+                 ]
+      -- Iterate: resolve transitive captures until the map stabilizes.
+      -- Look up transitive captures in both the current iteration's accumulator
+      -- AND the global esPromotedCaptures (for promoted fns from earlier binding groups).
+      iterate' caps =
+        let caps' = foldl (\acc (qualN, _bnd, directCaps, promotedRefs', paramSsas) ->
+                      let directKeys = map nameToSsa directCaps
+                          -- Transitive: for each promoted fn we call, include its captures.
+                          -- Check acc first (current group), then priorCaps (earlier groups).
+                          extraKeys = concatMap (\n -> case Map.lookup (nameToSsa n) promoted of
+                                                         Just pName -> case Map.lookup pName acc of
+                                                           Just ks -> ks
+                                                           Nothing -> Map.findWithDefault [] pName priorCaps
+                                                         Nothing    -> []) promotedRefs'
+                          directSet = Set.fromList directKeys
+                          -- Exclude keys that collide with this function's lambda params
+                          -- (they'd cause "region entry argument already in use").
+                          extras = filter (\k -> not (Set.member k directSet)
+                                              && not (Set.member k paramSsas)
+                                              && Map.member k currentAliases) extraKeys
+                          allKeys = directKeys ++ Set.toList (Set.fromList extras)
+                      in Map.insert qualN allKeys acc) caps bindInfo
+        in if caps' == caps then caps else iterate' caps'
+      finalCaps = iterate' Map.empty
+  -- Register captures and update arities.
+  forM_ bindInfo $ \(qualN, bnd, _directCaps, _promotedRefs', _paramSsas) -> do
+    let ELam params _body = unwrapLambda (bindExpr bnd)
+        capKeys = Map.findWithDefault [] qualN finalCaps
+        totalArity = length capKeys + length params
+    modify (\s -> s { esTopFnArity       = Map.insert qualN totalArity (esTopFnArity s)
+                    , esPromotedCaptures = Map.insert qualN capKeys (esPromotedCaptures s) })
+
+-- | Emit a let-bound lambda as a top-level func.func definition.
+-- Used for recursive where-bound helpers (go, goBranch, etc.) that GHC
+-- floated to the module scope. These are pre-registered in esTopFns so
+-- recursive self/mutual references resolve to direct func.call.
+-- Captures are pre-computed by precomputeCaptures.
+emitBindAsTopFn :: Text -> Bind -> Emit [Text]
+emitBindAsTopFn modPfx bnd = do
+  let qualN = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
+  case unwrapLambda (bindExpr bnd) of
+    ELam params body -> do
+      -- Captures were pre-computed by precomputeCaptures.
+      capSsaKeys <- Map.findWithDefault [] qualN <$> gets esPromotedCaptures
+      -- Build MLIR parameter list: captures first, then regular params.
+      let capArgs = [ "%" <> k <> ": i64" | k <- capSsaKeys ]
+          paramArgs = [ "%" <> nameToSsa pn <> ": i64" | (pn, _) <- params ]
+          mlirArgs = T.intercalate ", " (capArgs ++ paramArgs)
+          mlirRetTy = "i64"
+      -- Install identity aliases for captures + parameters.
+      savedA <- gets esAliases
+      let capAliases = [ (k, k) | k <- capSsaKeys ]
+          paramAliases = [ (nameToSsa pn, nameToSsa pn) | (pn, _) <- params ]
+      modify (\s -> s { esAliases = foldr (\(k,v) m -> Map.insert k v m)
+                                          (esAliases s) (capAliases ++ paramAliases) })
+      bodyText <- emitBody body mlirRetTy
+      modify (\s -> s { esAliases = savedA })
+      -- Emit as a lifted function (appended to esLiftedFns).
+      addLiftedFn $ T.unlines
+        [ "  func.func @" <> qualN <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {"
+        , bodyText
+        , "  }"
+        ]
+      pure ["// rec let " <> qualN <> " promoted to top-level"]
+    _ -> do
+      -- Shouldn't happen (isRecLetLambda guards), fall back to normal emitBind.
+      emitBind bnd
+
 -------------------------------------------------------------------------------
 -- Branch classification
 -------------------------------------------------------------------------------
@@ -2020,6 +2252,44 @@ effectRowNameEmit EffectRowEmpty          = "pure"
 -- Sanitize names for MLIR (replace special chars)
 sanitizeName :: Text -> Text
 sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~.,()[]{}'\"\\ \t" :: [Char]) then '_' else c)
+
+-- | Check if an expression is a lambda (possibly wrapped in EDelay/ETypeLam).
+isLambda :: Expr -> Bool
+isLambda (ELam _ _)     = True
+isLambda (ETypeLam _ e) = isLambda e
+isLambda (EDelay e)     = isLambda e
+isLambda _              = False
+
+-- | Count the number of value parameters in a (possibly wrapped) lambda.
+countLamParams :: Expr -> Int
+countLamParams (ELam ps _)     = length ps
+countLamParams (ETypeLam _ e)  = countLamParams e
+countLamParams (EDelay e)      = countLamParams e
+countLamParams _               = 0
+
+-- | Check if a let-binding should be promoted to a top-level function.
+-- Any let-bound lambda gets promoted: this handles recursive where-bound
+-- helpers (go, goBranch, etc.) that can't capture their own recursive
+-- reference through the normal lambda-lifting closure mechanism.
+isRecLetLambda :: Text -> Bind -> Bool
+isRecLetLambda _modPfx bnd = isLambda (bindExpr bnd)
+
+-- | Compute the qualified name for a let-bound function being promoted
+-- to top-level. Uses module prefix + unique to avoid collisions between
+-- multiple let-bound functions with the same short name (e.g. multiple
+-- 'go' in different where-clauses of the same module).
+qualifyBindName :: Text -> Name -> Text
+qualifyBindName modPfx n =
+  let san = sanitizeName (nameText n)
+  in if T.any (== '/') (nameText n) || T.isPrefixOf modPfx san
+     then san
+     else modPfx <> san <> "_u" <> T.pack (show (nameUnique n))
+
+-- | Strip EDelay/ETypeLam wrappers to get to the inner ELam.
+unwrapLambda :: Expr -> Expr
+unwrapLambda (EDelay e)     = unwrapLambda e
+unwrapLambda (ETypeLam _ e) = unwrapLambda e
+unwrapLambda e              = e
 
 -- | Build arity map from top-level defs: sanitized-name -> number of ELam params.
 -- Nullary defs (arity 0) are also recorded so oversaturated calls can be

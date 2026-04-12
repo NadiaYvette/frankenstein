@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FRKN="cabal-3.16.1.0 -v0 run frankenstein -w /usr/lib64/ghc-9.14.1/bin/ghc --"
+FRKN="cabal-3.16.1.0 -v0 exec frankenstein --"
 OUT=self-host/obj
 rm -rf "$OUT"
 mkdir -p "$OUT"

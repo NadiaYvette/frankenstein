@@ -96,6 +96,10 @@ clang -O2 -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.c
 clang -O2 -c -o "$OUT/cross_module_shims.o" self-host/cross_module_shims.c -I runtime/
 # Minimal Haskell stdlib shims (fromString identity, etc.)
 clang -O2 -c -o "$OUT/stdlib_shims.o" self-host/stdlib_shims.c
+# Data.Map / Data.Set / Data.Text shims
+clang -O2 -c -o "$OUT/shim_data_map.o" self-host/shim_data_map.c -I runtime/
+clang -O2 -c -o "$OUT/shim_data_set.o" self-host/shim_data_set.c -I runtime/
+clang -O2 -c -o "$OUT/shim_data_text.o" self-host/shim_data_text.c -I runtime/
 echo "Driver + shims compiled."
 
 echo ""

@@ -14,8 +14,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+#include "kk_runtime.h"
 #include "kk_cycle.h"
 #include "kk_arena.h"
+
+/* Forward declaration for string tracking (defined later) */
+static void kk_register_string(int64_t ptr);
 
 /* Raw allocation: size in bytes */
 void* kk_alloc(int64_t size) {
@@ -30,7 +35,8 @@ void kk_free(void* ptr) {
  * Heap pointers from kk_alloc_con are 8-byte aligned, so the low 3 bits
  * are zero and the value is above a reasonable threshold.
  * Small integers and other non-pointer values are skipped. */
-static inline int kk_is_heap_ptr(int64_t ptr) {
+/* Exported version (declared in kk_runtime.h) */
+int64_t kk_is_heap_ptr(int64_t ptr) {
     /* Must be non-zero, 8-byte aligned, and in a plausible heap range.
      * Values below 4096 are almost certainly not valid heap pointers. */
     return ptr != 0 && (ptr & 7) == 0 && ptr > 4096;
@@ -237,7 +243,9 @@ static kk_string_t* kk_str_alloc_concat(kk_string_t* l, kk_string_t* r) {
 }
 
 int64_t kk_string_from_literal(int64_t bytes_ptr, int64_t byte_len) {
-    return (int64_t)kk_str_alloc_leaf((const char*)bytes_ptr, byte_len, 0);
+    int64_t r = (int64_t)kk_str_alloc_leaf((const char*)bytes_ptr, byte_len, 0);
+    kk_register_string(r);
+    return r;
 }
 
 int64_t kk_string_from_cstr(int64_t cstr_ptr) {
@@ -245,11 +253,15 @@ int64_t kk_string_from_cstr(int64_t cstr_ptr) {
     if (p == NULL) return kk_string_empty();
     int64_t n = 0;
     while (p[n] != '\0') n++;
-    return (int64_t)kk_str_alloc_leaf(p, n, 0);
+    int64_t r = (int64_t)kk_str_alloc_leaf(p, n, 0);
+    kk_register_string(r);
+    return r;
 }
 
 int64_t kk_string_empty(void) {
-    return (int64_t)kk_str_alloc_leaf("", 0, 0);
+    int64_t r = (int64_t)kk_str_alloc_leaf("", 0, 0);
+    kk_register_string(r);
+    return r;
 }
 
 int64_t kk_str_len(int64_t s_i) {
@@ -288,7 +300,9 @@ int64_t kk_str_concat(int64_t a_i, int64_t b_i) {
         if (b != NULL) kk_str_drop(b_i);
         return a_i;
     }
-    return (int64_t)kk_str_alloc_concat(a, b);
+    int64_t r = (int64_t)kk_str_alloc_concat(a, b);
+    kk_register_string(r);
+    return r;
 }
 
 /* Copy a rope into a contiguous buffer at *out, advancing *out. */
@@ -313,7 +327,9 @@ int64_t kk_str_flatten(int64_t s_i) {
     char* p = buf;
     kk_str_copy_into(s, &p);
     buf[n] = '\0';
-    return (int64_t)kk_str_alloc_leaf(buf, n, 1);
+    int64_t r = (int64_t)kk_str_alloc_leaf(buf, n, 1);
+    kk_register_string(r);
+    return r;
 }
 
 void kk_print_str(int64_t s_i) {
@@ -400,6 +416,17 @@ void kk_str_drop(int64_t s_i) {
     free(s);
 }
 
+/* Public wrappers for shim use */
+int64_t kk_str_alloc_leaf_owned(const char* bytes, int64_t byte_len) {
+    int64_t r = (int64_t)kk_str_alloc_leaf(bytes, byte_len, 1);
+    kk_register_string(r);
+    return r;
+}
+
+int64_t kk_str_byte_len(int64_t s) {
+    return kk_str_len(s);
+}
+
 /* ByteString — same kk_string_t representation, byte-oriented API. */
 
 int64_t kk_bytes_from_literal(int64_t bytes_ptr, int64_t byte_len) {
@@ -441,7 +468,7 @@ int64_t kk_bytes_index(int64_t b_i, int64_t i) {
  * terminated C strings via a small helper that flattens the rope into
  * a freshly malloc'd buffer the caller must free. */
 
-static char* kk_str_dup_cstr(int64_t s_i) {
+char* kk_str_dup_cstr(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     int64_t n = (s ? s->byte_len : 0);
     char* buf = (char*)malloc((size_t)n + 1);
@@ -741,4 +768,126 @@ int64_t kk_thunk_force(int64_t thunk) {
     kk_set_field(thunk, 0, 1);                /* mark as evaluated */
     kk_set_field(thunk, 1, result);           /* store result */
     return result;
+}
+
+/* ================================================================== */
+/*  String tracking — distinguish kk_string_t from kk_alloc_con       */
+/* ================================================================== */
+
+#define KK_STRING_TABLE_SIZE 8192
+static int64_t string_table[KK_STRING_TABLE_SIZE];
+
+static void kk_register_string(int64_t ptr) {
+    int64_t idx = (ptr >> 3) & (KK_STRING_TABLE_SIZE - 1);
+    for (int64_t i = 0; i < KK_STRING_TABLE_SIZE; i++) {
+        int64_t probe = (idx + i) & (KK_STRING_TABLE_SIZE - 1);
+        if (string_table[probe] == 0 || string_table[probe] == ptr) {
+            string_table[probe] = ptr;
+            return;
+        }
+    }
+}
+
+int64_t kk_is_string(int64_t ptr) {
+    if (!kk_is_heap_ptr(ptr)) return 0;
+    int64_t idx = (ptr >> 3) & (KK_STRING_TABLE_SIZE - 1);
+    for (int64_t i = 0; i < KK_STRING_TABLE_SIZE; i++) {
+        int64_t probe = (idx + i) & (KK_STRING_TABLE_SIZE - 1);
+        if (string_table[probe] == ptr) return 1;
+        if (string_table[probe] == 0)  return 0;
+    }
+    return 0;
+}
+
+/* ================================================================== */
+/*  String comparison                                                  */
+/* ================================================================== */
+
+/* Flatten a kk_string to a C string for comparison.
+ * Returns a malloc'd buffer that the caller must free. */
+static const char* kk_str_flatten_cmp(int64_t s, int64_t *out_len) {
+    kk_string_t* str = (kk_string_t*)s;
+    if (!str) { *out_len = 0; return ""; }
+    /* Flatten the rope so we get contiguous bytes */
+    int64_t flat = kk_str_flatten(s);
+    kk_string_t* f = (kk_string_t*)flat;
+    *out_len = f->byte_len;
+    return f->u.bytes;
+}
+
+int64_t kk_str_compare(int64_t a, int64_t b) {
+    if (a == b) return 0;
+    int64_t len_a, len_b;
+    const char* sa = kk_str_flatten_cmp(a, &len_a);
+    const char* sb = kk_str_flatten_cmp(b, &len_b);
+    int64_t min_len = len_a < len_b ? len_a : len_b;
+    int cmp = memcmp(sa, sb, (size_t)min_len);
+    if (cmp != 0) return cmp;
+    return (len_a > len_b) - (len_a < len_b);
+}
+
+/* ================================================================== */
+/*  Generic structural comparison                                      */
+/* ================================================================== */
+
+int64_t kk_compare(int64_t a, int64_t b) {
+    if (a == b) return 0;
+    /* Both strings? */
+    if (kk_is_string(a) && kk_is_string(b))
+        return kk_str_compare(a, b);
+    /* Both heap objects (con)? Compare by tag, then fields. */
+    if (kk_is_heap_ptr(a) && kk_is_heap_ptr(b) &&
+        !kk_is_string(a) && !kk_is_string(b)) {
+        int64_t ta = kk_tag(a), tb = kk_tag(b);
+        if (ta != tb) return (ta > tb) - (ta < tb);
+        int64_t nfa = kk_nfields(a), nfb = kk_nfields(b);
+        int64_t n = nfa < nfb ? nfa : nfb;
+        for (int64_t i = 0; i < n; i++) {
+            int64_t c = kk_compare(kk_field(a, i), kk_field(b, i));
+            if (c != 0) return c;
+        }
+        return (nfa > nfb) - (nfa < nfb);
+    }
+    /* Fallback: integer comparison */
+    return (a > b) - (a < b);
+}
+
+/* ================================================================== */
+/*  List / Tuple / Maybe helpers                                       */
+/* ================================================================== */
+
+int64_t kk_nil(void) {
+    return kk_alloc_con(KK_NIL_TAG, 0);
+}
+
+int64_t kk_cons(int64_t head, int64_t tail) {
+    int64_t c = kk_alloc_con(KK_CONS_TAG, 2);
+    kk_set_field(c, 0, head);
+    kk_set_field(c, 1, tail);
+    return c;
+}
+
+int64_t kk_list_head(int64_t list) { return kk_field(list, 0); }
+int64_t kk_list_tail(int64_t list) { return kk_field(list, 1); }
+
+int64_t kk_is_nil(int64_t list) {
+    if (!kk_is_heap_ptr(list)) return 1;
+    return kk_tag(list) == KK_NIL_TAG && kk_nfields(list) == 0;
+}
+
+int64_t kk_pair(int64_t a, int64_t b) {
+    int64_t p = kk_alloc_con(0, 2);
+    kk_set_field(p, 0, a);
+    kk_set_field(p, 1, b);
+    return p;
+}
+
+int64_t kk_fst(int64_t pair) { return kk_field(pair, 0); }
+int64_t kk_snd(int64_t pair) { return kk_field(pair, 1); }
+
+int64_t kk_nothing(void) { return kk_alloc_con(KK_NOTHING_TAG, 0); }
+int64_t kk_just(int64_t x) {
+    int64_t j = kk_alloc_con(KK_JUST_TAG, 1);
+    kk_set_field(j, 0, x);
+    return j;
 }

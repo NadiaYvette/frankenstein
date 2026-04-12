@@ -78,6 +78,11 @@ void    kk_print_str(int64_t s);
 void    kk_str_retain(int64_t s);
 void    kk_str_drop(int64_t s);
 
+/* Low-level string construction (used by Data.Text shims) */
+int64_t kk_str_alloc_leaf_owned(const char* bytes, int64_t byte_len);
+char*   kk_str_dup_cstr(int64_t s);  /* flatten rope to malloc'd NUL-terminated C string; caller frees */
+int64_t kk_str_byte_len(int64_t s);  /* alias for kk_str_len (total bytes) */
+
 /* ByteString — same representation, byte-oriented API */
 int64_t kk_bytes_from_literal(int64_t bytes_ptr, int64_t byte_len);
 int64_t kk_bytes_len(int64_t b);
@@ -116,5 +121,39 @@ int64_t kk_ref_set(int64_t ref, int64_t value);  /* returns 0 */
  * kk_thunk_force evaluates the thunk (once) and returns the result. */
 int64_t kk_thunk_create(int64_t fn_ptr);
 int64_t kk_thunk_force(int64_t thunk);
+
+/* Comparison — structural ordering for Map/Set shims.
+ * kk_str_compare: lexicographic byte comparison on rope strings.
+ *   Returns <0, 0, >0.
+ * kk_compare: generic structural comparison.
+ *   Small ints compare numerically; strings lexicographically;
+ *   heap objects by (tag, fields...) lexicographically.
+ * kk_is_heap_ptr: returns 1 if the value looks like a heap pointer. */
+int64_t kk_str_compare(int64_t a, int64_t b);
+int64_t kk_compare(int64_t a, int64_t b);
+int64_t kk_is_heap_ptr(int64_t v);
+int64_t kk_is_string(int64_t v);
+int64_t kk_nfields(int64_t ptr);
+
+/* List helpers — used by Map/Set/Text shims.
+ * Haskell [] = nil (tag 0, 0 fields), (:) = cons (tag 1, 2 fields). */
+#define KK_NIL_TAG  0
+#define KK_CONS_TAG 1
+int64_t kk_nil(void);
+int64_t kk_cons(int64_t head, int64_t tail);
+int64_t kk_list_head(int64_t list);
+int64_t kk_list_tail(int64_t list);
+int64_t kk_is_nil(int64_t list);
+
+/* Tuple helpers — (a,b) = tag 0, 2 fields. */
+int64_t kk_pair(int64_t a, int64_t b);
+int64_t kk_fst(int64_t pair);
+int64_t kk_snd(int64_t pair);
+
+/* Maybe helpers — Nothing = tag 0, Just x = tag 1, 1 field. */
+#define KK_NOTHING_TAG 0
+#define KK_JUST_TAG    1
+int64_t kk_nothing(void);
+int64_t kk_just(int64_t x);
 
 #endif /* KK_RUNTIME_H */

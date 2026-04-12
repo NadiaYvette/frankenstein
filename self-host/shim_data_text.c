@@ -1,0 +1,861 @@
+/* Data.Text shims for Frankenstein self-hosted binary.
+ *
+ * Frankenstein strings are already kk_string ropes (UTF-8).
+ * Data.Text in the compiled IR is just int64_t holding a kk_string pointer.
+ * Most operations flatten the rope, do C string work, and re-wrap.
+ *
+ * Required symbols (from nm -u), 54 total:
+ *   Data_Text_all$2, Data_Text_any$2, Data_Text_breakOn$2,
+ *   Data_Text_breakOn$3, Data_Text_breakOnEnd$3, Data_Text_concat$1,
+ *   Data_Text_drop$1, Data_Text_drop$2, Data_Text_dropEnd$1,
+ *   Data_Text_dropEnd$2, Data_Text_dropWhile$1, Data_Text_dropWhile$2,
+ *   Data_Text_dropWhileEnd$2, Data_Text_Encoding_decodeUtf8With$2,
+ *   Data_Text_Encoding_encodeUtf8$1, Data_Text_Encoding_Error_lenientDecode$0,
+ *   Data_Text_init$1, Data_Text_intercalate$1, Data_Text_intercalate$2,
+ *   Data_Text_Internal_empty$0, Data_Text_Internal_pack$0,
+ *   Data_Text_Internal_pack$1, Data_Text_IO_readFile$1,
+ *   Data_Text_IO_writeFile$2, Data_Text_isInfixOf$1, Data_Text_isInfixOf$2,
+ *   Data_Text_isPrefixOf$1, Data_Text_isPrefixOf$2, Data_Text_isSuffixOf$2,
+ *   Data_Text_last$1, Data_Text_length$1, Data_Text_lines$1,
+ *   Data_Text_map$1, Data_Text_null$0, Data_Text_null$1,
+ *   Data_Text_Show_singleton$1, Data_Text_Show_unpack$1,
+ *   Data_Text_span$2, Data_Text_splitOn$2, Data_Text_splitOn$3,
+ *   Data_Text_strip$0, Data_Text_strip$1, Data_Text_stripEnd$1,
+ *   Data_Text_stripPrefix$2, Data_Text_stripStart$0, Data_Text_stripStart$1,
+ *   Data_Text_take$2, Data_Text_takeWhile$1, Data_Text_takeWhile$2,
+ *   Data_Text_uncons$1, Data_Text_unlines$0, Data_Text_unlines$1,
+ *   Data_ByteString_length$1, Data_ByteString_unpack$1
+ */
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../runtime/kk_runtime.h"
+
+/* ------------------------------------------------------------------ */
+/*  Internal helpers                                                    */
+/* ------------------------------------------------------------------ */
+
+/* Flatten a kk_string rope to a malloc'd NUL-terminated C string.
+ * Stores the byte length in *out_len.  Caller must free the result. */
+static char* text_flatten(int64_t s, int64_t *out_len) {
+    char* cstr = kk_str_dup_cstr(s);
+    if (!cstr) { *out_len = 0; return NULL; }
+    *out_len = kk_str_len(s);
+    return cstr;
+}
+
+/* Build a kk_string from a C buffer of byte_len bytes (copies buf). */
+static int64_t text_from_buf(const char* buf, int64_t byte_len) {
+    if (byte_len <= 0) return kk_string_empty();
+    char* owned = (char*)malloc((size_t)byte_len + 1);
+    if (!owned) return kk_string_empty();
+    memcpy(owned, buf, (size_t)byte_len);
+    owned[byte_len] = '\0';
+    return kk_str_alloc_leaf_owned(owned, byte_len);
+}
+
+/* Count UTF-8 codepoints in [p, p+len). */
+static int64_t utf8_char_count(const char* p, int64_t len) {
+    int64_t count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (((unsigned char)p[i] & 0xC0) != 0x80) count++;
+    }
+    return count;
+}
+
+/* Advance past n codepoints in [p, p+max_bytes).  Returns byte offset. */
+static int64_t utf8_advance(const char* p, int64_t max_bytes, int64_t n) {
+    int64_t off = 0, count = 0;
+    while (off < max_bytes && count < n) {
+        unsigned char c = (unsigned char)p[off];
+        if      (c < 0x80)                 off += 1;
+        else if ((c & 0xE0) == 0xC0)       off += 2;
+        else if ((c & 0xF0) == 0xE0)       off += 3;
+        else                                off += 4;
+        count++;
+    }
+    return off;
+}
+
+/* Decode the codepoint at p[0..].  Returns the codepoint and sets *bytes_used. */
+static int64_t utf8_decode(const char* p, int64_t *bytes_used) {
+    unsigned char c = (unsigned char)p[0];
+    if (c < 0x80) { *bytes_used = 1; return c; }
+    if ((c & 0xE0) == 0xC0) { *bytes_used = 2; return ((c & 0x1F) << 6) | (p[1] & 0x3F); }
+    if ((c & 0xF0) == 0xE0) { *bytes_used = 3; return ((c & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); }
+    *bytes_used = 4;
+    return ((c & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+}
+
+/* Encode a codepoint to buf, returning bytes written (1-4). */
+static int utf8_encode(int64_t cp, char* buf) {
+    if (cp < 0x80)    { buf[0] = (char)cp; return 1; }
+    if (cp < 0x800)   { buf[0] = (char)(0xC0 | (cp >> 6)); buf[1] = (char)(0x80 | (cp & 0x3F)); return 2; }
+    if (cp < 0x10000) { buf[0] = (char)(0xE0 | (cp >> 12)); buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[2] = (char)(0x80 | (cp & 0x3F)); return 3; }
+    buf[0] = (char)(0xF0 | (cp >> 18)); buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F)); buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[3] = (char)(0x80 | (cp & 0x3F)); return 4;
+}
+
+/* Call a Haskell closure: field 0 = fn ptr.
+ * For predicates (Char -> Bool), the closure takes (closure, char_codepoint)
+ * and returns 0/1. */
+static int64_t call_closure_1(int64_t closure, int64_t arg) {
+    int64_t fn_ptr = kk_field(closure, 0);
+    typedef int64_t (*fn1_t)(int64_t, int64_t);
+    return ((fn1_t)fn_ptr)(closure, arg);
+}
+
+/* Find needle (buf_n, len_n) in haystack (buf_h, len_h).
+ * Returns byte offset or -1. */
+static int64_t memmem_offset(const char* h, int64_t lh,
+                              const char* n, int64_t ln) {
+    if (ln == 0) return 0;
+    if (ln > lh) return -1;
+    for (int64_t i = 0; i <= lh - ln; i++) {
+        if (memcmp(h + i, n, (size_t)ln) == 0) return i;
+    }
+    return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Text operations (static)                                           */
+/* ------------------------------------------------------------------ */
+
+static int64_t text_null(int64_t s) {
+    return kk_str_len(s) == 0 ? 1 : 0;
+}
+
+static int64_t text_length(int64_t s) {
+    return kk_str_char_len(s);
+}
+
+static int64_t text_take(int64_t n, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_string_empty();
+    int64_t byte_off = utf8_advance(buf, len, n);
+    int64_t r = text_from_buf(buf, byte_off);
+    free(buf);
+    return r;
+}
+
+static int64_t text_drop(int64_t n, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_string_empty();
+    int64_t byte_off = utf8_advance(buf, len, n);
+    int64_t r = text_from_buf(buf + byte_off, len - byte_off);
+    free(buf);
+    return r;
+}
+
+static int64_t text_drop_end(int64_t n, int64_t s) {
+    /* Drop n chars from the end = take (length - n) */
+    int64_t total = text_length(s);
+    int64_t keep = total - n;
+    if (keep <= 0) return kk_string_empty();
+    return text_take(keep, s);
+}
+
+static int64_t text_init(int64_t s) {
+    /* All but last char = take (length - 1) */
+    int64_t total = text_length(s);
+    if (total <= 0) return kk_string_empty();
+    return text_take(total - 1, s);
+}
+
+static int64_t text_last(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return 0; }
+    /* Walk backwards to find last codepoint start */
+    int64_t i = len - 1;
+    while (i > 0 && ((unsigned char)buf[i] & 0xC0) == 0x80) i--;
+    int64_t bytes_used;
+    int64_t cp = utf8_decode(buf + i, &bytes_used);
+    free(buf);
+    return cp;
+}
+
+/* uncons: Text -> Maybe (Char, Text) */
+static int64_t text_uncons(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return kk_nothing(); }
+    int64_t bytes_used;
+    int64_t cp = utf8_decode(buf, &bytes_used);
+    int64_t rest = text_from_buf(buf + bytes_used, len - bytes_used);
+    free(buf);
+    return kk_just(kk_pair(cp, rest));
+}
+
+static int64_t text_concat(int64_t list) {
+    int64_t result = kk_string_empty();
+    while (!kk_is_nil(list)) {
+        result = kk_str_concat(result, kk_list_head(list));
+        list = kk_list_tail(list);
+    }
+    return result;
+}
+
+static int64_t text_intercalate(int64_t sep, int64_t list) {
+    if (kk_is_nil(list)) return kk_string_empty();
+    int64_t result = kk_list_head(list);
+    list = kk_list_tail(list);
+    while (!kk_is_nil(list)) {
+        result = kk_str_concat(result, sep);
+        result = kk_str_concat(result, kk_list_head(list));
+        list = kk_list_tail(list);
+    }
+    return result;
+}
+
+static int64_t text_is_prefix_of(int64_t pfx, int64_t s) {
+    int64_t plen, slen;
+    char* pb = text_flatten(pfx, &plen);
+    char* sb = text_flatten(s, &slen);
+    int r = (plen <= slen && memcmp(pb, sb, (size_t)plen) == 0) ? 1 : 0;
+    free(pb); free(sb);
+    return r;
+}
+
+static int64_t text_is_suffix_of(int64_t sfx, int64_t s) {
+    int64_t flen, slen;
+    char* fb = text_flatten(sfx, &flen);
+    char* sb = text_flatten(s, &slen);
+    int r = (flen <= slen && memcmp(sb + slen - flen, fb, (size_t)flen) == 0) ? 1 : 0;
+    free(fb); free(sb);
+    return r;
+}
+
+static int64_t text_is_infix_of(int64_t needle, int64_t haystack) {
+    int64_t nlen, hlen;
+    char* nb = text_flatten(needle, &nlen);
+    char* hb = text_flatten(haystack, &hlen);
+    int r = memmem_offset(hb, hlen, nb, nlen) >= 0 ? 1 : 0;
+    free(nb); free(hb);
+    return r;
+}
+
+/* stripPrefix: Text -> Text -> Maybe Text */
+static int64_t text_strip_prefix(int64_t pfx, int64_t s) {
+    int64_t plen, slen;
+    char* pb = text_flatten(pfx, &plen);
+    char* sb = text_flatten(s, &slen);
+    int64_t result;
+    if (plen <= slen && memcmp(pb, sb, (size_t)plen) == 0) {
+        result = kk_just(text_from_buf(sb + plen, slen - plen));
+    } else {
+        result = kk_nothing();
+    }
+    free(pb); free(sb);
+    return result;
+}
+
+static int64_t text_strip_start(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_string_empty();
+    int64_t i = 0;
+    while (i < len && ((unsigned char)buf[i] == ' ' || (unsigned char)buf[i] == '\t'
+                       || (unsigned char)buf[i] == '\n' || (unsigned char)buf[i] == '\r'))
+        i++;
+    int64_t r = text_from_buf(buf + i, len - i);
+    free(buf);
+    return r;
+}
+
+static int64_t text_strip_end(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_string_empty();
+    int64_t i = len;
+    while (i > 0 && ((unsigned char)buf[i-1] == ' ' || (unsigned char)buf[i-1] == '\t'
+                      || (unsigned char)buf[i-1] == '\n' || (unsigned char)buf[i-1] == '\r'))
+        i--;
+    int64_t r = text_from_buf(buf, i);
+    free(buf);
+    return r;
+}
+
+static int64_t text_strip(int64_t s) {
+    return text_strip_end(text_strip_start(s));
+}
+
+/* splitOn: Text -> Text -> [Text] */
+static int64_t text_split_on(int64_t delim, int64_t s) {
+    int64_t dlen, slen;
+    char* db = text_flatten(delim, &dlen);
+    char* sb = text_flatten(s, &slen);
+    if (!db || !sb || dlen == 0) {
+        /* Empty delimiter: return singleton list */
+        free(db); free(sb);
+        return kk_cons(s, kk_nil());
+    }
+    /* Collect pieces in reverse, then reverse */
+    int64_t pieces = kk_nil();
+    int64_t piece_count = 0;
+    int64_t start = 0;
+    while (start <= slen) {
+        int64_t pos = memmem_offset(sb + start, slen - start, db, dlen);
+        if (pos < 0) {
+            pieces = kk_cons(text_from_buf(sb + start, slen - start), pieces);
+            piece_count++;
+            break;
+        }
+        pieces = kk_cons(text_from_buf(sb + start, pos), pieces);
+        piece_count++;
+        start += pos + dlen;
+        if (start > slen) {
+            pieces = kk_cons(kk_string_empty(), pieces);
+            piece_count++;
+        }
+    }
+    free(db); free(sb);
+    /* Reverse the list */
+    int64_t result = kk_nil();
+    while (!kk_is_nil(pieces)) {
+        result = kk_cons(kk_list_head(pieces), result);
+        pieces = kk_list_tail(pieces);
+    }
+    return result;
+}
+
+/* breakOn: Text -> Text -> (Text, Text) */
+static int64_t text_break_on(int64_t needle, int64_t s) {
+    int64_t nlen, slen;
+    char* nb = text_flatten(needle, &nlen);
+    char* sb = text_flatten(s, &slen);
+    int64_t pos = memmem_offset(sb, slen, nb, nlen);
+    int64_t result;
+    if (pos < 0) {
+        result = kk_pair(s, kk_string_empty());
+    } else {
+        result = kk_pair(text_from_buf(sb, pos), text_from_buf(sb + pos, slen - pos));
+    }
+    free(nb); free(sb);
+    return result;
+}
+
+/* breakOnEnd: Text -> Text -> (Text, Text) */
+static int64_t text_break_on_end(int64_t needle, int64_t s) {
+    int64_t nlen, slen;
+    char* nb = text_flatten(needle, &nlen);
+    char* sb = text_flatten(s, &slen);
+    /* Find last occurrence */
+    int64_t last_pos = -1;
+    if (nlen > 0) {
+        for (int64_t i = slen - nlen; i >= 0; i--) {
+            if (memcmp(sb + i, nb, (size_t)nlen) == 0) { last_pos = i; break; }
+        }
+    }
+    int64_t result;
+    if (last_pos < 0) {
+        result = kk_pair(kk_string_empty(), s);
+    } else {
+        int64_t split_at = last_pos + nlen;
+        result = kk_pair(text_from_buf(sb, split_at), text_from_buf(sb + split_at, slen - split_at));
+    }
+    free(nb); free(sb);
+    return result;
+}
+
+/* lines: Text -> [Text] */
+static int64_t text_lines(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return kk_nil(); }
+    int64_t pieces = kk_nil();
+    int64_t start = 0;
+    for (int64_t i = 0; i <= len; i++) {
+        if (i == len || buf[i] == '\n') {
+            int64_t end = i;
+            if (end > start && buf[end-1] == '\r') end--;
+            pieces = kk_cons(text_from_buf(buf + start, end - start), pieces);
+            start = i + 1;
+        }
+    }
+    free(buf);
+    /* Reverse */
+    int64_t result = kk_nil();
+    while (!kk_is_nil(pieces)) {
+        result = kk_cons(kk_list_head(pieces), result);
+        pieces = kk_list_tail(pieces);
+    }
+    return result;
+}
+
+/* unlines: [Text] -> Text  (join with \n) */
+static int64_t text_unlines(int64_t list) {
+    int64_t nl = kk_string_from_literal((int64_t)"\n", 1);
+    int64_t result = kk_string_empty();
+    while (!kk_is_nil(list)) {
+        result = kk_str_concat(result, kk_list_head(list));
+        result = kk_str_concat(result, nl);
+        list = kk_list_tail(list);
+    }
+    return result;
+}
+
+/* map: (Char -> Char) -> Text -> Text */
+static int64_t text_map(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return kk_string_empty(); }
+    /* Worst case: each input byte becomes 4 output bytes */
+    char* out = (char*)malloc((size_t)len * 4 + 1);
+    if (!out) { free(buf); return kk_string_empty(); }
+    int64_t opos = 0;
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + i, &bytes_used);
+        i += bytes_used;
+        int64_t new_cp = call_closure_1(f, cp);
+        opos += utf8_encode(new_cp, out + opos);
+    }
+    int64_t r = text_from_buf(out, opos);
+    free(buf); free(out);
+    return r;
+}
+
+/* all: (Char -> Bool) -> Text -> Bool */
+static int64_t text_all(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return 1;
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + i, &bytes_used);
+        i += bytes_used;
+        if (!call_closure_1(f, cp)) { free(buf); return 0; }
+    }
+    free(buf);
+    return 1;
+}
+
+/* any: (Char -> Bool) -> Text -> Bool */
+static int64_t text_any(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return 0;
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + i, &bytes_used);
+        i += bytes_used;
+        if (call_closure_1(f, cp)) { free(buf); return 1; }
+    }
+    free(buf);
+    return 0;
+}
+
+/* takeWhile: (Char -> Bool) -> Text -> Text */
+static int64_t text_take_while(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_string_empty();
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + i, &bytes_used);
+        if (!call_closure_1(f, cp)) break;
+        i += bytes_used;
+    }
+    int64_t r = text_from_buf(buf, i);
+    free(buf);
+    return r;
+}
+
+/* dropWhile: (Char -> Bool) -> Text -> Text */
+static int64_t text_drop_while(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_string_empty();
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + i, &bytes_used);
+        if (!call_closure_1(f, cp)) break;
+        i += bytes_used;
+    }
+    int64_t r = text_from_buf(buf + i, len - i);
+    free(buf);
+    return r;
+}
+
+/* dropWhileEnd: (Char -> Bool) -> Text -> Text */
+static int64_t text_drop_while_end(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_string_empty();
+    int64_t end = len;
+    /* Walk backwards, char by char */
+    while (end > 0) {
+        /* Find start of last codepoint */
+        int64_t cp_start = end - 1;
+        while (cp_start > 0 && ((unsigned char)buf[cp_start] & 0xC0) == 0x80)
+            cp_start--;
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + cp_start, &bytes_used);
+        if (!call_closure_1(f, cp)) break;
+        end = cp_start;
+    }
+    int64_t r = text_from_buf(buf, end);
+    free(buf);
+    return r;
+}
+
+/* span: (Char -> Bool) -> Text -> (Text, Text) */
+static int64_t text_span(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_pair(kk_string_empty(), kk_string_empty());
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + i, &bytes_used);
+        if (!call_closure_1(f, cp)) break;
+        i += bytes_used;
+    }
+    int64_t r = kk_pair(text_from_buf(buf, i), text_from_buf(buf + i, len - i));
+    free(buf);
+    return r;
+}
+
+/* pack: [Char] -> Text  (list of codepoints to string) */
+static int64_t text_pack(int64_t list) {
+    /* First pass: count total bytes needed */
+    int64_t total = 0;
+    int64_t tmp = list;
+    while (!kk_is_nil(tmp)) {
+        int64_t cp = kk_list_head(tmp);
+        char dummy[4];
+        total += utf8_encode(cp, dummy);
+        tmp = kk_list_tail(tmp);
+    }
+    if (total == 0) return kk_string_empty();
+    char* buf = (char*)malloc((size_t)total + 1);
+    if (!buf) return kk_string_empty();
+    int64_t pos = 0;
+    while (!kk_is_nil(list)) {
+        int64_t cp = kk_list_head(list);
+        pos += utf8_encode(cp, buf + pos);
+        list = kk_list_tail(list);
+    }
+    buf[total] = '\0';
+    return kk_str_alloc_leaf_owned(buf, total);
+}
+
+/* unpack: Text -> [Char]  (string to list of codepoints) */
+static int64_t text_unpack(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return kk_nil(); }
+    /* Build list backwards from end */
+    /* First, collect codepoints into temp array */
+    int64_t* cps = (int64_t*)malloc((size_t)len * sizeof(int64_t));
+    if (!cps) { free(buf); return kk_nil(); }
+    int64_t n = 0;
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        cps[n++] = utf8_decode(buf + i, &bytes_used);
+        i += bytes_used;
+    }
+    free(buf);
+    int64_t result = kk_nil();
+    for (int64_t j = n - 1; j >= 0; j--) {
+        result = kk_cons(cps[j], result);
+    }
+    free(cps);
+    return result;
+}
+
+/* singleton: Char -> Text  (single codepoint to string) */
+static int64_t text_singleton(int64_t cp) {
+    char buf[4];
+    int n = utf8_encode(cp, buf);
+    return text_from_buf(buf, n);
+}
+
+/* =================================================================== */
+/*  Exported symbols with asm labels                                   */
+/* =================================================================== */
+
+/* --- Internal --- */
+int64_t text_internal_empty_0(void) __asm__("Data_Text_Internal_empty$0");
+int64_t text_internal_empty_0(void) { return kk_string_empty(); }
+
+int64_t text_internal_pack_1(int64_t list) __asm__("Data_Text_Internal_pack$1");
+int64_t text_internal_pack_1(int64_t list) { return text_pack(list); }
+
+int64_t text_internal_pack_0(void) __asm__("Data_Text_Internal_pack$0");
+int64_t text_internal_pack_0(void) {
+    int64_t c = kk_alloc_con(0, 1);
+    kk_set_field(c, 0, (int64_t)&text_internal_pack_1);
+    return c;
+}
+
+/* --- Queries --- */
+int64_t text_null_1(int64_t s) __asm__("Data_Text_null$1");
+int64_t text_null_1(int64_t s) { return text_null(s); }
+
+int64_t text_null_0(void) __asm__("Data_Text_null$0");
+int64_t text_null_0(void) {
+    int64_t c = kk_alloc_con(0, 1);
+    kk_set_field(c, 0, (int64_t)&text_null_1);
+    return c;
+}
+
+int64_t text_length_1(int64_t s) __asm__("Data_Text_length$1");
+int64_t text_length_1(int64_t s) { return text_length(s); }
+
+int64_t text_last_1(int64_t s) __asm__("Data_Text_last$1");
+int64_t text_last_1(int64_t s) { return text_last(s); }
+
+/* --- Slicing --- */
+int64_t text_take_2(int64_t n, int64_t s) __asm__("Data_Text_take$2");
+int64_t text_take_2(int64_t n, int64_t s) { return text_take(n, s); }
+
+int64_t text_drop_2(int64_t n, int64_t s) __asm__("Data_Text_drop$2");
+int64_t text_drop_2(int64_t n, int64_t s) { return text_drop(n, s); }
+
+int64_t text_drop_1(int64_t n) __asm__("Data_Text_drop$1");
+int64_t text_drop_1(int64_t n) {
+    /* Partial application: returns closure capturing n */
+    (void)n;
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_drop_2);
+    kk_set_field(c, 1, n);
+    return c;
+}
+
+int64_t text_dropEnd_2(int64_t n, int64_t s) __asm__("Data_Text_dropEnd$2");
+int64_t text_dropEnd_2(int64_t n, int64_t s) { return text_drop_end(n, s); }
+
+int64_t text_dropEnd_1(int64_t n) __asm__("Data_Text_dropEnd$1");
+int64_t text_dropEnd_1(int64_t n) {
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_dropEnd_2);
+    kk_set_field(c, 1, n);
+    return c;
+}
+
+int64_t text_init_1(int64_t s) __asm__("Data_Text_init$1");
+int64_t text_init_1(int64_t s) { return text_init(s); }
+
+int64_t text_uncons_1(int64_t s) __asm__("Data_Text_uncons$1");
+int64_t text_uncons_1(int64_t s) { return text_uncons(s); }
+
+/* --- Predicate-based --- */
+int64_t text_takeWhile_2(int64_t f, int64_t s) __asm__("Data_Text_takeWhile$2");
+int64_t text_takeWhile_2(int64_t f, int64_t s) { return text_take_while(f, s); }
+
+int64_t text_takeWhile_1(int64_t f) __asm__("Data_Text_takeWhile$1");
+int64_t text_takeWhile_1(int64_t f) {
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_takeWhile_2);
+    kk_set_field(c, 1, f);
+    return c;
+}
+
+int64_t text_dropWhile_2(int64_t f, int64_t s) __asm__("Data_Text_dropWhile$2");
+int64_t text_dropWhile_2(int64_t f, int64_t s) { return text_drop_while(f, s); }
+
+int64_t text_dropWhile_1(int64_t f) __asm__("Data_Text_dropWhile$1");
+int64_t text_dropWhile_1(int64_t f) {
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_dropWhile_2);
+    kk_set_field(c, 1, f);
+    return c;
+}
+
+int64_t text_dropWhileEnd_2(int64_t f, int64_t s) __asm__("Data_Text_dropWhileEnd$2");
+int64_t text_dropWhileEnd_2(int64_t f, int64_t s) { return text_drop_while_end(f, s); }
+
+int64_t text_all_2(int64_t f, int64_t s) __asm__("Data_Text_all$2");
+int64_t text_all_2(int64_t f, int64_t s) { return text_all(f, s); }
+
+int64_t text_any_2(int64_t f, int64_t s) __asm__("Data_Text_any$2");
+int64_t text_any_2(int64_t f, int64_t s) { return text_any(f, s); }
+
+int64_t text_span_2(int64_t f, int64_t s) __asm__("Data_Text_span$2");
+int64_t text_span_2(int64_t f, int64_t s) { return text_span(f, s); }
+
+int64_t text_map_1(int64_t f) __asm__("Data_Text_map$1");
+int64_t text_map_1(int64_t f) {
+    /* Partial application: map f => closure that takes the text */
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_map); /* text_map(f, s) */
+    kk_set_field(c, 1, f);
+    return c;
+}
+
+/* --- Concatenation --- */
+int64_t text_concat_1(int64_t list) __asm__("Data_Text_concat$1");
+int64_t text_concat_1(int64_t list) { return text_concat(list); }
+
+int64_t text_intercalate_2(int64_t sep, int64_t list) __asm__("Data_Text_intercalate$2");
+int64_t text_intercalate_2(int64_t sep, int64_t list) { return text_intercalate(sep, list); }
+
+int64_t text_intercalate_1(int64_t sep) __asm__("Data_Text_intercalate$1");
+int64_t text_intercalate_1(int64_t sep) {
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_intercalate_2);
+    kk_set_field(c, 1, sep);
+    return c;
+}
+
+/* --- Searching --- */
+int64_t text_isPrefixOf_2(int64_t pfx, int64_t s) __asm__("Data_Text_isPrefixOf$2");
+int64_t text_isPrefixOf_2(int64_t pfx, int64_t s) { return text_is_prefix_of(pfx, s); }
+
+int64_t text_isPrefixOf_1(int64_t pfx) __asm__("Data_Text_isPrefixOf$1");
+int64_t text_isPrefixOf_1(int64_t pfx) {
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_isPrefixOf_2);
+    kk_set_field(c, 1, pfx);
+    return c;
+}
+
+int64_t text_isSuffixOf_2(int64_t sfx, int64_t s) __asm__("Data_Text_isSuffixOf$2");
+int64_t text_isSuffixOf_2(int64_t sfx, int64_t s) { return text_is_suffix_of(sfx, s); }
+
+int64_t text_isInfixOf_2(int64_t needle, int64_t s) __asm__("Data_Text_isInfixOf$2");
+int64_t text_isInfixOf_2(int64_t needle, int64_t s) { return text_is_infix_of(needle, s); }
+
+int64_t text_isInfixOf_1(int64_t needle) __asm__("Data_Text_isInfixOf$1");
+int64_t text_isInfixOf_1(int64_t needle) {
+    int64_t c = kk_alloc_con(0, 2);
+    kk_set_field(c, 0, (int64_t)&text_isInfixOf_2);
+    kk_set_field(c, 1, needle);
+    return c;
+}
+
+/* --- Breaking --- */
+int64_t text_breakOn_2(int64_t needle, int64_t s) __asm__("Data_Text_breakOn$2");
+int64_t text_breakOn_2(int64_t needle, int64_t s) { return text_break_on(needle, s); }
+
+int64_t text_breakOn_3(int64_t _dict, int64_t needle, int64_t s) __asm__("Data_Text_breakOn$3");
+int64_t text_breakOn_3(int64_t _dict, int64_t needle, int64_t s) {
+    (void)_dict;
+    return text_break_on(needle, s);
+}
+
+int64_t text_breakOnEnd_3(int64_t _dict, int64_t needle, int64_t s) __asm__("Data_Text_breakOnEnd$3");
+int64_t text_breakOnEnd_3(int64_t _dict, int64_t needle, int64_t s) {
+    (void)_dict;
+    return text_break_on_end(needle, s);
+}
+
+/* --- splitOn --- */
+int64_t text_splitOn_2(int64_t delim, int64_t s) __asm__("Data_Text_splitOn$2");
+int64_t text_splitOn_2(int64_t delim, int64_t s) { return text_split_on(delim, s); }
+
+int64_t text_splitOn_3(int64_t _dict, int64_t delim, int64_t s) __asm__("Data_Text_splitOn$3");
+int64_t text_splitOn_3(int64_t _dict, int64_t delim, int64_t s) {
+    (void)_dict;
+    return text_split_on(delim, s);
+}
+
+/* --- Stripping --- */
+int64_t text_strip_1(int64_t s) __asm__("Data_Text_strip$1");
+int64_t text_strip_1(int64_t s) { return text_strip(s); }
+
+int64_t text_strip_0(void) __asm__("Data_Text_strip$0");
+int64_t text_strip_0(void) {
+    int64_t c = kk_alloc_con(0, 1);
+    kk_set_field(c, 0, (int64_t)&text_strip_1);
+    return c;
+}
+
+int64_t text_stripStart_1(int64_t s) __asm__("Data_Text_stripStart$1");
+int64_t text_stripStart_1(int64_t s) { return text_strip_start(s); }
+
+int64_t text_stripStart_0(void) __asm__("Data_Text_stripStart$0");
+int64_t text_stripStart_0(void) {
+    int64_t c = kk_alloc_con(0, 1);
+    kk_set_field(c, 0, (int64_t)&text_stripStart_1);
+    return c;
+}
+
+int64_t text_stripEnd_1(int64_t s) __asm__("Data_Text_stripEnd$1");
+int64_t text_stripEnd_1(int64_t s) { return text_strip_end(s); }
+
+int64_t text_stripPrefix_2(int64_t pfx, int64_t s) __asm__("Data_Text_stripPrefix$2");
+int64_t text_stripPrefix_2(int64_t pfx, int64_t s) { return text_strip_prefix(pfx, s); }
+
+/* --- Lines --- */
+int64_t text_lines_1(int64_t s) __asm__("Data_Text_lines$1");
+int64_t text_lines_1(int64_t s) { return text_lines(s); }
+
+int64_t text_unlines_1(int64_t list) __asm__("Data_Text_unlines$1");
+int64_t text_unlines_1(int64_t list) { return text_unlines(list); }
+
+int64_t text_unlines_0(void) __asm__("Data_Text_unlines$0");
+int64_t text_unlines_0(void) {
+    int64_t c = kk_alloc_con(0, 1);
+    kk_set_field(c, 0, (int64_t)&text_unlines_1);
+    return c;
+}
+
+/* --- Show --- */
+int64_t text_show_singleton_1(int64_t cp) __asm__("Data_Text_Show_singleton$1");
+int64_t text_show_singleton_1(int64_t cp) { return text_singleton(cp); }
+
+int64_t text_show_unpack_1(int64_t s) __asm__("Data_Text_Show_unpack$1");
+int64_t text_show_unpack_1(int64_t s) { return text_unpack(s); }
+
+/* --- Encoding --- */
+/* decodeUtf8With: lenient decode already produces a kk_string, so identity */
+int64_t text_decodeUtf8With_2(int64_t _handler, int64_t bs)
+    __asm__("Data_Text_Encoding_decodeUtf8With$2");
+int64_t text_decodeUtf8With_2(int64_t _handler, int64_t bs) {
+    (void)_handler;
+    return bs; /* ByteString and Text share the same kk_string representation */
+}
+
+/* encodeUtf8: Text -> ByteString  (identity — same representation) */
+int64_t text_encodeUtf8_1(int64_t s)
+    __asm__("Data_Text_Encoding_encodeUtf8$1");
+int64_t text_encodeUtf8_1(int64_t s) { return s; }
+
+/* lenientDecode: returns a closure (the error handler for decodeUtf8With) */
+int64_t text_lenientDecode_0(void)
+    __asm__("Data_Text_Encoding_Error_lenientDecode$0");
+int64_t text_lenientDecode_0(void) {
+    /* Return a dummy closure — decodeUtf8With ignores the handler anyway */
+    int64_t c = kk_alloc_con(0, 1);
+    kk_set_field(c, 0, 0);
+    return c;
+}
+
+/* --- I/O --- */
+int64_t text_io_readFile_1(int64_t path)
+    __asm__("Data_Text_IO_readFile$1");
+int64_t text_io_readFile_1(int64_t path) {
+    return kk_read_file(path);
+}
+
+int64_t text_io_writeFile_2(int64_t path, int64_t content)
+    __asm__("Data_Text_IO_writeFile$2");
+int64_t text_io_writeFile_2(int64_t path, int64_t content) {
+    return kk_write_file(path, content);
+}
+
+/* --- ByteString --- */
+int64_t bs_length_1(int64_t b) __asm__("Data_ByteString_length$1");
+int64_t bs_length_1(int64_t b) { return kk_bytes_len(b); }
+
+int64_t bs_unpack_1(int64_t b) __asm__("Data_ByteString_unpack$1");
+int64_t bs_unpack_1(int64_t b) {
+    /* ByteString -> [Word8]: byte list */
+    int64_t len = kk_bytes_len(b);
+    int64_t result = kk_nil();
+    for (int64_t i = len - 1; i >= 0; i--) {
+        result = kk_cons(kk_bytes_index(b, i), result);
+    }
+    return result;
+}

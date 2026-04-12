@@ -111,4 +111,10 @@ int64_t kk_ref_new(int64_t initial);
 int64_t kk_ref_get(int64_t ref);
 int64_t kk_ref_set(int64_t ref, int64_t value);  /* returns 0 */
 
+/* Lazy thunks — single-shot, evaluate-on-force.
+ * kk_thunk_create wraps a 0-arg function pointer in a thunk object.
+ * kk_thunk_force evaluates the thunk (once) and returns the result. */
+int64_t kk_thunk_create(int64_t fn_ptr);
+int64_t kk_thunk_force(int64_t thunk);
+
 #endif /* KK_RUNTIME_H */

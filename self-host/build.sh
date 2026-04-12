@@ -90,10 +90,12 @@ echo ""
 echo "=== Phase 4: Compile driver + cross-module shims ==="
 clang -O2 -c -o "$OUT/main.o" self-host/main.c -I runtime/
 clang -c -o "$OUT/kk_arena.o" runtime/kk_arena.c -I runtime/
-# Cross-module arity aliases (zero-overhead assembly .set directives)
-clang -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.S
+# Cross-module arity aliases (thin C wrappers with __asm__ labels)
+clang -O2 -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.c
 # Cross-module shims ($0 closures + false-external stubs)
 clang -O2 -c -o "$OUT/cross_module_shims.o" self-host/cross_module_shims.c -I runtime/
+# Minimal Haskell stdlib shims (fromString identity, etc.)
+clang -O2 -c -o "$OUT/stdlib_shims.o" self-host/stdlib_shims.c
 echo "Driver + shims compiled."
 
 echo ""
@@ -101,12 +103,11 @@ echo "=== Phase 5: Link self-hosted binary ==="
 # Cross-module calls are now resolved by aliases.S and shims.c.
 # Remaining unresolved: Haskell stdlib (Data.Map, Data.Text, GHC.Internal.*),
 # Koka stdlib, and external system calls.
-OBJS=$(ls "$OUT"/*.o 2>/dev/null)
-clang -O2 -o self-host/frankenstein-self $OBJS -lm \
+clang -O2 -o self-host/frankenstein-self "$OUT"/*.o -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files
 echo "Linked: self-host/frankenstein-self ($(stat -c%s self-host/frankenstein-self) bytes)"
-POSTLINK=$(nm -u self-host/frankenstein-self 2>/dev/null | grep -v '@GLIBC\|__gmon' | wc -l)
-FRKN_RESOLVED=$(nm -u self-host/frankenstein-self 2>/dev/null | grep 'Frankenstein_' | wc -l)
+POSTLINK=$(nm -u self-host/frankenstein-self 2>/dev/null | grep -cv '@GLIBC\|__gmon' || true)
+FRKN_RESOLVED=$(nm -u self-host/frankenstein-self 2>/dev/null | grep -c 'Frankenstein_' || true)
 echo "Post-link unresolved: $POSTLINK (Frankenstein: $FRKN_RESOLVED)"
 
 echo ""

@@ -260,6 +260,15 @@ int64_t map_member_2(int64_t k, int64_t m) {
     return map_member(k, m);
 }
 
+/* Data_Map_Internal_findWithDefault$2(default, key) — partial */
+int64_t map_fwd_2(int64_t def, int64_t k)
+    __asm__("Data_Map_Internal_findWithDefault$2");
+int64_t map_fwd_2(int64_t def, int64_t k) {
+    (void)def; (void)k;
+    /* Partial application not commonly needed — return 0 as stub */
+    return 0;
+}
+
 /* Data_Map_Internal_findWithDefault$3(default, key, map) */
 int64_t map_fwd_3(int64_t def, int64_t k, int64_t m)
     __asm__("Data_Map_Internal_findWithDefault$3");
@@ -315,3 +324,8 @@ int64_t map_toList_1(int64_t m)
 int64_t map_toList_1(int64_t m) {
     return map_to_list(m);
 }
+
+/* Data_Map_Internal__fEqMap$0 — Eq dictionary stub */
+int64_t map_fEqMap_0(void)
+    __asm__("Data_Map_Internal__fEqMap$0");
+int64_t map_fEqMap_0(void) { return 0; }

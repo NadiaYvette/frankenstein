@@ -94,12 +94,18 @@ clang -c -o "$OUT/kk_arena.o" runtime/kk_arena.c -I runtime/
 clang -O2 -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.c
 # Cross-module shims ($0 closures + false-external stubs)
 clang -O2 -c -o "$OUT/cross_module_shims.o" self-host/cross_module_shims.c -I runtime/
-# Minimal Haskell stdlib shims (fromString identity, etc.)
+# Minimal Haskell stdlib shims (placeholder)
 clang -O2 -c -o "$OUT/stdlib_shims.o" self-host/stdlib_shims.c
 # Data.Map / Data.Set / Data.Text shims
 clang -O2 -c -o "$OUT/shim_data_map.o" self-host/shim_data_map.c -I runtime/
 clang -O2 -c -o "$OUT/shim_data_set.o" self-host/shim_data_set.c -I runtime/
 clang -O2 -c -o "$OUT/shim_data_text.o" self-host/shim_data_text.c -I runtime/
+# GHC primitive + classes shims (Base, Num, Show, State monad, etc.)
+clang -O2 -c -o "$OUT/shim_ghc_prim.o" self-host/shim_ghc_prim.c -I runtime/
+# GHC list/foldable/traversable/maybe/functor/tuple/IORef/unicode shims
+clang -O2 -c -o "$OUT/shim_ghc_list.o" self-host/shim_ghc_list.c -I runtime/
+# System.Directory / FilePath / Process / Text.Printf shims
+clang -O2 -c -o "$OUT/shim_system.o" self-host/shim_system.c -I runtime/
 echo "Driver + shims compiled."
 
 echo ""

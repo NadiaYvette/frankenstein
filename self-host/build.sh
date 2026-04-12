@@ -87,22 +87,27 @@ echo ""
 echo "Total unresolved (non-kk, non-libc): $(wc -l < self-host/unresolved.txt)"
 
 echo ""
-echo "=== Phase 4: Compile driver ==="
+echo "=== Phase 4: Compile driver + cross-module shims ==="
 clang -O2 -c -o "$OUT/main.o" self-host/main.c -I runtime/
 clang -c -o "$OUT/kk_arena.o" runtime/kk_arena.c -I runtime/
-echo "Driver compiled."
+# Cross-module arity aliases (zero-overhead assembly .set directives)
+clang -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.S
+# Cross-module shims ($0 closures + false-external stubs)
+clang -O2 -c -o "$OUT/cross_module_shims.o" self-host/cross_module_shims.c -I runtime/
+echo "Driver + shims compiled."
 
 echo ""
 echo "=== Phase 5: Link self-hosted binary ==="
-# Top-level function names are now module-qualified (e.g. Frankenstein_Core_Perceus_anyType)
-# so no --allow-multiple-definition is needed.
-# --unresolved-symbols=ignore-in-object-files: external imports (map$2, foldr$3, etc.)
-# are real linker symbols now (not null-pointer loads), but C shims don't exist yet.
-# The self-test only exercises Types.o selectors which have zero external deps.
+# Cross-module calls are now resolved by aliases.S and shims.c.
+# Remaining unresolved: Haskell stdlib (Data.Map, Data.Text, GHC.Internal.*),
+# Koka stdlib, and external system calls.
 OBJS=$(ls "$OUT"/*.o 2>/dev/null)
 clang -O2 -o self-host/frankenstein-self $OBJS -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files
 echo "Linked: self-host/frankenstein-self ($(stat -c%s self-host/frankenstein-self) bytes)"
+POSTLINK=$(nm -u self-host/frankenstein-self 2>/dev/null | grep -v '@GLIBC\|__gmon' | wc -l)
+FRKN_RESOLVED=$(nm -u self-host/frankenstein-self 2>/dev/null | grep 'Frankenstein_' | wc -l)
+echo "Post-link unresolved: $POSTLINK (Frankenstein: $FRKN_RESOLVED)"
 
 echo ""
 echo "=== Phase 6: Run self-test ==="

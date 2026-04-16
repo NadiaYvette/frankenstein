@@ -136,9 +136,13 @@ int64_t kk_is_string(int64_t v);
 int64_t kk_nfields(int64_t ptr);
 
 /* List helpers — used by Map/Set/Text shims.
- * Haskell [] = nil (tag 0, 0 fields), (:) = cons (tag 1, 2 fields). */
-#define KK_NIL_TAG  0
-#define KK_CONS_TAG 1
+ * Tags must match Frankenstein's assignProgramTags output for the compiled
+ * Emitter.o code which pattern-matches on list constructors directly.
+ * assignProgramTags sorts all constructors alphabetically; ":" (ASCII 58)
+ * lands at position 14 and "[]" (ASCII 91) at position 69 in the Emitter's
+ * constructor table. */
+#define KK_NIL_TAG  69
+#define KK_CONS_TAG 14
 int64_t kk_nil(void);
 int64_t kk_cons(int64_t head, int64_t tail);
 int64_t kk_list_head(int64_t list);

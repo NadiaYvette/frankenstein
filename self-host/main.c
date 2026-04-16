@@ -164,9 +164,9 @@ static int64_t clone_con(int64_t v) {
 }
 static int64_t ph(void) { return kk_alloc_con(0, 0); }
 
-static int64_t nil(void) { return kk_alloc_con(0, 0); }
+static int64_t nil(void) { return kk_alloc_con(KK_NIL_TAG, 0); }
 static int64_t cons(int64_t h, int64_t t) {
-    int64_t c = kk_alloc_con(1, 2);
+    int64_t c = kk_alloc_con(KK_CONS_TAG, 2);
     kk_set_field(c, 0, h);
     kk_set_field(c, 1, t);
     return c;
@@ -186,14 +186,26 @@ static int64_t mk_qname(const char *mod, const char *name, int64_t u) {
     return qn;
 }
 
-/* GHC assigns constructor tags alphabetically for orphan types.
-   These tags must match the self-hosted .o files.
-   Expr tags: EApp=20 ECon=22 ELam=28 ELet=29 ELit=30 EVar=37 etc.
-   Lit tags: LitChar=48 LitFloat=49 LitInt=50 LitString=51 */
-#define TAG_EVar    37
-#define TAG_ELit    30
+/* Constructor tags assigned by Frankenstein's assignProgramTags.
+   All constructors from Types.hs + standard library are sorted
+   alphabetically and numbered sequentially. These must match
+   the compiled Emitter.o code's case dispatch.
+   Verified empirically against self-host/obj/MlirEmit_Emitter.mlir */
+#define TAG_EApp    20
+#define TAG_ECase   21
+#define TAG_ECon    22
 #define TAG_ELam    28
-#define TAG_LitInt  50
+#define TAG_ELet    29
+#define TAG_ELit    30
+#define TAG_EVar    37
+#define TAG_LitChar 49
+#define TAG_LitFloat 50
+#define TAG_LitInt  51
+#define TAG_LitString 52
+#define TAG_PatCon  55
+#define TAG_PatLit  56
+#define TAG_PatVar  57
+#define TAG_PatWild 58
 
 /* Build ELit(LitInt n) expression. */
 static int64_t mk_lit_int(int64_t n) {
@@ -343,12 +355,12 @@ int main(void) {
         defVisibility(mk_def("demo", "fac", 1, mk_lit_int(0)));
         CHECK("defVisibility doesn't crash", 1);
 
-        CHECK("progDefs is empty (tag 0)",
-              kk_tag(progDefs(mk_program("", "selftest", nil(), nil(), nil()))) == 0);
-        CHECK("progData is empty (tag 0)",
-              kk_tag(progData(mk_program("", "selftest", nil(), nil(), nil()))) == 0);
-        CHECK("progEffects is empty (tag 0)",
-              kk_tag(progEffects(mk_program("", "selftest", nil(), nil(), nil()))) == 0);
+        CHECK("progDefs is empty (nil)",
+              kk_tag(progDefs(mk_program("", "selftest", nil(), nil(), nil()))) == KK_NIL_TAG);
+        CHECK("progData is empty (nil)",
+              kk_tag(progData(mk_program("", "selftest", nil(), nil(), nil()))) == KK_NIL_TAG);
+        CHECK("progEffects is empty (nil)",
+              kk_tag(progEffects(mk_program("", "selftest", nil(), nil(), nil()))) == KK_NIL_TAG);
 
         /* DataDecl with one constructor */
         int64_t dd = mk_datadecl("", "Maybe", cons(mk_condecl("", "Just", nil()), nil()));
@@ -734,8 +746,167 @@ int main(void) {
             CHECK("pipeline: MLIR output contains 'module'",
                   cstr && strstr(cstr, "module") != NULL);
             printf("  (MLIR output: %ld bytes)\n", (long)len);
+            FILE *pf = fopen("self-host/pipeline-test.mlir", "w");
+            if (pf) { fputs(cstr, pf); fclose(pf); }
             if (cstr) free(cstr);
         }
+    }
+
+    /* ============================================================== */
+    printf("\n[17] REAL WORK: factorial(10) through self-hosted pipeline\n");
+    /* ============================================================== */
+    {
+        /* Build a real factorial program as Core IR:
+         *
+         *   factorial : (int) -> total int
+         *   factorial = \n -> case n of
+         *     0 -> 1
+         *     _ -> n * factorial(n - 1)
+         *
+         *   main : () -> total int
+         *   main = factorial(10)
+         *
+         * This is the same program as --demo, but constructed in C and
+         * compiled through the SELF-HOSTED emitter — proving Frankenstein
+         * can bootstrap real work.
+         */
+
+        /* First test: simple function with EApp */
+        printf("  ... test: simple add function\n"); fflush(stdout);
+        {
+            /* add = \(x,y) -> x + y */
+            int64_t pp_x = kk_alloc_con(0, 2);
+            kk_set_field(pp_x, 0, mk_name("x", 1));
+            kk_set_field(pp_x, 1, ph());
+            int64_t pp_y = kk_alloc_con(0, 2);
+            kk_set_field(pp_y, 0, mk_name("y", 2));
+            kk_set_field(pp_y, 1, ph());
+            int64_t add_body_app = kk_alloc_con(TAG_EApp, 2);
+            kk_set_field(add_body_app, 0, mk_evar("+", 0));
+            kk_set_field(add_body_app, 1, cons(mk_evar("x", 1), cons(mk_evar("y", 2), nil())));
+            int64_t add_body = kk_alloc_con(TAG_ELam, 2);
+            kk_set_field(add_body, 0, cons(pp_x, cons(pp_y, nil())));
+            kk_set_field(add_body, 1, add_body_app);
+            int64_t add_def = mk_def("demo", "add", 5, add_body);
+
+            int64_t add_main = kk_alloc_con(TAG_EApp, 2);
+            kk_set_field(add_main, 0, mk_evar("add", 5));
+            kk_set_field(add_main, 1, cons(mk_lit_int(3), cons(mk_lit_int(4), nil())));
+            int64_t main_def = mk_def("demo", "main", 99, add_main);
+
+            int64_t p = mk_program("demo", "add-test",
+                cons(add_def, cons(main_def, nil())), nil(), nil());
+            for (int i = 0; i < 8; i++) kk_retain(p);
+            int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(p);
+            CHECK("add: emitProgramText succeeds", mlir != 0 && kk_is_string(mlir));
+            if (kk_is_string(mlir)) {
+                char* cs = kk_str_dup_cstr(mlir);
+                CHECK("add: contains 'arith.addi'", cs && strstr(cs, "arith.addi") != NULL);
+                printf("  (add MLIR: %ld bytes)\n", (long)kk_str_len(mlir));
+                FILE *af = fopen("self-host/add-test.mlir", "w");
+                if (af) { fputs(cs, af); fclose(af); }
+                if (cs) free(cs);
+            }
+        }
+
+        printf("  ... factorial test\n"); fflush(stdout);
+        {
+
+        /* Build PatLit(LitInt(0)) */
+        int64_t lit0 = kk_alloc_con(TAG_LitInt, 1);
+        kk_set_field(lit0, 0, 0);
+        int64_t pat_base = kk_alloc_con(TAG_PatLit, 1);
+        kk_set_field(pat_base, 0, lit0);
+
+        /* Branch: { PatLit(0), Nothing, ELit(LitInt(1)) } */
+        int64_t branch_base = kk_alloc_con(0, 3);
+        kk_set_field(branch_base, 0, pat_base);
+        kk_set_field(branch_base, 1, ph());
+        kk_set_field(branch_base, 2, mk_lit_int(1));
+
+        /* PatWild(placeholder) */
+        int64_t pat_wild = kk_alloc_con(TAG_PatWild, 1);
+        kk_set_field(pat_wild, 0, ph());
+
+        /* n - 1 */
+        int64_t sub_args = cons(mk_evar("n", 1), cons(mk_lit_int(1), nil()));
+        int64_t sub_expr = kk_alloc_con(TAG_EApp, 2);
+        kk_set_field(sub_expr, 0, mk_evar("-", 0));
+        kk_set_field(sub_expr, 1, sub_args);
+
+        /* factorial(n - 1) */
+        int64_t fac_call = kk_alloc_con(TAG_EApp, 2);
+        kk_set_field(fac_call, 0, mk_evar("factorial", 10));
+        kk_set_field(fac_call, 1, cons(sub_expr, nil()));
+
+        /* n * factorial(n - 1) */
+        int64_t mul_expr = kk_alloc_con(TAG_EApp, 2);
+        kk_set_field(mul_expr, 0, mk_evar("*", 0));
+        kk_set_field(mul_expr, 1, cons(mk_evar("n", 1), cons(fac_call, nil())));
+
+        /* Branch: { PatWild, Nothing, n*factorial(n-1) } */
+        int64_t branch_rec = kk_alloc_con(0, 3);
+        kk_set_field(branch_rec, 0, pat_wild);
+        kk_set_field(branch_rec, 1, ph());
+        kk_set_field(branch_rec, 2, mul_expr);
+
+        /* case n of [branch_base, branch_rec] */
+        int64_t case_expr = kk_alloc_con(TAG_ECase, 2);
+        kk_set_field(case_expr, 0, mk_evar("n", 1));
+        kk_set_field(case_expr, 1, cons(branch_base, cons(branch_rec, nil())));
+
+        /* \n -> case n of ... */
+        int64_t param_pair = kk_alloc_con(0, 2);
+        kk_set_field(param_pair, 0, mk_name("n", 1));
+        kk_set_field(param_pair, 1, ph());
+        int64_t fac_body = kk_alloc_con(TAG_ELam, 2);
+        kk_set_field(fac_body, 0, cons(param_pair, nil()));
+        kk_set_field(fac_body, 1, case_expr);
+
+        int64_t fac_def = mk_def("demo", "factorial", 10, fac_body);
+
+        /* main = factorial(10) */
+        int64_t main_call = kk_alloc_con(TAG_EApp, 2);
+        kk_set_field(main_call, 0, mk_evar("factorial", 10));
+        kk_set_field(main_call, 1, cons(mk_lit_int(10), nil()));
+        int64_t main_def = mk_def("demo", "main", 99, main_call);
+
+        int64_t prog = mk_program("demo", "factorial",
+            cons(fac_def, cons(main_def, nil())), nil(), nil());
+
+        /* kk_drop is now a no-op (bootstrapping mode), so retains are
+         * unnecessary but harmless — keep a few for documentation. */
+        for (int i = 0; i < 8; i++) kk_retain(prog);
+        printf("  ... calling emitProgramText on factorial\n"); fflush(stdout);
+        int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
+        CHECK("factorial: emitProgramText succeeds", mlir != 0);
+        CHECK("factorial: emitProgramText returns string", kk_is_string(mlir));
+        if (kk_is_string(mlir)) {
+            int64_t len = kk_str_len(mlir);
+            CHECK("factorial: MLIR output is non-empty", len > 0);
+            char* cstr = kk_str_dup_cstr(mlir);
+            CHECK("factorial: MLIR contains 'demo_factorial'",
+                  cstr && strstr(cstr, "demo_factorial") != NULL);
+            CHECK("factorial: MLIR contains 'arith.muli'",
+                  cstr && strstr(cstr, "arith.muli") != NULL);
+            CHECK("factorial: MLIR contains 'arith.subi'",
+                  cstr && strstr(cstr, "arith.subi") != NULL);
+            CHECK("factorial: MLIR contains 'arith.cmpi'",
+                  cstr && strstr(cstr, "arith.cmpi") != NULL);
+            CHECK("factorial: MLIR contains printf main",
+                  cstr && strstr(cstr, "printf") != NULL);
+            printf("  (factorial MLIR: %ld bytes)\n", (long)len);
+
+            /* Write MLIR to file for external validation */
+            FILE *f = fopen("self-host/factorial-self.mlir", "w");
+            if (f) {
+                fputs(cstr, f);
+                fclose(f);
+                printf("  Written to self-host/factorial-self.mlir\n");
+            }
+            if (cstr) free(cstr);
+        }
+        } /* end factorial test */
     }
 
     /* ================================================================ */

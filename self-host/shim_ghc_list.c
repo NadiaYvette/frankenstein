@@ -508,8 +508,14 @@ int64_t ghc_oldlist_partition_2(int64_t p, int64_t xs) {
         }
         xs = kk_list_tail(xs);
     }
-    int64_t result = kk_pair(array_to_list(yes_arr, yes_n), array_to_list(no_arr, no_n));
+    int64_t yes_list = array_to_list(yes_arr, yes_n);
+    int64_t no_list  = array_to_list(no_arr, no_n);
+    int64_t result = kk_pair(yes_list, no_list);
     free(yes_arr); free(no_arr);
+    /* Workaround for Perceus lazy-selector issue (see runState shim).
+     * GHC compiles let (a, b) = partition ... as two lazy selectors. */
+    if (kk_is_heap_ptr(yes_list)) kk_retain(yes_list);
+    if (kk_is_heap_ptr(no_list))  kk_retain(no_list);
     return result;
 }
 

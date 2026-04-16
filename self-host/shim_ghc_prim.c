@@ -517,4 +517,20 @@ int64_t state_put_1(int64_t s2) __asm__("Control_Monad_State_Class_put$1");
 int64_t state_put_1(int64_t s2) { return make_closure1(&state_put_code, s2); }
 
 int64_t state_runState_2(int64_t m, int64_t s) __asm__("Control_Monad_Trans_State_Lazy_runState$2");
-int64_t state_runState_2(int64_t m, int64_t s) { return call1(m, s); }
+int64_t state_runState_2(int64_t m, int64_t s) {
+    int64_t pair = call1(m, s);
+    /* Workaround for Perceus lazy-selector issue:
+     * GHC compiles  let (a, b) = runState ...  as two lazy selector thunks,
+     * each of which forces the shared cached pair and drops the component it
+     * doesn't use.  This causes use-after-free when the same cached pair is
+     * forced from a second site.  Extra retains here compensate: each lazy
+     * selector drops one field (-1), and these retains add (+1) to each,
+     * keeping both fields alive until they are actually consumed. */
+    if (kk_is_heap_ptr(pair)) {
+        int64_t f0 = kk_field(pair, 0);
+        int64_t f1 = kk_field(pair, 1);
+        if (kk_is_heap_ptr(f0)) kk_retain(f0);
+        if (kk_is_heap_ptr(f1)) kk_retain(f1);
+    }
+    return pair;
+}

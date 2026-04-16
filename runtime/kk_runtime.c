@@ -72,28 +72,24 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
 #define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" */
 
 void kk_drop(int64_t ptr) {
-    if (!kk_is_heap_ptr(ptr)) return;
-    /* Strings have a different layout (rc at offset 0, not -8) */
-    if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
-    int64_t* rc = kk_rc_ptr(ptr);
-    int64_t count = (*rc & KK_RC_MASK);
-    if (count <= 1) {
-        /* Refcount reaches zero — free children and this object */
-        *rc = KK_COLOR_BLACK;  /* mark black, rc=0 */
-        /* Recursively drop children */
-        int64_t nf = kk_nfields(ptr);
-        int64_t* fields = (int64_t*)(ptr + 8);
-        int64_t start = (kk_tag(ptr) == KK_CLOSURE_TAG) ? 1 : 0;
-        for (int64_t i = start; i < nf; i++) {
-            kk_drop(fields[i]);
-        }
-        kk_unregister_nfields(ptr);
-        kk_arena_free((void*)(ptr - 8));
-    } else {
-        /* Decrement but don't free — possible cycle root */
-        *rc = (*rc & KK_COLOR_MASK) | (count - 1);
-        kk_cycle_candidate(ptr);
-    }
+    /* BOOTSTRAPPING MODE: kk_drop is a no-op.
+     *
+     * GHC compiles lazy let-bindings as selector thunks that share a cached
+     * pair.  Perceus inserts drops in each selector for the field it doesn't
+     * use.  When two selectors force the same cached pair, the first selector's
+     * drop frees a field the second selector still needs → use-after-free.
+     * This pattern is pervasive (464 thunk forces in Emitter.o alone).
+     *
+     * For the self-hosted binary, correctness matters more than memory
+     * management.  Disabling kk_drop eliminates ALL use-after-free and
+     * double-free bugs.  The binary leaks memory but produces correct output
+     * and exits immediately afterward — acceptable for bootstrapping.
+     *
+     * A proper fix requires either:
+     * (a) Making Perceus aware of shared lazy thunks (don't insert drops in
+     *     selectors when the thunk is shared), or
+     * (b) Using a tracing GC instead of refcounting for lazy evaluation. */
+    (void)ptr;
 }
 
 void kk_release(int64_t ptr) {

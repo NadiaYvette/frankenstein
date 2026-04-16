@@ -123,3 +123,49 @@ echo "Post-link unresolved: $POSTLINK (Frankenstein: $FRKN_RESOLVED)"
 echo ""
 echo "=== Phase 6: Run self-test ==="
 ./self-host/frankenstein-self
+
+echo ""
+echo "=== Phase 7: Validate factorial MLIR (full pipeline) ==="
+if [ -f self-host/factorial-self.mlir ]; then
+  # Add main wrapper for printf output
+  python3 -c "
+mlir = open('self-host/factorial-self.mlir').read().rstrip()
+main_fn = 'demo_main' if '@demo_main()' in mlir else 'demo__frankenstein_main'
+wrapper = '''
+  func.func @main(%argc: i32, %argv: !llvm.ptr) -> i32 {
+    func.call @kk_args_init(%argc, %argv) : (i32, !llvm.ptr) -> ()
+    %result = func.call @''' + main_fn + '''() : () -> i64
+    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr
+    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32
+    %zero = arith.constant 0 : i32
+    func.return %zero : i32
+  }
+'''
+print(mlir[:-1] + wrapper + '}')
+" > self-host/factorial-with-main.mlir
+
+  MLIR_OPT="mlir-opt --allow-unregistered-dialect --reconcile-unrealized-casts \
+    --convert-scf-to-cf --convert-arith-to-llvm --convert-cf-to-llvm \
+    --convert-func-to-llvm --reconcile-unrealized-casts"
+  $MLIR_OPT self-host/factorial-with-main.mlir \
+    | mlir-translate --mlir-to-llvmir > "$OUT/factorial-self.ll" 2>&1
+  clang -c -o "$OUT/factorial-self-ir.o" "$OUT/factorial-self.ll"
+  clang -O2 -c -o "$OUT/kk_rt_standalone.o" runtime/kk_runtime.c -I runtime/
+  clang -O2 -c -o "$OUT/kk_arena_standalone.o" runtime/kk_arena.c -I runtime/
+  clang -O2 -c -o "$OUT/kk_cycle_standalone.o" runtime/kk_cycle.c -I runtime/
+  clang -o self-host/factorial-self-bin \
+    "$OUT/factorial-self-ir.o" "$OUT/kk_rt_standalone.o" \
+    "$OUT/kk_arena_standalone.o" "$OUT/kk_cycle_standalone.o" -lm
+  RESULT=$(./self-host/factorial-self-bin)
+  if [ "$RESULT" = "3628800" ]; then
+    echo "PASS: factorial(10) = $RESULT"
+    echo ""
+    echo "=== SELF-HOSTED COMPILATION PROVEN ==="
+    echo "Pipeline: Core IR (C) → self-hosted emitProgramText → MLIR"
+    echo "       → mlir-opt → mlir-translate → clang → native binary → 3628800"
+  else
+    echo "FAIL: expected 3628800, got '$RESULT'"
+  fi
+else
+  echo "SKIP: factorial-self.mlir not found (factorial test may be disabled)"
+fi

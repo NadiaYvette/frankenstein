@@ -66,8 +66,8 @@ static int64_t make_closure2(void* fptr, int64_t cap1, int64_t cap2) {
 /*  Forward declarations for closure code pointers                      */
 /* ------------------------------------------------------------------ */
 
-static int64_t dollar_apply_code(int64_t clos, int64_t x);
-static int64_t dollar_code(int64_t clos, int64_t f);
+static int64_t compose_apply_code(int64_t clos, int64_t x);
+static int64_t compose_partial1_code(int64_t clos, int64_t f);
 static int64_t append_2_code(int64_t clos, int64_t b);
 static int64_t append_1_code(int64_t clos, int64_t a);
 static int64_t bind_runner(int64_t clos, int64_t s);
@@ -112,25 +112,30 @@ static int64_t list_append(int64_t xs, int64_t ys) {
 /*  GHC.Internal.Base — operators                                       */
 /* ================================================================== */
 
-/* --- $ (1-char, collides with .) --- */
+/* --- . (composition) and $ (application) both sanitize to _ ---
+ * GHC always inlines $ but sometimes leaves (.) as a call
+ * (e.g. map (f . g) xs).  Every observed use of __$2 in the
+ * emitted MLIR is actually (.), so implement composition semantics.
+ * (.) f g = \x -> f(g(x))                                         */
 
-static int64_t dollar_apply_code(int64_t clos, int64_t x) {
+static int64_t compose_apply_code(int64_t clos, int64_t x) {
     int64_t f = kk_field(clos, 1);
-    return call1(f, x);
+    int64_t g = kk_field(clos, 2);
+    return call1(f, call1(g, x));
 }
-static int64_t dollar_code(int64_t clos, int64_t f) {
+static int64_t compose_partial1_code(int64_t clos, int64_t f) {
     (void)clos;
-    return make_closure1(&dollar_apply_code, f);
+    return make_closure1(&compose_apply_code, f);
 }
 
-int64_t ghc_base_dollar_0(void)   __asm__("GHC_Internal_Base__$0");
-int64_t ghc_base_dollar_0(void)   { return make_closure0(&dollar_code); }
+int64_t ghc_base_compose_0(void)   __asm__("GHC_Internal_Base__$0");
+int64_t ghc_base_compose_0(void)   { return make_closure0(&compose_partial1_code); }
 
-int64_t ghc_base_dollar_1(int64_t f)        __asm__("GHC_Internal_Base__$1");
-int64_t ghc_base_dollar_1(int64_t f)        { return f; }
+int64_t ghc_base_compose_1(int64_t f)        __asm__("GHC_Internal_Base__$1");
+int64_t ghc_base_compose_1(int64_t f)        { return make_closure1(&compose_apply_code, f); }
 
-int64_t ghc_base_dollar_2(int64_t f, int64_t x) __asm__("GHC_Internal_Base__$2");
-int64_t ghc_base_dollar_2(int64_t f, int64_t x) { return call1(f, x); }
+int64_t ghc_base_compose_2(int64_t f, int64_t g) __asm__("GHC_Internal_Base__$2");
+int64_t ghc_base_compose_2(int64_t f, int64_t g) { return make_closure2(&compose_apply_code, f, g); }
 
 /* --- <> / ++ / >> (2-char, all collide → ___) --- */
 

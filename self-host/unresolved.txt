@@ -1,5 +1,7 @@
+                 U __$0
                  U Common_Error_errors$1
                  U Common_Name_nameLocal$1
+                 U Common_Name_nameLocalQual$1
                  U Common_Name_nameModule$1
                  U Common_Name_nameNil$0
                  U Common_Name_nameStem$1
@@ -125,6 +127,8 @@
                  U Data_Text_unlines$1
                  U Frankenstein_Core_ConTags_assignProgramTags$1
                  U Frankenstein_Core_ConTags_conKey$1
+                 U Frankenstein_Core_FlattenPatterns___$0
+                 U Frankenstein_Core_Perceus__$0
                  U Frankenstein_Core_Types_bindExpr$0
                  U Frankenstein_Core_Types_bindExpr$1
                  U Frankenstein_Core_Types_bindName$1
@@ -167,6 +171,7 @@
                  U Frankenstein_GhcBridge_CoreTranslate_translateProgram$3
                  U Frankenstein_KokaBridge_CoreTranslate_translateProgram$0
                  U Frankenstein_KokaBridge_CoreTranslate_translateProgram$1
+                 U Frankenstein_MercuryBridge_HldsParse___$0
                  U Frankenstein_MercuryBridge_HldsParse_hldsModule$1
                  U Frankenstein_MercuryBridge_HldsParse_hldsPreds$1
                  U Frankenstein_MercuryBridge_HldsParse_hldsTypes$1
@@ -179,6 +184,8 @@
                  U Frankenstein_MercuryBridge_HldsParse_typeDeclName$1
                  U Frankenstein_MercuryBridge_HldsParse_typeDeclParams$1
                  U Frankenstein_MlirEmit_Dialects_renderOp$1
+                 U Frankenstein_MlirEmit_Emitter___$0
+                 U Frankenstein_RustBridge_MirParse___$0
                  U Frankenstein_RustBridge_MirParse_bbIndex$1
                  U Frankenstein_RustBridge_MirParse_bbStatements$1
                  U Frankenstein_RustBridge_MirParse_bbTerminator$1
@@ -223,6 +230,7 @@
                  U GHC_Internal_Base__$2
                  U GHC_Internal_Base____$3
                  U GHC_Internal_Base_build$1
+                 U GHC_Internal_Base_eqString$2
                  U GHC_Internal_Base_flip$1
                  U GHC_Internal_Base_fmap$1
                  U GHC_Internal_Base_fmap$2
@@ -234,9 +242,7 @@
                  U GHC_Internal_Base_pure$0
                  U GHC_Internal_Base_pure$1
                  U GHC_Internal_Base_pure$2
-                 U GHC_Internal_Classes___$0
                  U GHC_Internal_Classes___$2
-                 U GHC_Internal_Classes__$2
                  U GHC_Internal_Classes__fEqList$0
                  U GHC_Internal_Classes__fOrdTuple2$0
                  U GHC_Internal_Classes_ip$1
@@ -313,10 +319,7 @@
                  U GHC_Internal_List_zip$2
                  U GHC_Internal_List_zipWith$3
                  U GHC_Internal_Maybe__fEqMaybe$0
-                 U GHC_Internal_Num__$0
-                 U GHC_Internal_Num__$2
                  U GHC_Internal_Num_fromInteger$1
-                 U GHC_Internal_Num_negate$1
                  U GHC_Internal_Real_fromIntegral$1
                  U GHC_Internal_Real_fromRational$1
                  U GHC_Internal_Real_toInteger$1

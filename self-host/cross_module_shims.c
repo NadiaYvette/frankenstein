@@ -22,12 +22,13 @@
 /*  $0 function references: return a closure wrapping the function    */
 /* ------------------------------------------------------------------ */
 
-/* Helper: wrap a 1-arg function pointer in a kk_con closure.
+/* Helper: wrap a 1-arg function pointer in a closure.
  * Field 0 = function pointer (cast to i64).
  * The caller (map, foldr, etc.) will extract and call it.
- * Tag 0 = standard closure tag.  */
+ * Uses CLOS tag so the closure dispatch can distinguish closures from data. */
+#define CLOS_TAG_CM 0x434C4F53
 static int64_t mk_closure1(int64_t (*fn)(int64_t)) {
-    int64_t c = kk_alloc_con(0, 1);
+    int64_t c = kk_alloc_con(CLOS_TAG_CM, 1);
     kk_set_field(c, 0, (int64_t)fn);
     return c;
 }

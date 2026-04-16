@@ -5,9 +5,11 @@
  * fields 1..n = captures.  Booleans: 0 = False, nonzero = True.
  * Strings: kk_string ropes.  Lists: cons (tag 1, 2 fields), nil (tag 0).
  *
- * Operator mangling: sanitizeName maps +*-/=<>!@#$%^&|~.,()[]{}'"\ to _.
- * This causes collisions (++ == >> == <> → ___).  We handle the most
- * common semantics for each collision.
+ * Operator mangling: Z-encoding maps operator characters distinctly:
+ *   $ → zd, + → zp, * → zt, - → zm, = → ze, < → zl, > → zg,
+ *   ! → zn, @ → za, # → zh, % → zv, ^ → zc, & → zb, | → zo, ~ → zw.
+ * Dictionary selectors like $p1Monad become zdp1Monad, $fEqList → zdfEqList.
+ * Dots and slashes map to underscore (unchanged from before).
  */
 
 #include <stdint.h>
@@ -24,17 +26,43 @@ typedef int64_t (*fn0_t)(int64_t);
 typedef int64_t (*fn1_t)(int64_t, int64_t);
 typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
 
+/* Resolve a callable: force thunks, handle raw function pointers.
+ * GHC lazy bindings produce thunks (tag=LAZY) that must be forced.
+ * GHC-generated code may also pass raw function pointers (non-heap-ptr
+ * integers in the code segment) instead of closure objects. */
+static int64_t resolve_callable(int64_t clos) {
+    return kk_thunk_force(clos);
+}
+
 static int64_t call0(int64_t clos) {
+    clos = resolve_callable(clos);
+    if (!kk_is_heap_ptr(clos)) {
+        /* Raw function pointer — call as 0-arg function */
+        typedef int64_t (*raw0_t)(void);
+        return ((raw0_t)(intptr_t)clos)();
+    }
     int64_t fp = kk_field(clos, 0);
     return ((fn0_t)(intptr_t)fp)(clos);
 }
 
 static int64_t call1(int64_t clos, int64_t a) {
+    clos = resolve_callable(clos);
+    if (!kk_is_heap_ptr(clos)) {
+        /* Raw function pointer — call as 1-arg function */
+        typedef int64_t (*raw1_t)(int64_t);
+        return ((raw1_t)(intptr_t)clos)(a);
+    }
     int64_t fp = kk_field(clos, 0);
     return ((fn1_t)(intptr_t)fp)(clos, a);
 }
 
 static int64_t call2(int64_t clos, int64_t a, int64_t b) {
+    clos = resolve_callable(clos);
+    if (!kk_is_heap_ptr(clos)) {
+        /* Raw function pointer — call as 2-arg function */
+        typedef int64_t (*raw2_t)(int64_t, int64_t);
+        return ((raw2_t)(intptr_t)clos)(a, b);
+    }
     int64_t fp = kk_field(clos, 0);
     return ((fn2_t)(intptr_t)fp)(clos, a, b);
 }
@@ -71,6 +99,7 @@ static int64_t compose_partial1_code(int64_t clos, int64_t f);
 static int64_t append_2_code(int64_t clos, int64_t b);
 static int64_t append_1_code(int64_t clos, int64_t a);
 static int64_t bind_runner(int64_t clos, int64_t s);
+static int64_t then_runner(int64_t clos, int64_t s);
 static int64_t cons_closure_code(int64_t clos, int64_t h, int64_t t);
 static int64_t flip_code(int64_t clos, int64_t a);
 static int64_t flip_apply(int64_t clos, int64_t b);
@@ -78,8 +107,10 @@ static int64_t fmap_apply(int64_t clos, int64_t xs);
 static int64_t id_code(int64_t clos, int64_t x);
 static int64_t pure_runner(int64_t clos, int64_t s);
 static int64_t pure_partial(int64_t clos, int64_t a);
-static int64_t op2_code(int64_t clos, int64_t a);
-static int64_t op2_apply(int64_t clos, int64_t b);
+static int64_t and_apply(int64_t clos, int64_t b);
+static int64_t and_code(int64_t clos, int64_t a);
+static int64_t or_apply(int64_t clos, int64_t b);
+static int64_t or_code(int64_t clos, int64_t a);
 static int64_t not_code(int64_t clos, int64_t x);
 static int64_t max_code(int64_t clos, int64_t a);
 static int64_t max_apply(int64_t clos, int64_t b);
@@ -137,7 +168,7 @@ int64_t ghc_base_compose_1(int64_t f)        { return make_closure1(&compose_app
 int64_t ghc_base_compose_2(int64_t f, int64_t g) __asm__("GHC_Internal_Base__$2");
 int64_t ghc_base_compose_2(int64_t f, int64_t g) { return make_closure2(&compose_apply_code, f, g); }
 
-/* --- <> / ++ / >> (2-char, all collide → ___) --- */
+/* --- <> (Z-encoded: zlzg) — semigroup append --- */
 
 static int64_t append_2_code(int64_t clos, int64_t b) {
     int64_t a = kk_field(clos, 1);
@@ -154,14 +185,7 @@ static int64_t append_1_code(int64_t clos, int64_t a) {
     return make_closure1(&append_2_code, a);
 }
 
-int64_t ghc_base_append_0(void)   __asm__("GHC_Internal_Base___$0");
-int64_t ghc_base_append_0(void)   { return make_closure0(&append_1_code); }
-
-int64_t ghc_base_append_1(int64_t a)        __asm__("GHC_Internal_Base___$1");
-int64_t ghc_base_append_1(int64_t a)        { return make_closure1(&append_2_code, a); }
-
-int64_t ghc_base_append_2(int64_t a, int64_t b) __asm__("GHC_Internal_Base___$2");
-int64_t ghc_base_append_2(int64_t a, int64_t b) {
+static int64_t append_impl(int64_t a, int64_t b) {
     if (kk_is_string(a) && kk_is_string(b))
         return kk_str_concat(a, b);
     if (kk_is_nil(a)) return b;
@@ -170,7 +194,25 @@ int64_t ghc_base_append_2(int64_t a, int64_t b) {
     return kk_str_concat(a, b);
 }
 
-/* --- >>= (3-char → ____) --- State monad bind */
+/* <> (zlzg) */
+int64_t ghc_base_sappend_1(int64_t a) __asm__("GHC_Internal_Base_zlzg$1");
+int64_t ghc_base_sappend_1(int64_t a) { return make_closure1(&append_2_code, a); }
+
+int64_t ghc_base_sappend_2(int64_t a, int64_t b) __asm__("GHC_Internal_Base_zlzg$2");
+int64_t ghc_base_sappend_2(int64_t a, int64_t b) { return append_impl(a, b); }
+
+/* ++ (zpzp) — list concat */
+int64_t ghc_base_listconcat_0(void) __asm__("GHC_Internal_Base_zpzp$0");
+int64_t ghc_base_listconcat_0(void) { return make_closure0(&append_1_code); }
+
+int64_t ghc_base_listconcat_2(int64_t a, int64_t b) __asm__("GHC_Internal_Base_zpzp$2");
+int64_t ghc_base_listconcat_2(int64_t a, int64_t b) { return append_impl(a, b); }
+
+/* $ (zd) — apply: f $ x = f x */
+int64_t ghc_base_apply_2(int64_t f, int64_t x) __asm__("GHC_Internal_Base_zd$2");
+int64_t ghc_base_apply_2(int64_t f, int64_t x) { return call1(f, x); }
+
+/* --- >>= (Z-encoded: zgzgze) --- State monad bind */
 
 static int64_t bind_runner(int64_t clos, int64_t s) {
     int64_t m = kk_field(clos, 1);
@@ -182,15 +224,30 @@ static int64_t bind_runner(int64_t clos, int64_t s) {
     return call1(g, s2);
 }
 
-int64_t ghc_base_bind_2(int64_t m, int64_t f) __asm__("GHC_Internal_Base____$2");
+int64_t ghc_base_bind_2(int64_t m, int64_t f) __asm__("GHC_Internal_Base_zgzgze$2");
 int64_t ghc_base_bind_2(int64_t m, int64_t f) {
     return make_closure2(&bind_runner, m, f);
 }
 
-int64_t ghc_base_bind_3(int64_t dict, int64_t m, int64_t f) __asm__("GHC_Internal_Base____$3");
+int64_t ghc_base_bind_3(int64_t dict, int64_t m, int64_t f) __asm__("GHC_Internal_Base_zgzgze$3");
 int64_t ghc_base_bind_3(int64_t dict, int64_t m, int64_t f) {
     (void)dict;
     return make_closure2(&bind_runner, m, f);
+}
+
+/* --- >> (Z-encoded: zgzg) --- State monad then */
+
+static int64_t then_runner(int64_t clos, int64_t s) {
+    int64_t m1 = kk_field(clos, 1);
+    int64_t m2 = kk_field(clos, 2);
+    int64_t pair1 = call1(m1, s);
+    int64_t s2 = kk_snd(pair1);
+    return call1(m2, s2);
+}
+
+int64_t ghc_base_then_2(int64_t m1, int64_t m2) __asm__("GHC_Internal_Base_zgzg$2");
+int64_t ghc_base_then_2(int64_t m1, int64_t m2) {
+    return make_closure2(&then_runner, m1, m2);
 }
 
 /* ================================================================== */
@@ -284,37 +341,38 @@ int64_t ghc_base_pure_1(int64_t a) { return make_closure1(&pure_runner, a); }
 int64_t ghc_base_pure_2(int64_t d, int64_t a) __asm__("GHC_Internal_Base_pure$2");
 int64_t ghc_base_pure_2(int64_t d, int64_t a) { (void)d; return make_closure1(&pure_runner, a); }
 
-int64_t ghc_base_p1Monad_0(void) __asm__("GHC_Internal_Base__p1Monad$0");
+int64_t ghc_base_p1Monad_0(void) __asm__("GHC_Internal_Base_zdp1Monad$0");
 int64_t ghc_base_p1Monad_0(void) { return 0; }
 
 /* ================================================================== */
 /*  GHC.Internal.Classes                                                */
 /* ================================================================== */
 
-static int64_t op2_apply(int64_t clos, int64_t b) {
+/* && (Z-encoded: zbzb) — logical and */
+static int64_t and_apply(int64_t clos, int64_t b) {
     int64_t a = kk_field(clos, 1);
-    if (kk_is_string(a) && kk_is_string(b)) return kk_str_eq(a, b);
-    return (a || b) ? 1 : 0;
+    return (a && b) ? 1 : 0;
 }
-static int64_t op2_code(int64_t clos, int64_t a) {
+static int64_t and_code(int64_t clos, int64_t a) {
     (void)clos;
-    return make_closure1(&op2_apply, a);
+    return make_closure1(&and_apply, a);
 }
 
-int64_t ghc_classes_op2_0(void)          __asm__("GHC_Internal_Classes___$0");
-int64_t ghc_classes_op2_0(void)          { return make_closure0(&op2_code); }
+int64_t ghc_classes_and_2(int64_t a, int64_t b) __asm__("GHC_Internal_Classes_zbzb$2");
+int64_t ghc_classes_and_2(int64_t a, int64_t b) { return (a && b) ? 1 : 0; }
 
-int64_t ghc_classes_op2_2(int64_t a, int64_t b) __asm__("GHC_Internal_Classes___$2");
-int64_t ghc_classes_op2_2(int64_t a, int64_t b) {
-    if (kk_is_string(a) && kk_is_string(b)) return kk_str_eq(a, b);
+/* || (Z-encoded: zozo) — logical or */
+static int64_t or_apply(int64_t clos, int64_t b) {
+    int64_t a = kk_field(clos, 1);
     return (a || b) ? 1 : 0;
 }
-
-int64_t ghc_classes_cmp_2(int64_t a, int64_t b) __asm__("GHC_Internal_Classes__$2");
-int64_t ghc_classes_cmp_2(int64_t a, int64_t b) {
-    if (kk_is_string(a) && kk_is_string(b)) return kk_str_compare(a, b) < 0 ? 1 : 0;
-    return (a < b) ? 1 : 0;
+static int64_t or_code(int64_t clos, int64_t a) {
+    (void)clos;
+    return make_closure1(&or_apply, a);
 }
+
+int64_t ghc_classes_or_2(int64_t a, int64_t b) __asm__("GHC_Internal_Classes_zozo$2");
+int64_t ghc_classes_or_2(int64_t a, int64_t b) { return (a || b) ? 1 : 0; }
 
 static int64_t not_code(int64_t clos, int64_t x) { (void)clos; return x ? 0 : 1; }
 
@@ -323,10 +381,10 @@ int64_t ghc_classes_not_0(void)   { return make_closure0(&not_code); }
 int64_t ghc_classes_not_1(int64_t x) __asm__("GHC_Internal_Classes_not$1");
 int64_t ghc_classes_not_1(int64_t x) { return x ? 0 : 1; }
 
-int64_t ghc_classes_fEqList_0(void) __asm__("GHC_Internal_Classes__fEqList$0");
+int64_t ghc_classes_fEqList_0(void) __asm__("GHC_Internal_Classes_zdfEqList$0");
 int64_t ghc_classes_fEqList_0(void) { return 0; }
 
-int64_t ghc_classes_fOrdTuple2_0(void) __asm__("GHC_Internal_Classes__fOrdTuple2$0");
+int64_t ghc_classes_fOrdTuple2_0(void) __asm__("GHC_Internal_Classes_zdfOrdTuple2$0");
 int64_t ghc_classes_fOrdTuple2_0(void) { return 0; }
 
 int64_t ghc_classes_ip_1(int64_t x) __asm__("GHC_Internal_Classes_ip$1");

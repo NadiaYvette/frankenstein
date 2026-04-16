@@ -9,6 +9,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../runtime/kk_runtime.h"
 
@@ -584,11 +585,21 @@ int main(void) {
     printf("\n[15] MlirEmit/Emitter.o — emitProgramText (full pass)\n");
     /* ============================================================== */
     {
-        /* emitProgramText uses GHC's State monad internally (the Emit
-         * monad is State EmitState).  The >>= bind shim requires more
-         * work — the closure dispatch jumps to address 0x1 inside
-         * bind_runner.  Deferred until State monad shim is hardened. */
-        printf("  SKIP: emitProgramText deferred (State monad >>= shim WIP)\n");
+        int64_t prog = mk_program("demo", "emit-test", nil(), nil(), nil());
+        kk_retain(prog);
+        kk_retain(prog);
+
+        int64_t mlir_text = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
+        CHECK("emitProgramText returns non-null", mlir_text != 0);
+        CHECK("emitProgramText returns a string", kk_is_string(mlir_text));
+        if (kk_is_string(mlir_text)) {
+            int64_t len = kk_str_len(mlir_text);
+            CHECK("emitProgramText output is non-empty", len > 0);
+            char* cstr = kk_str_dup_cstr(mlir_text);
+            CHECK("emitProgramText output contains 'func'",
+                  cstr && strstr(cstr, "func") != NULL);
+            if (cstr) free(cstr);
+        }
     }
 
     /* ================================================================ */

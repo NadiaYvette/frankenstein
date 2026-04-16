@@ -3,10 +3,13 @@
  *
  * All values are int64_t.  Lists: cons (tag 1, 2 fields), nil (tag 0).
  * Closures: field 0 = fptr, fields 1..n = captures.
+ * Operator names use Z-encoding (!! → znzn, <$> → zlzdzg, etc.).
+ * Dictionary selectors: $f... → zdf..., $p... → zdp...
  */
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include "../runtime/kk_runtime.h"
 
@@ -14,9 +17,19 @@ typedef int64_t (*fn1_t)(int64_t, int64_t);
 typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
 
 static int64_t call1(int64_t clos, int64_t a) {
+    clos = kk_thunk_force(clos);
+    if (!kk_is_heap_ptr(clos)) {
+        typedef int64_t (*raw1_t)(int64_t);
+        return ((raw1_t)(intptr_t)clos)(a);
+    }
     return ((fn1_t)(intptr_t)kk_field(clos, 0))(clos, a);
 }
 static int64_t call2(int64_t clos, int64_t a, int64_t b) {
+    clos = kk_thunk_force(clos);
+    if (!kk_is_heap_ptr(clos)) {
+        typedef int64_t (*raw2_t)(int64_t, int64_t);
+        return ((raw2_t)(intptr_t)clos)(a, b);
+    }
     return ((fn2_t)(intptr_t)kk_field(clos, 0))(clos, a, b);
 }
 
@@ -30,6 +43,13 @@ static int64_t make_closure1(void* fp, int64_t c1) {
     int64_t c = kk_alloc_con(CLOS_TAG, 2);
     kk_set_field(c, 0, (int64_t)(intptr_t)fp);
     kk_set_field(c, 1, c1);
+    return c;
+}
+static int64_t make_closure2(void* fp, int64_t c1, int64_t c2) {
+    int64_t c = kk_alloc_con(CLOS_TAG, 3);
+    kk_set_field(c, 0, (int64_t)(intptr_t)fp);
+    kk_set_field(c, 1, c1);
+    kk_set_field(c, 2, c2);
     return c;
 }
 
@@ -76,7 +96,7 @@ static int64_t array_to_list(int64_t *arr, int64_t n) {
 /*  GHC.Internal.List                                                   */
 /* ================================================================== */
 
-/* ++ (2-char → ___) */
+/* list_append helper (used by !! indexing fallback etc.) */
 static int64_t list_append(int64_t xs, int64_t ys) {
     int64_t *arr; int64_t n = list_to_array(xs, &arr);
     int64_t result = ys;
@@ -85,10 +105,15 @@ static int64_t list_append(int64_t xs, int64_t ys) {
     return result;
 }
 
-int64_t ghc_list_op_2(int64_t a, int64_t b) __asm__("GHC_Internal_List___$2");
-int64_t ghc_list_op_2(int64_t a, int64_t b) { return list_append(a, b); }
-int64_t ghc_list_op_3(int64_t d, int64_t a, int64_t b) __asm__("GHC_Internal_List___$3");
-int64_t ghc_list_op_3(int64_t d, int64_t a, int64_t b) { (void)d; return list_append(a, b); }
+/* !! (Z-encoded: znzn) — list index */
+int64_t ghc_list_index_2(int64_t xs, int64_t n) __asm__("GHC_Internal_List_znzn$2");
+int64_t ghc_list_index_2(int64_t xs, int64_t n) {
+    while (n > 0 && !kk_is_nil(xs)) { xs = kk_list_tail(xs); n--; }
+    if (kk_is_nil(xs)) { fprintf(stderr, "Prelude.!!: index too large\n"); abort(); }
+    return kk_list_head(xs);
+}
+int64_t ghc_list_index_3(int64_t d, int64_t xs, int64_t n) __asm__("GHC_Internal_List_znzn$3");
+int64_t ghc_list_index_3(int64_t d, int64_t xs, int64_t n) { (void)d; return ghc_list_index_2(xs, n); }
 
 int64_t ghc_list_head_1(int64_t xs) __asm__("GHC_Internal_List_head$1");
 int64_t ghc_list_head_1(int64_t xs) { return kk_list_head(xs); }
@@ -364,13 +389,27 @@ int64_t ghc_foldable_foldr_3(int64_t f, int64_t z, int64_t xs) {
     return call2(f, kk_list_head(xs), ghc_foldable_foldr_3(f, z, kk_list_tail(xs)));
 }
 
-int64_t ghc_foldable_forM_1(int64_t xs) __asm__("GHC_Internal_Data_Foldable_forM_$1");
-int64_t ghc_foldable_forM_1(int64_t xs) { return make_closure1(&forM_apply, xs); }
+/* forM_ for State monad: like mapM_ but with args flipped.
+ * Returns a State action that threads state through f applied to each element. */
+static int64_t forM_state_runner(int64_t clos, int64_t s) {
+    int64_t xs = kk_field(clos, 1);
+    int64_t f  = kk_field(clos, 2);
+    kk_retain(f);
+    while (!kk_is_nil(xs)) {
+        kk_retain(f);
+        int64_t action = call1(f, kk_list_head(xs));
+        int64_t pair = call1(action, s);
+        s = kk_snd(pair);
+        xs = kk_list_tail(xs);
+    }
+    return kk_pair(0, s);
+}
 static int64_t forM_apply(int64_t clos, int64_t f) {
     int64_t xs = kk_field(clos, 1);
-    while (!kk_is_nil(xs)) { call1(f, kk_list_head(xs)); xs = kk_list_tail(xs); }
-    return 0;
+    return make_closure2(&forM_state_runner, xs, f);
 }
+int64_t ghc_foldable_forM_1(int64_t xs) __asm__("GHC_Internal_Data_Foldable_forM_$1");
+int64_t ghc_foldable_forM_1(int64_t xs) { return make_closure1(&forM_apply, xs); }
 
 int64_t ghc_foldable_length_1(int64_t xs) __asm__("GHC_Internal_Data_Foldable_length$1");
 int64_t ghc_foldable_length_1(int64_t xs) {
@@ -403,13 +442,33 @@ static int64_t sum_code(int64_t clos, int64_t xs) { (void)clos; return ghc_folda
 /*  GHC.Internal.Data.Traversable                                       */
 /* ================================================================== */
 
+/* mapM for the State monad: f returns State actions (closures s -> (a, s')).
+ * mapM f xs = \s -> fold over xs threading state, collecting results.
+ * Returns a State action closure that, when applied to state, threads it. */
+static int64_t mapM_state_runner(int64_t clos, int64_t s) {
+    int64_t f  = kk_field(clos, 1);
+    int64_t xs = kk_field(clos, 2);
+    kk_retain(f);
+    int64_t *arr = NULL; int64_t cap = 0, n = 0;
+    while (!kk_is_nil(xs)) {
+        int64_t x = kk_list_head(xs);
+        kk_retain(f);
+        int64_t action = call1(f, x);
+        int64_t pair = call1(action, s);
+        int64_t a  = kk_fst(pair);
+        s = kk_snd(pair);
+        if (n >= cap) { cap = cap ? cap * 2 : 16; arr = realloc(arr, (size_t)cap * sizeof(int64_t)); }
+        arr[n++] = a;
+        xs = kk_list_tail(xs);
+    }
+    int64_t result_list = array_to_list(arr, n);
+    free(arr);
+    return kk_pair(result_list, s);
+}
+
 int64_t ghc_traversable_mapM_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Traversable_mapM$2");
 int64_t ghc_traversable_mapM_2(int64_t f, int64_t xs) {
-    int64_t *arr; int64_t n = list_to_array(xs, &arr);
-    for (int64_t i = 0; i < n; i++) arr[i] = call1(f, arr[i]);
-    int64_t result = array_to_list(arr, n);
-    free(arr);
-    return result;
+    return make_closure2(&mapM_state_runner, f, xs);
 }
 int64_t ghc_traversable_mapM_3(int64_t d, int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Traversable_mapM$3");
 int64_t ghc_traversable_mapM_3(int64_t d, int64_t f, int64_t xs) {
@@ -481,18 +540,18 @@ int64_t ghc_maybe_mapMaybe_2(int64_t f, int64_t xs) {
     return result;
 }
 
-int64_t ghc_maybe_fEqMaybe_0(void) __asm__("GHC_Internal_Maybe__fEqMaybe$0");
+int64_t ghc_maybe_fEqMaybe_0(void) __asm__("GHC_Internal_Maybe_zdfEqMaybe$0");
 int64_t ghc_maybe_fEqMaybe_0(void) { return 0; }
 
-int64_t ghc_either_fApplicative_0(void) __asm__("GHC_Internal_Data_Either__fApplicativeEither$0");
+int64_t ghc_either_fApplicative_0(void) __asm__("GHC_Internal_Data_Either_zdfApplicativeEither$0");
 int64_t ghc_either_fApplicative_0(void) { return 0; }
-int64_t ghc_either_fFunctor_0(void) __asm__("GHC_Internal_Data_Either__fFunctorEither$0");
+int64_t ghc_either_fFunctor_0(void) __asm__("GHC_Internal_Data_Either_zdfFunctorEither$0");
 int64_t ghc_either_fFunctor_0(void) { return 0; }
-int64_t ghc_either_fMonad_0(void) __asm__("GHC_Internal_Data_Either__fMonadEither$0");
+int64_t ghc_either_fMonad_0(void) __asm__("GHC_Internal_Data_Either_zdfMonadEither$0");
 int64_t ghc_either_fMonad_0(void) { return 0; }
 
-/* <$> = fmap for lists (3-char → ___) */
-int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor____$2");
+/* <$> (Z-encoded: zlzdzg) = fmap for lists */
+int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor_zlzdzg$2");
 int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) {
     int64_t *arr; int64_t n = list_to_array(xs, &arr);
     for (int64_t i = 0; i < n; i++) arr[i] = call1(f, arr[i]);
@@ -500,7 +559,7 @@ int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) {
     free(arr);
     return result;
 }
-int64_t ghc_functor_fmap_3(int64_t d, int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor____$3");
+int64_t ghc_functor_fmap_3(int64_t d, int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor_zlzdzg$3");
 int64_t ghc_functor_fmap_3(int64_t d, int64_t f, int64_t xs) { (void)d; return ghc_functor_fmap_2(f, xs); }
 
 int64_t ghc_tuple_fst_0(void) __asm__("GHC_Internal_Data_Tuple_fst$0");
@@ -514,7 +573,11 @@ int64_t ghc_tuple_snd_0(void) { return make_closure0(&snd_code); }
 static int64_t snd_code(int64_t clos, int64_t p) { (void)clos; return kk_snd(p); }
 
 int64_t ghc_string_fromString_1(int64_t s) __asm__("GHC_Internal_Data_String_fromString$1");
-int64_t ghc_string_fromString_1(int64_t s) { return s; }
+int64_t ghc_string_fromString_1(int64_t s) {
+    if (kk_is_string(s)) return s;
+    /* GHC bridge encodes "" as kk_alloc_con(69, 0) — convert to kk_string_empty */
+    return kk_string_empty();
+}
 
 /* ================================================================== */
 /*  GHC.Internal.Data.IORef / IORef / IO                                */

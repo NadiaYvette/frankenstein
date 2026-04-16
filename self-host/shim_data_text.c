@@ -100,6 +100,11 @@ static int utf8_encode(int64_t cp, char* buf) {
  * For predicates (Char -> Bool), the closure takes (closure, char_codepoint)
  * and returns 0/1. */
 static int64_t call_closure_1(int64_t closure, int64_t arg) {
+    closure = kk_thunk_force(closure);
+    if (!kk_is_heap_ptr(closure)) {
+        typedef int64_t (*raw1_t)(int64_t);
+        return ((raw1_t)(intptr_t)closure)(arg);
+    }
     int64_t fn_ptr = kk_field(closure, 0);
     typedef int64_t (*fn1_t)(int64_t, int64_t);
     return ((fn1_t)fn_ptr)(closure, arg);
@@ -203,10 +208,12 @@ static int64_t text_intercalate(int64_t sep, int64_t list) {
     int64_t result = kk_list_head(list);
     list = kk_list_tail(list);
     while (!kk_is_nil(list)) {
+        kk_str_retain(sep);
         result = kk_str_concat(result, sep);
         result = kk_str_concat(result, kk_list_head(list));
         list = kk_list_tail(list);
     }
+    kk_str_drop(sep);
     return result;
 }
 
@@ -387,13 +394,24 @@ static int64_t text_lines(int64_t s) {
 
 /* unlines: [Text] -> Text  (join with \n) */
 static int64_t text_unlines(int64_t list) {
+    /* Use kk_str_concat rope with proper string refcounting */
     int64_t nl = kk_string_from_literal((int64_t)"\n", 1);
     int64_t result = kk_string_empty();
     while (!kk_is_nil(list)) {
-        result = kk_str_concat(result, kk_list_head(list));
+        int64_t h = kk_list_head(list);
+        if (!kk_is_string(h)) {
+            /* Non-string element (e.g. empty constructor 'E' used as "")
+             * — treat as empty string, skip it */
+            list = kk_list_tail(list);
+            continue;
+        }
+        kk_str_retain(h);  /* retain: concat takes ownership */
+        result = kk_str_concat(result, h);
+        kk_str_retain(nl);
         result = kk_str_concat(result, nl);
         list = kk_list_tail(list);
     }
+    kk_str_drop(nl);
     return result;
 }
 
@@ -584,6 +602,35 @@ static int64_t text_singleton(int64_t cp) {
 /*  Exported symbols with asm labels                                   */
 /* =================================================================== */
 
+/* ------------------------------------------------------------------ */
+/*  Closure trampolines                                                 */
+/*  The closure dispatch convention calls fn(closure, args...) with     */
+/*  the closure itself as the first argument.  Raw C functions like     */
+/*  text_map(f, s) don't follow this convention, so we need            */
+/*  trampolines that extract captures from the closure and forward.     */
+/* ------------------------------------------------------------------ */
+#define CLOS_TAG_T 0x434C4F53
+
+/* 1-capture trampolines: closure has [fptr, cap1], called as fn(clos, arg) */
+static int64_t tram_pack(int64_t clos, int64_t arg)       { (void)clos; return text_pack(arg); }
+static int64_t tram_null(int64_t clos, int64_t arg)       { (void)clos; return text_null(arg); }
+static int64_t tram_strip(int64_t clos, int64_t arg)      { (void)clos; return text_strip(arg); }
+static int64_t tram_stripStart(int64_t clos, int64_t arg) { (void)clos; return text_strip_start(arg); }
+static int64_t tram_unlines(int64_t clos, int64_t arg)    { (void)clos; return text_unlines(arg); }
+
+/* 1-capture trampolines: closure has [fptr, cap1], called as fn(clos, arg)
+ * where cap1 is the first param of the 2-arg function */
+static int64_t tram_drop(int64_t clos, int64_t s)       { return text_drop(kk_field(clos,1), s); }
+static int64_t tram_dropEnd(int64_t clos, int64_t s)    { return text_drop_end(kk_field(clos,1), s); }
+static int64_t tram_takeWhile(int64_t clos, int64_t s)  { return text_take_while(kk_field(clos,1), s); }
+static int64_t tram_dropWhile(int64_t clos, int64_t s)  { return text_drop_while(kk_field(clos,1), s); }
+static int64_t tram_map(int64_t clos, int64_t s)        { return text_map(kk_field(clos,1), s); }
+static int64_t tram_intercalate(int64_t clos, int64_t s){ return text_intercalate(kk_field(clos,1), s); }
+static int64_t tram_isPrefixOf(int64_t clos, int64_t s) { return text_is_prefix_of(kk_field(clos,1), s); }
+static int64_t tram_isInfixOf(int64_t clos, int64_t s)  { return text_is_infix_of(kk_field(clos,1), s); }
+
+/* =================================================================== */
+
 /* --- Internal --- */
 int64_t text_internal_empty_0(void) __asm__("Data_Text_Internal_empty$0");
 int64_t text_internal_empty_0(void) { return kk_string_empty(); }
@@ -593,8 +640,8 @@ int64_t text_internal_pack_1(int64_t list) { return text_pack(list); }
 
 int64_t text_internal_pack_0(void) __asm__("Data_Text_Internal_pack$0");
 int64_t text_internal_pack_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&text_internal_pack_1);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 1);
+    kk_set_field(c, 0, (int64_t)&tram_pack);
     return c;
 }
 
@@ -604,8 +651,8 @@ int64_t text_null_1(int64_t s) { return text_null(s); }
 
 int64_t text_null_0(void) __asm__("Data_Text_null$0");
 int64_t text_null_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&text_null_1);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 1);
+    kk_set_field(c, 0, (int64_t)&tram_null);
     return c;
 }
 
@@ -624,10 +671,8 @@ int64_t text_drop_2(int64_t n, int64_t s) { return text_drop(n, s); }
 
 int64_t text_drop_1(int64_t n) __asm__("Data_Text_drop$1");
 int64_t text_drop_1(int64_t n) {
-    /* Partial application: returns closure capturing n */
-    (void)n;
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_drop_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_drop);
     kk_set_field(c, 1, n);
     return c;
 }
@@ -637,8 +682,8 @@ int64_t text_dropEnd_2(int64_t n, int64_t s) { return text_drop_end(n, s); }
 
 int64_t text_dropEnd_1(int64_t n) __asm__("Data_Text_dropEnd$1");
 int64_t text_dropEnd_1(int64_t n) {
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_dropEnd_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_dropEnd);
     kk_set_field(c, 1, n);
     return c;
 }
@@ -655,8 +700,8 @@ int64_t text_takeWhile_2(int64_t f, int64_t s) { return text_take_while(f, s); }
 
 int64_t text_takeWhile_1(int64_t f) __asm__("Data_Text_takeWhile$1");
 int64_t text_takeWhile_1(int64_t f) {
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_takeWhile_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_takeWhile);
     kk_set_field(c, 1, f);
     return c;
 }
@@ -666,8 +711,8 @@ int64_t text_dropWhile_2(int64_t f, int64_t s) { return text_drop_while(f, s); }
 
 int64_t text_dropWhile_1(int64_t f) __asm__("Data_Text_dropWhile$1");
 int64_t text_dropWhile_1(int64_t f) {
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_dropWhile_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_dropWhile);
     kk_set_field(c, 1, f);
     return c;
 }
@@ -686,9 +731,8 @@ int64_t text_span_2(int64_t f, int64_t s) { return text_span(f, s); }
 
 int64_t text_map_1(int64_t f) __asm__("Data_Text_map$1");
 int64_t text_map_1(int64_t f) {
-    /* Partial application: map f => closure that takes the text */
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_map); /* text_map(f, s) */
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_map);
     kk_set_field(c, 1, f);
     return c;
 }
@@ -697,13 +741,44 @@ int64_t text_map_1(int64_t f) {
 int64_t text_concat_1(int64_t list) __asm__("Data_Text_concat$1");
 int64_t text_concat_1(int64_t list) { return text_concat(list); }
 
+/* concatMap :: (Char -> Text) -> Text -> Text */
+static int64_t text_concatMap(int64_t f, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return kk_string_empty(); }
+    int64_t result = kk_string_empty();
+    int64_t i = 0;
+    while (i < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + i, &bytes_used);
+        i += bytes_used;
+        kk_retain(f);
+        int64_t piece = call_closure_1(f, cp);
+        result = kk_str_concat(result, piece);
+    }
+    free(buf);
+    return result;
+}
+
+static int64_t tram_concatMap(int64_t clos, int64_t s) {
+    return text_concatMap(kk_field(clos, 1), s);
+}
+
+int64_t text_concatMap_1(int64_t f) __asm__("Data_Text_concatMap$1");
+int64_t text_concatMap_1(int64_t f) {
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_concatMap);
+    kk_set_field(c, 1, f);
+    return c;
+}
+
 int64_t text_intercalate_2(int64_t sep, int64_t list) __asm__("Data_Text_intercalate$2");
 int64_t text_intercalate_2(int64_t sep, int64_t list) { return text_intercalate(sep, list); }
 
 int64_t text_intercalate_1(int64_t sep) __asm__("Data_Text_intercalate$1");
 int64_t text_intercalate_1(int64_t sep) {
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_intercalate_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_intercalate);
     kk_set_field(c, 1, sep);
     return c;
 }
@@ -714,8 +789,8 @@ int64_t text_isPrefixOf_2(int64_t pfx, int64_t s) { return text_is_prefix_of(pfx
 
 int64_t text_isPrefixOf_1(int64_t pfx) __asm__("Data_Text_isPrefixOf$1");
 int64_t text_isPrefixOf_1(int64_t pfx) {
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_isPrefixOf_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_isPrefixOf);
     kk_set_field(c, 1, pfx);
     return c;
 }
@@ -728,8 +803,8 @@ int64_t text_isInfixOf_2(int64_t needle, int64_t s) { return text_is_infix_of(ne
 
 int64_t text_isInfixOf_1(int64_t needle) __asm__("Data_Text_isInfixOf$1");
 int64_t text_isInfixOf_1(int64_t needle) {
-    int64_t c = kk_alloc_con(0, 2);
-    kk_set_field(c, 0, (int64_t)&text_isInfixOf_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_isInfixOf);
     kk_set_field(c, 1, needle);
     return c;
 }
@@ -766,8 +841,8 @@ int64_t text_strip_1(int64_t s) { return text_strip(s); }
 
 int64_t text_strip_0(void) __asm__("Data_Text_strip$0");
 int64_t text_strip_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&text_strip_1);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 1);
+    kk_set_field(c, 0, (int64_t)&tram_strip);
     return c;
 }
 
@@ -776,8 +851,8 @@ int64_t text_stripStart_1(int64_t s) { return text_strip_start(s); }
 
 int64_t text_stripStart_0(void) __asm__("Data_Text_stripStart$0");
 int64_t text_stripStart_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&text_stripStart_1);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 1);
+    kk_set_field(c, 0, (int64_t)&tram_stripStart);
     return c;
 }
 
@@ -796,8 +871,8 @@ int64_t text_unlines_1(int64_t list) { return text_unlines(list); }
 
 int64_t text_unlines_0(void) __asm__("Data_Text_unlines$0");
 int64_t text_unlines_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&text_unlines_1);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 1);
+    kk_set_field(c, 0, (int64_t)&tram_unlines);
     return c;
 }
 
@@ -827,7 +902,7 @@ int64_t text_lenientDecode_0(void)
     __asm__("Data_Text_Encoding_Error_lenientDecode$0");
 int64_t text_lenientDecode_0(void) {
     /* Return a dummy closure — decodeUtf8With ignores the handler anyway */
-    int64_t c = kk_alloc_con(0, 1);
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 1);
     kk_set_field(c, 0, 0);
     return c;
 }

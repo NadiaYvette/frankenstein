@@ -2328,9 +2328,30 @@ effectRowNameEmit (EffectRowExtend qn _) = qnameModule qn <> nameText (qnameName
 effectRowNameEmit (EffectRowVar tv)       = nameText (tvName tv)
 effectRowNameEmit EffectRowEmpty          = "pure"
 
--- Sanitize names for MLIR (replace special chars)
+-- Sanitize names for MLIR.
+-- Operator characters get Z-encoded (GHC convention) so distinct operators
+-- produce distinct linker symbols.  '.' stays '_' (module separator).
 sanitizeName :: Text -> Text
-sanitizeName = T.map (\c -> if c `elem` ("+*-/=<>!@#$%^&|~.,()[]{}'\"\\ \t" :: [Char]) then '_' else c)
+sanitizeName = T.concatMap encodeChar
+  where
+    encodeChar '$' = "zd"
+    encodeChar '+' = "zp"
+    encodeChar '*' = "zt"
+    encodeChar '-' = "zm"
+    encodeChar '=' = "ze"
+    encodeChar '<' = "zl"
+    encodeChar '>' = "zg"
+    encodeChar '!' = "zn"
+    encodeChar '@' = "za"
+    encodeChar '#' = "zh"
+    encodeChar '%' = "zv"
+    encodeChar '^' = "zc"
+    encodeChar '&' = "zb"
+    encodeChar '|' = "zo"
+    encodeChar '~' = "zw"
+    encodeChar c
+      | c `elem` ("/.,()[]{}'\"\\ \t" :: [Char]) = "_"
+      | otherwise = T.singleton c
 
 -- | Check if an expression is a lambda (possibly wrapped in EDelay/ETypeLam).
 isLambda :: Expr -> Bool

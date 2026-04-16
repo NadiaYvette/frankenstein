@@ -204,13 +204,19 @@ int64_t set_insert_2(int64_t x, int64_t s) {
     return set_insert(x, s);
 }
 
+/* Closure trampolines for set operations */
+#define CLOS_TAG_S 0x434C4F53
+static int64_t tram_set_insert(int64_t clos, int64_t x, int64_t s) { (void)clos; return set_insert(x, s); }
+static int64_t tram_set_member(int64_t clos, int64_t x, int64_t s) { (void)clos; return set_member(x, s); }
+static int64_t tram_set_delete(int64_t clos, int64_t x, int64_t s) { (void)clos; return set_delete(x, s); }
+static int64_t tram_set_fromList(int64_t clos, int64_t l) { (void)clos; return set_from_list(l); }
+static int64_t tram_set_toList(int64_t clos, int64_t s)   { (void)clos; return set_to_asc_list(s); }
+
 /* insert$0 — function reference */
 int64_t set_insert_0(void) __asm__("Data_Set_Internal_insert$0");
 int64_t set_insert_0(void) {
-    /* Return a closure wrapping set_insert.
-     * Callers will extract field 0 as fn ptr and call fn(closure, x, s). */
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&set_insert_2);
+    int64_t c = kk_alloc_con(CLOS_TAG_S, 1);
+    kk_set_field(c, 0, (int64_t)&tram_set_insert);
     return c;
 }
 
@@ -224,16 +230,16 @@ int64_t set_member_2(int64_t x, int64_t s) {
 /* notMember$0 — function reference */
 int64_t set_notMember_0(void) __asm__("Data_Set_Internal_notMember$0");
 int64_t set_notMember_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&set_member_2); /* caller negates */
+    int64_t c = kk_alloc_con(CLOS_TAG_S, 1);
+    kk_set_field(c, 0, (int64_t)&tram_set_member); /* caller negates */
     return c;
 }
 
 /* delete$0 — function reference */
 int64_t set_delete_0(void) __asm__("Data_Set_Internal_delete$0");
 int64_t set_delete_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&set_delete);
+    int64_t c = kk_alloc_con(CLOS_TAG_S, 1);
+    kk_set_field(c, 0, (int64_t)&tram_set_delete);
     return c;
 }
 
@@ -276,8 +282,8 @@ int64_t set_fromList_1(int64_t list) {
 /* fromList$0 — function reference */
 int64_t set_fromList_0(void) __asm__("Data_Set_Internal_fromList$0");
 int64_t set_fromList_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&set_fromList_1);
+    int64_t c = kk_alloc_con(CLOS_TAG_S, 1);
+    kk_set_field(c, 0, (int64_t)&tram_set_fromList);
     return c;
 }
 
@@ -291,8 +297,8 @@ int64_t set_toList_1(int64_t s) {
 /* toList$0 — function reference */
 int64_t set_toList_0(void) __asm__("Data_Set_Internal_toList$0");
 int64_t set_toList_0(void) {
-    int64_t c = kk_alloc_con(0, 1);
-    kk_set_field(c, 0, (int64_t)&set_toList_1);
+    int64_t c = kk_alloc_con(CLOS_TAG_S, 1);
+    kk_set_field(c, 0, (int64_t)&tram_set_toList);
     return c;
 }
 

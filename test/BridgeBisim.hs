@@ -594,10 +594,19 @@ anyType = TCon (TypeCon (QName "std" (Name "any" 0)) KindValue)
 rewriteSelfCalls :: Name -> Name -> Expr -> Expr
 rewriteSelfCalls fName selfName = go
   where
+    -- The GHC bridge uses qualifyName for definitions (bare "factorial")
+    -- but translateName for references (module-qualified "Factorial/factorial").
+    -- Match by occurrence name: strip the module prefix before "/".
+    matchesFName n =
+      let nt = nameText n
+          ft = nameText fName
+          occN = case T.breakOnEnd "/" nt of { ("", _) -> nt; (_, o) -> o }
+          occF = case T.breakOnEnd "/" ft of { ("", _) -> ft; (_, o) -> o }
+      in occN == occF
     go (EVar n)
-      | n == fName = EApp (EVar selfName) [EVar selfName]
+      | matchesFName n = EApp (EVar selfName) [EVar selfName]
     go (EApp (EVar n) args)
-      | n == fName = EApp (EVar selfName) (EVar selfName : map go args)
+      | matchesFName n = EApp (EVar selfName) (EVar selfName : map go args)
     go (EApp f args) = EApp (go f) (map go args)
     go (ELam ps body) = ELam ps (go body)
     go (ELet bgs body) = ELet (map (map goBind) bgs) (go body)

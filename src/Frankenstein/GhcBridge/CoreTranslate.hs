@@ -114,6 +114,8 @@ trExpr (Var v)
   | Just dc <- isDataConId_maybe v =
       F.ECon (F.QName T.empty
                (F.Name (T.pack (getOccString (dataConName dc))) 0))
+  | Just canonical <- normalizeGhcBuiltin v =
+      F.EVar (F.Name canonical 0)
 trExpr (Var v) = F.EVar (translateName v)
 
 trExpr (Lit l) = F.ELit (translateLit l)
@@ -322,6 +324,44 @@ translateName v = F.Name
       Just m  -> let modStr = T.pack (moduleNameString (moduleName m))
                  in modStr <> "/" <> occName
       Nothing -> occName
+
+-- | Normalize well-known GHC typeclass method names to canonical builtins.
+-- GHC inlines typeclass dictionaries, leaving references like
+-- GHC.Internal.Num/+ which the rest of the pipeline (K oracle, MLIR emitter)
+-- expects as bare "+".
+normalizeGhcBuiltin :: Var -> Maybe Text
+normalizeGhcBuiltin v =
+  let occ = getOccString v
+      mmod = case nameModule_maybe (varName v) of
+               Just m  -> moduleNameString (moduleName m)
+               Nothing -> ""
+  in case (mmod, occ) of
+    -- Num methods
+    (m, "+")      | isGhcNum m -> Just "+"
+    (m, "-")      | isGhcNum m -> Just "-"
+    (m, "*")      | isGhcNum m -> Just "*"
+    (m, "negate") | isGhcNum m -> Just "negate"
+    (m, "abs")    | isGhcNum m -> Just "abs"
+    (m, "signum") | isGhcNum m -> Just "signum"
+    -- Integral methods
+    (m, "div")    | isGhcReal m -> Just "/"
+    (m, "mod")    | isGhcReal m -> Just "mod"
+    (m, "quot")   | isGhcReal m -> Just "/"
+    (m, "rem")    | isGhcReal m -> Just "mod"
+    -- Eq methods
+    (m, "==")     | isGhcEq m -> Just "=="
+    (m, "/=")     | isGhcEq m -> Just "/="
+    -- Ord methods
+    (m, "<")      | isGhcOrd m -> Just "<"
+    (m, ">")      | isGhcOrd m -> Just ">"
+    (m, "<=")     | isGhcOrd m -> Just "<="
+    (m, ">=")     | isGhcOrd m -> Just ">="
+    _ -> Nothing
+  where
+    isGhcNum  m = m `elem` ["GHC.Internal.Num", "GHC.Num", "GHC.Internal.Num.Integer"]
+    isGhcReal m = m `elem` ["GHC.Internal.Real", "GHC.Real"]
+    isGhcEq   m = m `elem` ["GHC.Internal.Classes", "GHC.Classes"]
+    isGhcOrd  m = m `elem` ["GHC.Internal.Classes", "GHC.Classes"]
 
 translateTyVar :: Var -> F.TypeVar
 translateTyVar v = F.TypeVar

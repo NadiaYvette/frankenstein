@@ -403,7 +403,9 @@ int64_t kk_str_show_int(int64_t n) {
     if (neg) buf[pos++] = '-';
     for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
     buf[total] = '\0';
-    return (int64_t)kk_str_alloc_leaf(buf, total, 1);
+    int64_t r = (int64_t)kk_str_alloc_leaf(buf, total, 1);
+    kk_register_string(r);
+    return r;
 }
 
 void kk_str_retain(int64_t s_i) {
@@ -503,7 +505,8 @@ int64_t kk_read_file(int64_t path_str) {
     size_t got = fread(buf, 1, (size_t)size, f);
     fclose(f);
     buf[got] = '\0';
-    return (int64_t)kk_str_alloc_leaf(buf, (int64_t)got, 1);
+    { int64_t r = (int64_t)kk_str_alloc_leaf(buf, (int64_t)got, 1);
+      kk_register_string(r); return r; }
 }
 
 int64_t kk_write_file(int64_t path_str, int64_t content_str) {
@@ -553,7 +556,8 @@ int64_t kk_read_line(void) {
         buf[len++] = (char)c;
     }
     buf[len] = '\0';
-    return (int64_t)kk_str_alloc_leaf(buf, (int64_t)len, 1);
+    { int64_t r = (int64_t)kk_str_alloc_leaf(buf, (int64_t)len, 1);
+      kk_register_string(r); return r; }
 }
 
 int64_t kk_system(int64_t cmd_str) {
@@ -573,7 +577,8 @@ int64_t kk_getenv(int64_t name_str) {
     /* Borrow the libc-owned string — getenv result is process-lifetime. */
     int64_t n = 0;
     while (val[n] != '\0') n++;
-    return (int64_t)kk_str_alloc_leaf(val, n, 0);
+    { int64_t r = (int64_t)kk_str_alloc_leaf(val, n, 0);
+      kk_register_string(r); return r; }
 }
 
 /* ---- Command-line arguments ----
@@ -603,7 +608,8 @@ int64_t kk_args_get(int64_t i) {
     int64_t n = 0;
     while (s[n] != '\0') n++;
     /* Borrow argv memory — it's process-lifetime. */
-    return (int64_t)kk_str_alloc_leaf(s, n, 0);
+    { int64_t r = (int64_t)kk_str_alloc_leaf(s, n, 0);
+      kk_register_string(r); return r; }
 }
 
 int64_t kk_args_progname(void) {
@@ -611,7 +617,8 @@ int64_t kk_args_progname(void) {
     const char* s = kk_g_argv[0];
     int64_t n = 0;
     while (s[n] != '\0') n++;
-    return (int64_t)kk_str_alloc_leaf(s, n, 0);
+    { int64_t r = (int64_t)kk_str_alloc_leaf(s, n, 0);
+      kk_register_string(r); return r; }
 }
 
 /* Exit the process with the given status code. Wrapped so callers can

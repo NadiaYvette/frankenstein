@@ -2449,12 +2449,10 @@ externalRuntimeArity = Map.fromList
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.
--- For names like "_" or "ds" that commonly collide, append the unique ID.
+-- Always append the unique ID to avoid collisions: GHC Core regularly reuses
+-- short names like "v", "a", "x" with different uniques in the same scope.
 nameToSsa :: Name -> Text
-nameToSsa n
-  | t == "_" || t == "ds" || t == "wild" = t <> T.pack (show (nameUnique n))
-  | otherwise = sanitizeName t
-  where t = nameText n
+nameToSsa n = sanitizeName (nameText n) <> T.pack (show (nameUnique n))
 
 -- | Escape a string for MLIR string literal (handle backslashes, quotes, newlines)
 -- | Escape a Text into MLIR's string-literal byte format. We iterate over

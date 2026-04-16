@@ -544,6 +544,8 @@ static int64_t text_span(int64_t f, int64_t s) {
 
 /* pack: [Char] -> Text  (list of codepoints to string) */
 static int64_t text_pack(int64_t list) {
+    /* If already a string (e.g. from show$1), return as-is */
+    if (kk_is_string(list)) return list;
     /* First pass: count total bytes needed */
     int64_t total = 0;
     int64_t tmp = list;

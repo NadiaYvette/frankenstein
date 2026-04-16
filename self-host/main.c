@@ -636,15 +636,31 @@ int main(void) {
         int64_t evidence_out = Frankenstein_Core_Evidence_evidencePass(perceus_out);
         CHECK("pipeline: evidencePass succeeds", evidence_out != 0);
 
-        /* Step 4: emitProgramText on non-empty defs — KNOWN BUG:
-         * The self-hosted emitter has a closure-capture bug: when compiling
-         * (== '/') sections, both closure slots get the char thunk instead
-         * of one being the == function thunk.  Additionally, zeze$0 (== as
-         * a value) is an unresolved symbol.  emitProgramText on empty
-         * programs works (test [15]) but non-empty defs hit this path.
-         * TODO: Fix emitter closure capture for section patterns.
-         */
-        printf("  (skipping emitProgramText on non-empty defs — known closure-capture bug)\n");
+        /* Step 4: emitProgramText on a program with defs */
+        printf("  ... calling emitProgramText\n"); fflush(stdout);
+        int64_t emit_prog = mk_program("demo", "pipeline",
+            cons(mk_def("demo", "identity", 10, ph()),
+                 cons(mk_def("demo", "main", 11, ph()), nil())),
+            cons(mk_datadecl("std", "Bool",
+                cons(mk_condecl("std", "True", nil()),
+                     cons(mk_condecl("std", "False", nil()), nil()))),
+                nil()),
+            nil());
+        kk_retain(emit_prog);
+        int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(emit_prog);
+        CHECK("pipeline: emitProgramText succeeds", mlir != 0);
+        CHECK("pipeline: emitProgramText returns string", kk_is_string(mlir));
+        if (kk_is_string(mlir)) {
+            int64_t len = kk_str_len(mlir);
+            CHECK("pipeline: MLIR output is non-empty", len > 0);
+            char* cstr = kk_str_dup_cstr(mlir);
+            CHECK("pipeline: MLIR output contains 'func'",
+                  cstr && strstr(cstr, "func") != NULL);
+            CHECK("pipeline: MLIR output contains 'module'",
+                  cstr && strstr(cstr, "module") != NULL);
+            printf("  (MLIR output: %ld bytes)\n", (long)len);
+            if (cstr) free(cstr);
+        }
     }
 
     /* ================================================================ */
@@ -652,8 +668,8 @@ int main(void) {
     /* ================================================================ */
 
     if (fail == 0) {
-        printf("\nFrankenstein self-hosts compiler passes across 14 modules!\n");
-        printf("Passes: assignProgramTags, insertPerceus, evidencePass\n");
+        printf("\nFrankenstein self-hosts ALL compiler passes across 14 modules!\n");
+        printf("Passes: assignProgramTags, insertPerceus, evidencePass, emitProgramText\n");
         printf("Modules: Types, ConTags, Perceus, Evidence, EffectOpt,\n");
         printf("  CycleAnalysis, DeriveSelectors, HldsParse, MirParse, Dialects, Emitter\n");
         printf("Pipeline: .hs -> GHC bridge -> Core IR -> Perceus -> MLIR -> LLVM -> ELF\n");

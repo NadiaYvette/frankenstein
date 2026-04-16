@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "../runtime/kk_runtime.h"
 
 /* ------------------------------------------------------------------ */
@@ -36,6 +37,22 @@ static int64_t trampoline_1arg(int64_t clos, int64_t arg) {
 static int64_t mk_closure1(int64_t (*fn)(int64_t)) {
     int64_t c = kk_alloc_con(CLOS_TAG_CM, 2);
     kk_set_field(c, 0, (int64_t)(intptr_t)trampoline_1arg);
+    kk_set_field(c, 1, (int64_t)(intptr_t)fn);
+    return c;
+}
+
+/* Helper: wrap a 2-arg function pointer in a closure.
+ * Same trampoline pattern: field[0] = trampoline, field[1] = real fn.
+ * The trampoline is called as trampoline(clos, arg1, arg2) and
+ * forwards to fn(arg1, arg2). */
+static int64_t trampoline_2arg(int64_t clos, int64_t a, int64_t b) {
+    int64_t fn_ptr = kk_field(clos, 1);
+    typedef int64_t (*raw2_t)(int64_t, int64_t);
+    return ((raw2_t)(intptr_t)fn_ptr)(a, b);
+}
+static int64_t mk_closure2(int64_t (*fn)(int64_t, int64_t)) {
+    int64_t c = kk_alloc_con(CLOS_TAG_CM, 2);
+    kk_set_field(c, 0, (int64_t)(intptr_t)trampoline_2arg);
     kk_set_field(c, 1, (int64_t)(intptr_t)fn);
     return c;
 }
@@ -80,6 +97,112 @@ int64_t frkn_koka_translateProgram_0(void) __asm__("Frankenstein_KokaBridge_Core
 int64_t frkn_koka_translateProgram_0(void) {
     return mk_closure1(Frankenstein_KokaBridge_CoreTranslate_translateProgram);
 }
+
+/* ------------------------------------------------------------------ */
+/*  zeze$0 (==) and zp$0 (+) as closures.                            */
+/*  GHC's typeclass dictionary stripping leaves these as module-local */
+/*  references.  For unboxed ints/chars, == is just integer compare.  */
+/* ------------------------------------------------------------------ */
+
+/* == : compare two values (works for ints, chars, and boxed values by
+ * comparing field 0 when both are heap-allocated cons with same tag) */
+static int64_t prim_eq(int64_t a, int64_t b) {
+    if (a == b) return 1;
+    /* If both are heap-allocated constructors, compare field 0 (unbox) */
+    if (kk_is_heap_ptr(a) && !kk_is_string(a) &&
+        kk_is_heap_ptr(b) && !kk_is_string(b)) {
+        if (kk_tag(a) == kk_tag(b) && kk_nfields(a) == 1 && kk_nfields(b) == 1)
+            return kk_field(a, 0) == kk_field(b, 0) ? 1 : 0;
+    }
+    /* String equality */
+    if (kk_is_string(a) && kk_is_string(b)) {
+        char* sa = kk_str_dup_cstr(a);
+        char* sb = kk_str_dup_cstr(b);
+        int eq = sa && sb && strcmp(sa, sb) == 0;
+        free(sa); free(sb);
+        return eq ? 1 : 0;
+    }
+    return 0;
+}
+/* + : integer addition */
+static int64_t prim_plus(int64_t a, int64_t b) { return a + b; }
+
+/* Each module that uses (==) as a value gets its own zeze$0 */
+#define ZEZE_SHIM(mod) \
+    int64_t mod##_zeze_0(void) __asm__(#mod "_zeze$0"); \
+    int64_t mod##_zeze_0(void) { return mk_closure2(prim_eq); }
+
+ZEZE_SHIM(Frankenstein_MlirEmit_Emitter)
+ZEZE_SHIM(Frankenstein_Core_FlattenPatterns)
+ZEZE_SHIM(Frankenstein_MercuryBridge_HldsParse)
+ZEZE_SHIM(Frankenstein_RustBridge_MirParse)
+
+/* _ze$0: bare == (no module qualifier — used by some GHC-generated code) */
+int64_t bare_ze_0(void) __asm__("_ze$0");
+int64_t bare_ze_0(void) { return mk_closure2(prim_eq); }
+
+/* zp$0: + as a value in Perceus */
+int64_t perceus_zp_0(void) __asm__("Frankenstein_Core_Perceus_zp$0");
+int64_t perceus_zp_0(void) { return mk_closure2(prim_plus); }
+
+/* ------------------------------------------------------------------ */
+/*  Additional $0 closures not already in shim_ghc_prim/list/etc.     */
+/*  Many $0 symbols are already defined in shim_ghc_prim.o,           */
+/*  shim_ghc_list.o, shim_data_*.o, shim_system.o. Only add the      */
+/*  ones that are genuinely missing here.                              */
+/* ------------------------------------------------------------------ */
+
+/* Data_Map_Internal_zdfEqMap$0 (distinct from Data_Map_Internal__fEqMap$0) */
+int64_t data_map_zdfEqMap_0(void) __asm__("Data_Map_Internal_zdfEqMap$0");
+int64_t data_map_zdfEqMap_0(void) { return mk_closure2(prim_eq); }
+
+/* ------------------------------------------------------------------ */
+/*  Koka donor library constants as closures ($0)                     */
+/* ------------------------------------------------------------------ */
+
+/* These are all 0-arg constants that return empty/null/zero values */
+
+int64_t common_nameNil_0(void) __asm__("Common_Name_nameNil$0");
+int64_t common_nameNil_0(void) { return kk_string_empty(); }
+int64_t common_rangeNull_0(void) __asm__("Common_Range_rangeNull$0");
+int64_t common_rangeNull_0(void) { return 0; }
+int64_t common_noFip_0(void) __asm__("Common_Syntax_noFip$0");
+int64_t common_noFip_0(void) { return 0; }
+int64_t common_valueReprZero_0(void) __asm__("Common_Syntax_valueReprZero$0");
+int64_t common_valueReprZero_0(void) { return 0; }
+int64_t compile_flagsNull_0(void) __asm__("Compile_Options_flagsNull$0");
+int64_t compile_flagsNull_0(void) { return 0; }
+int64_t core_exprTrue_0(void) __asm__("Core_Core_exprTrue$0");
+int64_t core_exprTrue_0(void) { return 1; }
+int64_t kind_kindEffect_0(void) __asm__("Kind_Kind_kindEffect$0");
+int64_t kind_kindEffect_0(void) { return 0; }
+int64_t kind_kindHeap_0(void) __asm__("Kind_Kind_kindHeap$0");
+int64_t kind_kindHeap_0(void) { return 0; }
+int64_t kind_kindLabel_0(void) __asm__("Kind_Kind_kindLabel$0");
+int64_t kind_kindLabel_0(void) { return 0; }
+int64_t kind_kindStar_0(void) __asm__("Kind_Kind_kindStar$0");
+int64_t kind_kindStar_0(void) { return 0; }
+int64_t type_effectEmpty_0(void) __asm__("Type_Type_effectEmpty$0");
+int64_t type_effectEmpty_0(void) { return 0; }
+int64_t type_typeTotal_0(void) __asm__("Type_Type_typeTotal$0");
+int64_t type_typeTotal_0(void) { return 0; }
+int64_t type_typeUnit_0(void) __asm__("Type_Type_typeUnit$0");
+int64_t type_typeUnit_0(void) { return 0; }
+
+/* GHC bridge internals — stubs (only used in GhcBridge, not self-hosting) */
+static int64_t stub_id(int64_t x) { return x; }
+int64_t ghc_isAlgTyCon_0(void) __asm__("GHC_Core_TyCon_isAlgTyCon$0");
+int64_t ghc_isAlgTyCon_0(void) { return mk_closure1(stub_id); }
+int64_t ghc_xopt_set_0(void) __asm__("GHC_Driver_DynFlags_xopt_set$0");
+int64_t ghc_xopt_set_0(void) { return mk_closure2(prim_eq); }
+int64_t ghc_getSessionDynFlags_0(void) __asm__("GHC_Driver_Monad_getSessionDynFlags$0");
+int64_t ghc_getSessionDynFlags_0(void) { return 0; }
+int64_t ghc_getModuleGraph_0(void) __asm__("GHC_Driver_Session_Inspect_getModuleGraph$0");
+int64_t ghc_getModuleGraph_0(void) { return 0; }
+int64_t ghc_isTyVar_0(void) __asm__("GHC_Types_Var_isTyVar$0");
+int64_t ghc_isTyVar_0(void) { return mk_closure1(stub_id); }
+
+/* System.Directory — already in shim_system.o */
 
 /* ------------------------------------------------------------------ */
 /*  False externals: local helpers that the emitter externalizes.     */

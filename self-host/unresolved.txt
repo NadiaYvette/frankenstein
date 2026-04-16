@@ -202,7 +202,7 @@
                  U Frankenstein_RustBridge_MirParse_zeze$0
                  U fseek
                  U ftell
-                 U getchar
+                 U getc
                  U GHC_Core_DataCon_dataConFieldLabels$1
                  U GHC_Core_DataCon_dataConName$1
                  U GHC_Core_DataCon_dataConOrigArgTys$1
@@ -376,9 +376,10 @@
                  U Kind_Kind_kindStar$0
                  U Language_Haskell_Syntax_Basic_field_label$1
                  U Language_Haskell_Syntax_Module_Name_moduleNameString$1
-                 U putchar
+                 U putc
                  U rewind
                  U stderr
+                 U stdin
                  U stdout
                  U system
                  U System_Directory_copyFile$2

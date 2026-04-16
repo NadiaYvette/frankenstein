@@ -163,6 +163,7 @@ static int64_t clone_con(int64_t v) {
     return c;
 }
 static int64_t ph(void) { return kk_alloc_con(0, 0); }
+
 static int64_t nil(void) { return kk_alloc_con(0, 0); }
 static int64_t cons(int64_t h, int64_t t) {
     int64_t c = kk_alloc_con(1, 2);
@@ -183,6 +184,44 @@ static int64_t mk_qname(const char *mod, const char *name, int64_t u) {
     kk_set_field(qn, 0, s(mod));
     kk_set_field(qn, 1, mk_name(name, u));
     return qn;
+}
+
+/* GHC assigns constructor tags alphabetically for orphan types.
+   These tags must match the self-hosted .o files.
+   Expr tags: EApp=20 ECon=22 ELam=28 ELet=29 ELit=30 EVar=37 etc.
+   Lit tags: LitChar=48 LitFloat=49 LitInt=50 LitString=51 */
+#define TAG_EVar    37
+#define TAG_ELit    30
+#define TAG_ELam    28
+#define TAG_LitInt  50
+
+/* Build ELit(LitInt n) expression. */
+static int64_t mk_lit_int(int64_t n) {
+    int64_t lit = kk_alloc_con(TAG_LitInt, 1);
+    kk_set_field(lit, 0, n);
+    int64_t expr = kk_alloc_con(TAG_ELit, 1);
+    kk_set_field(expr, 0, lit);
+    return expr;
+}
+
+/* Build ELam([(name, type)], body) — a single-arg lambda. */
+static int64_t mk_lam1(const char *param, int64_t unique, int64_t body) {
+    int64_t name = mk_name(param, unique);
+    int64_t pair = kk_alloc_con(0, 2);
+    kk_set_field(pair, 0, name);
+    kk_set_field(pair, 1, ph());
+    int64_t params = cons(pair, nil());
+    int64_t lam = kk_alloc_con(TAG_ELam, 2);
+    kk_set_field(lam, 0, params);
+    kk_set_field(lam, 1, body);
+    return lam;
+}
+
+/* Build EVar(name) */
+static int64_t mk_evar(const char *text, int64_t unique) {
+    int64_t var = kk_alloc_con(TAG_EVar, 1);
+    kk_set_field(var, 0, mk_name(text, unique));
+    return var;
 }
 
 /* Def: (QName, Type, Expr, DefSort, Visibility) — 5 fields */
@@ -298,10 +337,10 @@ int main(void) {
     {
         /* Each selector consumes the struct — use fresh instances */
         CHECK("defName.nameText == \"fac\"",
-              kk_str_eq(nameText(qnameName(defName(mk_def("demo", "fac", 1, ph())))), s("fac")));
-        CHECK("defExpr returns a value",
-              kk_tag(defExpr(mk_def("demo", "fac", 1, ph()))) == 0);
-        defVisibility(mk_def("demo", "fac", 1, ph()));
+              kk_str_eq(nameText(qnameName(defName(mk_def("demo", "fac", 1, mk_lit_int(0))))), s("fac")));
+        CHECK("defExpr returns ELit (tag 30)",
+              kk_tag(defExpr(mk_def("demo", "fac", 1, mk_lit_int(0)))) == TAG_ELit);
+        defVisibility(mk_def("demo", "fac", 1, mk_lit_int(0)));
         CHECK("defVisibility doesn't crash", 1);
 
         CHECK("progDefs is empty (tag 0)",
@@ -434,72 +473,106 @@ int main(void) {
     printf("\n[11] Compose: build program, traverse with selectors\n");
     /* ============================================================== */
     {
-        /* Build a small program with 2 defs and 1 data decl */
-        int64_t d1 = mk_def("demo", "fac", 1, ph());
-        int64_t d2 = mk_def("demo", "main", 2, ph());
-        int64_t defs = cons(d1, cons(d2, nil()));
+        /* Each sub-test builds a fresh structure to avoid refcount issues
+           with Perceus destructive selectors. */
 
-        int64_t cd_true  = mk_condecl("std", "True", nil());
-        int64_t cd_false = mk_condecl("std", "False", nil());
-        int64_t bool_dd  = mk_datadecl("std", "Bool",
-                                        cons(cd_true, cons(cd_false, nil())));
-        int64_t data = cons(bool_dd, nil());
-
-        int64_t eff_op = kk_alloc_con(0, 2);
-        kk_set_field(eff_op, 0, mk_qname("io", "print", 0));
-        kk_set_field(eff_op, 1, ph());
-        int64_t io_eff = kk_alloc_con(0, 3);
-        kk_set_field(io_eff, 0, mk_qname("std", "io", 0));
-        kk_set_field(io_eff, 1, nil());
-        kk_set_field(io_eff, 2, cons(eff_op, nil()));
-        int64_t effects = cons(io_eff, nil());
-
-        int64_t prog = mk_program("demo", "prog", defs, data, effects);
-
-        /* Traverse: program → name (use clone since prog is reused) */
-        int64_t pn = progName(clone_con(prog));
+        /* prog.name.nameText == "prog" */
         CHECK("prog.name.nameText == \"prog\"",
-              kk_str_eq(nameText(qnameName(pn)), s("prog")));
+              kk_str_eq(nameText(qnameName(progName(
+                  mk_program("demo", "prog", nil(), nil(), nil())))),
+                  s("prog")));
 
-        /* Traverse: program → defs → head → defName */
-        int64_t def_list = progDefs(clone_con(prog));
-        int64_t first_def = kk_field(def_list, 0);
-        int64_t fn = defName(clone_con(first_def));
-        CHECK("prog.defs[0].defName.nameText == \"fac\"",
-              kk_str_eq(nameText(qnameName(fn)), s("fac")));
+        /* prog.defs[0].defName.nameText == "fac" */
+        {
+            int64_t p = mk_program("demo", "prog",
+                cons(mk_def("demo", "fac", 1, ph()),
+                     cons(mk_def("demo", "main", 2, ph()), nil())),
+                nil(), nil());
+            int64_t defs = progDefs(p);
+            int64_t d0 = kk_field(defs, 0);
+            kk_retain(d0);
+            CHECK("prog.defs[0].defName.nameText == \"fac\"",
+                  kk_str_eq(nameText(qnameName(defName(d0))), s("fac")));
+        }
 
-        /* Traverse: program → data → head → dataName */
-        int64_t data_list = progData(clone_con(prog));
-        int64_t first_data = kk_field(data_list, 0);
-        CHECK("prog.data[0].dataName.nameText == \"Bool\"",
-              kk_str_eq(nameText(qnameName(dataName(clone_con(first_data)))),
-                        s("Bool")));
+        /* prog.data[0].dataName.nameText == "Bool" */
+        {
+            int64_t p = mk_program("demo", "prog", nil(),
+                cons(mk_datadecl("std", "Bool",
+                    cons(mk_condecl("std", "True", nil()),
+                         cons(mk_condecl("std", "False", nil()), nil()))),
+                    nil()),
+                nil());
+            int64_t data = progData(p);
+            int64_t dd0 = kk_field(data, 0);
+            kk_retain(dd0);
+            CHECK("prog.data[0].dataName.nameText == \"Bool\"",
+                  kk_str_eq(nameText(qnameName(dataName(dd0))), s("Bool")));
+        }
 
-        /* Traverse: program → data → head → cons → head → conName */
-        int64_t con_list = dataCons(clone_con(first_data));
-        int64_t first_con = kk_field(con_list, 0);
-        CHECK("prog.data[0].cons[0].conName.nameText == \"True\"",
-              kk_str_eq(nameText(qnameName(conName(clone_con(first_con)))),
-                        s("True")));
+        /* prog.data[0].cons[0].conName.nameText == "True" */
+        {
+            int64_t p = mk_program("demo", "prog", nil(),
+                cons(mk_datadecl("std", "Bool",
+                    cons(mk_condecl("std", "True", nil()),
+                         cons(mk_condecl("std", "False", nil()), nil()))),
+                    nil()),
+                nil());
+            int64_t data = progData(p);
+            int64_t dd0 = kk_field(data, 0);
+            kk_retain(dd0);
+            int64_t clist = dataCons(dd0);
+            int64_t c0 = kk_field(clist, 0);
+            kk_retain(c0);
+            CHECK("prog.data[0].cons[0].conName.nameText == \"True\"",
+                  kk_str_eq(nameText(qnameName(conName(c0))), s("True")));
+        }
 
-        /* Traverse: program → effects → head → effectName */
-        int64_t eff_list = progEffects(clone_con(prog));
-        int64_t first_eff = kk_field(eff_list, 0);
-        CHECK("prog.effects[0].effectName.nameText == \"io\"",
-              kk_str_eq(nameText(qnameName(effectName(clone_con(first_eff)))),
-                        s("io")));
+        /* prog.effects[0].effectName.nameText == "io" */
+        {
+            int64_t eff_op = kk_alloc_con(0, 2);
+            kk_set_field(eff_op, 0, mk_qname("io", "print", 0));
+            kk_set_field(eff_op, 1, ph());
+            int64_t io_eff = kk_alloc_con(0, 3);
+            kk_set_field(io_eff, 0, mk_qname("std", "io", 0));
+            kk_set_field(io_eff, 1, nil());
+            kk_set_field(io_eff, 2, cons(eff_op, nil()));
+            int64_t p = mk_program("demo", "prog", nil(), nil(),
+                cons(io_eff, nil()));
+            int64_t effs = progEffects(p);
+            int64_t e0 = kk_field(effs, 0);
+            kk_retain(e0);
+            CHECK("prog.effects[0].effectName.nameText == \"io\"",
+                  kk_str_eq(nameText(qnameName(effectName(e0))), s("io")));
+        }
 
-        /* Traverse: effect → ops → head → opName */
-        int64_t ops = effectOps(clone_con(first_eff));
-        int64_t first_op = kk_field(ops, 0);
-        CHECK("prog.effects[0].ops[0].opName.nameText == \"print\"",
-              kk_str_eq(nameText(qnameName(opName(first_op))),
-                        s("print")));
+        /* prog.effects[0].ops[0].opName.nameText == "print" */
+        {
+            int64_t eff_op = kk_alloc_con(0, 2);
+            kk_set_field(eff_op, 0, mk_qname("io", "print", 0));
+            kk_set_field(eff_op, 1, ph());
+            int64_t io_eff = kk_alloc_con(0, 3);
+            kk_set_field(io_eff, 0, mk_qname("std", "io", 0));
+            kk_set_field(io_eff, 1, nil());
+            kk_set_field(io_eff, 2, cons(eff_op, nil()));
+            int64_t effs = cons(io_eff, nil());
+            int64_t e0 = kk_field(effs, 0);
+            kk_retain(e0);
+            int64_t ops = effectOps(e0);
+            int64_t op0 = kk_field(ops, 0);
+            kk_retain(op0);
+            CHECK("prog.effects[0].ops[0].opName.nameText == \"print\"",
+                  kk_str_eq(nameText(qnameName(opName(op0))), s("print")));
+        }
 
-        /* Cross-module: conKey on constructors found via traversal */
-        int64_t true_key = Frankenstein_Core_ConTags_conKey(conName(clone_con(first_con)));
-        CHECK("conKey(prog.data.Bool.True) == \"True\"",
-              kk_str_eq(true_key, s("True")));
+        /* Cross-module: conKey */
+        {
+            int64_t c = mk_condecl("std", "True", nil());
+            kk_retain(c);
+            int64_t true_key = Frankenstein_Core_ConTags_conKey(conName(c));
+            CHECK("conKey(prog.data.Bool.True) == \"True\"",
+                  kk_str_eq(true_key, s("True")));
+        }
     }
 
     /* ============================================================== */
@@ -600,8 +673,9 @@ int main(void) {
     /* ============================================================== */
     {
         /* Build a program with 2 defs, 1 data decl (Bool), 1 effect */
-        int64_t d1 = mk_def("demo", "identity", 10, ph());
-        int64_t d2 = mk_def("demo", "main", 11, ph());
+        /* identity = 42 ;  main = 0 */
+        int64_t d1 = mk_def("demo", "identity", 10, mk_lit_int(42));
+        int64_t d2 = mk_def("demo", "main", 11, mk_lit_int(0));
         int64_t defs = cons(d1, cons(d2, nil()));
 
         int64_t cd_true  = mk_condecl("std", "True", nil());
@@ -614,8 +688,8 @@ int main(void) {
         printf("  ... calling assignProgramTags\n"); fflush(stdout);
         {
             int64_t p1 = mk_program("demo", "pipeline",
-                cons(mk_def("demo", "identity", 10, ph()),
-                     cons(mk_def("demo", "main", 11, ph()), nil())),
+                cons(mk_def("demo", "identity", 10, mk_lit_int(42)),
+                     cons(mk_def("demo", "main", 11, mk_lit_int(0)), nil())),
                 cons(mk_datadecl("std", "Bool",
                     cons(mk_condecl("std", "True", nil()),
                          cons(mk_condecl("std", "False", nil()), nil()))),
@@ -639,13 +713,14 @@ int main(void) {
         /* Step 4: emitProgramText on a program with defs */
         printf("  ... calling emitProgramText\n"); fflush(stdout);
         int64_t emit_prog = mk_program("demo", "pipeline",
-            cons(mk_def("demo", "identity", 10, ph()),
-                 cons(mk_def("demo", "main", 11, ph()), nil())),
+            cons(mk_def("demo", "identity", 10, mk_lit_int(42)),
+                 cons(mk_def("demo", "main", 11, mk_lit_int(0)), nil())),
             cons(mk_datadecl("std", "Bool",
                 cons(mk_condecl("std", "True", nil()),
                      cons(mk_condecl("std", "False", nil()), nil()))),
                 nil()),
             nil());
+        kk_retain(emit_prog);
         kk_retain(emit_prog);
         int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(emit_prog);
         CHECK("pipeline: emitProgramText succeeds", mlir != 0);

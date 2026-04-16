@@ -72,8 +72,8 @@ echo "=== $OK succeeded, $FAIL failed ==="
 
 echo ""
 echo "=== Phase 2: Compile runtime ==="
-clang -c -o "$OUT/kk_runtime.o" runtime/kk_runtime.c -I runtime/
-clang -c -o "$OUT/kk_cycle.o" runtime/kk_cycle.c -I runtime/
+clang -O2 -c -o "$OUT/kk_runtime.o" runtime/kk_runtime.c -I runtime/
+clang -O2 -c -o "$OUT/kk_cycle.o" runtime/kk_cycle.c -I runtime/
 echo "Runtime compiled."
 
 echo ""
@@ -89,7 +89,7 @@ echo "Total unresolved (non-kk, non-libc): $(wc -l < self-host/unresolved.txt)"
 echo ""
 echo "=== Phase 4: Compile driver + cross-module shims ==="
 clang -O2 -c -o "$OUT/main.o" self-host/main.c -I runtime/
-clang -c -o "$OUT/kk_arena.o" runtime/kk_arena.c -I runtime/
+clang -O2 -c -o "$OUT/kk_arena.o" runtime/kk_arena.c -I runtime/
 # Cross-module arity aliases (thin C wrappers with __asm__ labels)
 clang -O2 -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.c
 # Cross-module shims ($0 closures + false-external stubs)

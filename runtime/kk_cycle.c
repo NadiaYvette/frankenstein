@@ -103,7 +103,11 @@ int kk_can_be_cyclic(int64_t tag) {
  * UPDATE: We store nfields in a side table populated by kk_alloc_con_tracked.
  */
 
-/* Side table: ptr -> nfields (simple linear probe hash table) */
+/* Side table: ptr -> nfields (simple linear probe hash table).
+ * Size 4096 is intentionally small — when full, kk_nfields returns 0
+ * for unregistered objects, which means kk_drop won't traverse their
+ * children. This is correct because the self-hosted Perceus selectors
+ * drop individual fields rather than calling kk_drop on the parent. */
 #define KK_NFIELDS_TABLE_SIZE 4096
 static struct { int64_t ptr; int64_t nfields; } nfields_table[KK_NFIELDS_TABLE_SIZE];
 
@@ -117,7 +121,7 @@ void kk_register_nfields(int64_t ptr, int64_t nfields) {
             return;
         }
     }
-    /* Table full — shouldn't happen in practice */
+    /* Table full — nfields will default to 0 for this object */
 }
 
 void kk_unregister_nfields(int64_t ptr) {

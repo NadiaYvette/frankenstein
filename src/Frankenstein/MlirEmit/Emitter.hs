@@ -111,6 +111,15 @@ addExternDecl mlirName nArgs =
 externMangled :: Text -> Int -> Text
 externMangled name nArgs = name <> "$" <> T.pack (show nArgs)
 
+-- | Recognize Koka stdlib builtins that should be emitted inline as
+-- MLIR function definitions rather than declared as externals.
+isKokaBuiltin :: Text -> Bool
+isKokaBuiltin _ = False  -- currently unused; reserved for future Koka builtin inlining
+
+-- | Emit inline MLIR function definitions for known Koka builtins.
+emitKokaBuiltins :: [(Text, Int)] -> Text
+emitKokaBuiltins _ = ""
+
 -- | Emit a PAP (partial application) closure for an undersaturated call
 -- to a top-level function. Allocates a heap closure via kk_alloc_con whose
 -- field 0 is a wrapper fn pointer and fields 1..nSupplied are the supplied
@@ -262,14 +271,17 @@ emitProgramText prog =
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
-      externDeclText = if null externDecls then ""
+      -- Partition externals into Koka builtins (emit inline) vs real externals
+      (kokaBuiltins, realExterns) = partition (isKokaBuiltin . fst) externDecls
+      externDeclText = if null realExterns then ""
         else T.unlines
           (  ["  // External import declarations (resolved at link time)"]
           ++ [ "  func.func private @" <> nm <> "("
                <> T.intercalate ", " (replicate arity "i64")
                <> ") -> i64"
-             | (nm, arity) <- externDecls ]
+             | (nm, arity) <- realExterns ]
           ++ [""])
+      kokaBuiltinText = emitKokaBuiltins kokaBuiltins
       stringGlobals = T.unlines
         [ "  llvm.mlir.global internal constant @" <> gn <> "(\""
           <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
@@ -324,8 +336,11 @@ emitProgramText prog =
         else ""
       exprCallsPrint (EApp (EVar fn) _) =
         nameText fn `elem` [ "print", "println_str", "putStrLn", "print_str" ]
+      exprCallsPrint (EApp f args)       = exprCallsPrint f || any exprCallsPrint args
       exprCallsPrint (EDelay e)          = exprCallsPrint e
       exprCallsPrint (ELet _ body)       = exprCallsPrint body
+      exprCallsPrint (ECase _ bs)        = any (\(Branch _ _ b) -> exprCallsPrint b) bs
+      exprCallsPrint (ELam _ body)       = exprCallsPrint body
       exprCallsPrint _                   = False
       -- True iff the def's return type is a TCon whose name matches a
       -- DataDecl in the program. Used to pick the s-expression printer
@@ -375,6 +390,9 @@ emitProgramText prog =
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
+    , "  // List constructors"
+    , "  func.func private @kk_cons(i64, i64) -> i64"
+    , "  func.func private @kk_nil() -> i64"
     , ""
     , "  // First-class string runtime declarations (rope, UTF-8)"
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
@@ -430,6 +448,7 @@ emitProgramText prog =
     , "  func.func private @mercury_collect_choices(i64) -> i64"
     , ""
     , externDeclText
+    , kokaBuiltinText
     , "  // Lifted functions"
     , liftedFns
     , ""
@@ -715,6 +734,13 @@ emitExpr (ELit (LitString s)) = do
          ]
        , strName)
 
+-- kk_nil used as a bare variable (not inside EApp)
+emitExpr (EVar n)
+  | nameText n == "kk_nil" = do
+      resultName <- freshName "v"
+      pure ( [ "%" <> resultName <> " = func.call @kk_nil() : () -> i64" ]
+           , resultName)
+
 emitExpr (EVar n) = do
   -- Variable reference — look up in alias map; if not found and not a known
   -- top-level function, emit a direct func.call (for cross-module or external refs).
@@ -996,6 +1022,22 @@ emitExpr (EApp (EVar fn) [arg])
         ], resultName)
 
 -- Zero-arg intrinsics (e.g. stdin read_line, args_count)
+-- List constructors: Koka Nil/Cons mapped to runtime calls
+emitExpr (EApp (EVar fn) [h, t])
+  | nameText fn == "kk_cons" = do
+      (hOps, hName) <- emitExpr h
+      (tOps, tName) <- emitExpr t
+      resultName <- freshName "v"
+      pure (hOps ++ tOps ++
+        [ "%" <> resultName <> " = func.call @kk_cons(%" <> hName <> ", %" <> tName <> ") : (i64, i64) -> i64"
+        ], resultName)
+
+emitExpr (EApp (EVar fn) [])
+  | nameText fn == "kk_nil" = do
+      resultName <- freshName "v"
+      pure ( [ "%" <> resultName <> " = func.call @kk_nil() : () -> i64" ]
+           , resultName)
+
 emitExpr (EApp (EVar fn) [])
   | nameText fn `elem` ["read_line", "getLine"] = do
       resultName <- freshName "v"
@@ -1220,6 +1262,11 @@ emitExpr (EApp (EVar fn) args) = do
 -- here is always an i64 heap pointer to a closure, so we fetch the
 -- code pointer via kk_field just like the var-indirect path above, and
 -- thread the closure itself as the leading argument.
+-- Strip ETypeApp wrapper from callee so it can match the EApp (EVar fn) path
+emitExpr (EApp (ETypeApp fn _) args) = emitExpr (EApp fn args)
+-- Strip ETypeLam wrapper from callee (type abstraction applied to args)
+emitExpr (EApp (ETypeLam _ fn) args) = emitExpr (EApp fn args)
+
 emitExpr (EApp fn args) = do
   (fnOps, fnName) <- emitExpr fn
   argResults <- mapM emitExpr args
@@ -1245,6 +1292,15 @@ emitExpr (EApp fn args) = do
 emitExpr (ECase scrut branches) = do
   -- Pattern matching
   (scrutOps, scrutName) <- emitExpr scrut
+  -- Pre-register any PatVar bindings: a PatVar in a branch means
+  -- "bind the scrutinee to this variable".  We do this before
+  -- classification so that IntLitCase/BoolCase/ConCase defaults
+  -- all see the binding.
+  forM_ branches $ \(Branch pat _ _) -> case pat of
+    PatVar n _ -> do
+      let varSsa = nameToSsa n
+      modify (\s -> s { esAliases = Map.insert varSsa scrutName (esAliases s) })
+    _ -> pure ()
   case classifyBranches branches of
     -- Integer literal cases (existing behavior)
     IntLitCase litVal thenExpr elseExpr ->
@@ -1270,6 +1326,8 @@ emitExpr (ECase scrut branches) = do
 
     -- PatVar: bind scrutinee to variable, emit body
     VarCase varName body -> do
+      let varSsa = nameToSsa varName
+      modify (\s -> s { esAliases = Map.insert varSsa scrutName (esAliases s) })
       (bodyOps, bodyName) <- emitExpr body
       let bindOp = "// let " <> sanitizeName (nameText varName) <> " = %" <> scrutName
       pure (scrutOps ++ [bindOp] ++ bodyOps, bodyName)

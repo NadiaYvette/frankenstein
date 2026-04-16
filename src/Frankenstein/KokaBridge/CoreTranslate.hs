@@ -47,10 +47,28 @@ translateProgram kcore = do
       defs'' = filter (not . isExternWrapper externMap) defs'
   dataDecls <- concat <$> mapM translateTypeDefGroup (KC.coreProgTypeDefs kcore)
   let effects = concatMap extractEffectDecls (KC.coreProgTypeDefs kcore)
+      -- Inject synthetic DataDecl for std/core/types/list so that
+      -- assignProgramTags gives Nil=tag0, Cons=tag1 matching the
+      -- runtime's KK_NIL_TAG=0, KK_CONS_TAG=1 convention.
+      tyVarA = F.TypeVar (F.Name "a" 0) F.KindStar F.Many
+      listDecl = F.DataDecl
+        { F.dataName   = F.QName "std/core/types" (F.Name "list" 0)
+        , F.dataParams = [tyVarA]
+        , F.dataCons   =
+            [ F.ConDecl { F.conName = F.QName "std/core/types" (F.Name "Nil" 0)
+                        , F.conFields = [], F.conVis = F.Public }
+            , F.ConDecl { F.conName = F.QName "std/core/types" (F.Name "Cons" 0)
+                        , F.conFields = [ (F.Name "head" 0, F.TVar tyVarA)
+                                        , (F.Name "tail" 0, F.TCon (F.TypeCon (F.QName "std/core/types" (F.Name "list" 0)) F.KindStar)) ]
+                        , F.conVis = F.Public }
+            ]
+        , F.dataVis    = F.Public
+        }
+      allDataDecls = listDecl : dataDecls
   pure F.Program
     { F.progName    = translateQName (KC.coreProgName kcore)
     , F.progDefs    = defs''
-    , F.progData    = dataDecls
+    , F.progData    = allDataDecls
     , F.progEffects = effects
     }
 
@@ -154,8 +172,43 @@ translateExpr = \case
   KC.Lit lit ->
     pure $ F.ELit (translateLit lit)
 
-  KC.Con tname _conRepr ->
-    pure $ F.ECon (translateTNameToQName tname)
+  -- Koka Nil constructor → ECon with well-known nil tag
+  KC.Con tname _conRepr
+    | isKokaNil (KC.getName tname) ->
+        pure $ F.EVar (F.Name "kk_nil" 0)  -- will be emitted as kk_nil()
+    | isKokaCons (KC.getName tname) ->
+        pure $ F.ECon (F.QName "std/core/types" (F.Name "Cons" 0))
+    | otherwise ->
+        pure $ F.ECon (translateTNameToQName tname)
+
+  -- Koka stdlib builtins: intercept known functions and translate to
+  -- direct runtime calls rather than higher-order closure applications.
+  KC.App (KC.TypeApp (KC.Var tname _) _) args
+    | isKokaBuiltinApp (KC.getName tname) -> do
+        translateBuiltinApp (KC.getName tname) args
+
+  KC.App (KC.Var tname _) args
+    | isKokaBuiltinApp (KC.getName tname) -> do
+        translateBuiltinApp (KC.getName tname) args
+
+  -- Cons(h, t) → EApp (EVar kk_cons) [h, t]
+  KC.App (KC.TypeApp (KC.Con tname _) _) args
+    | isKokaCons (KC.getName tname) -> do
+        args' <- mapM translateExpr args
+        pure $ F.EApp (F.EVar (F.Name "kk_cons" 0)) args'
+
+  KC.App (KC.Con tname _) args
+    | isKokaCons (KC.getName tname) -> do
+        args' <- mapM translateExpr args
+        pure $ F.EApp (F.EVar (F.Name "kk_cons" 0)) args'
+
+  -- Nil (used as value in a context) → kk_nil()
+  KC.App (KC.TypeApp (KC.Con tname _) _) []
+    | isKokaNil (KC.getName tname) ->
+        pure $ F.EVar (F.Name "kk_nil" 0)
+  KC.App (KC.Con tname _) []
+    | isKokaNil (KC.getName tname) ->
+        pure $ F.EVar (F.Name "kk_nil" 0)
 
   KC.App f args -> do
     f'    <- translateExpr f
@@ -510,6 +563,62 @@ translateTypeUnsafe ty = case translateType ty of
 
 anyType :: F.Type
 anyType = F.TCon $ F.TypeCon (F.QName "std" (F.Name "any" 0)) F.KindValue
+
+-- ============================================================================
+-- Koka stdlib builtin recognition
+-- ============================================================================
+
+-- | Check if a Koka name is the Nil constructor (std/core/types/Nil)
+isKokaNil :: KN.Name -> Bool
+isKokaNil kn = KN.nameStem kn == "Nil"
+            && KN.nameModule kn `elem` ["std/core/types", "std/core"]
+
+-- | Check if a Koka name is the Cons constructor (std/core/types/Cons)
+isKokaCons :: KN.Name -> Bool
+isKokaCons kn = KN.nameStem kn == "Cons"
+             && KN.nameModule kn `elem` ["std/core/types", "std/core"]
+
+-- | Check if a Koka name corresponds to a known stdlib builtin.
+isKokaBuiltinApp :: KN.Name -> Bool
+isKokaBuiltinApp kn =
+  let stem = KN.nameStem kn
+      local = KN.nameLocal kn
+  in stem `elem` ["println", "print"]
+  || local `elem` ["show/println", "show/print"]
+  || stem == "show" && KN.nameLocalQual kn `elem` ["show", ""]
+
+-- | Translate a known Koka stdlib application to Frankenstein Core.
+-- Koka's println : (a, ?show : a -> string) -> io ()
+-- becomes: print_str(show(x)) or println_str(show(x))
+translateBuiltinApp :: KN.Name -> [KC.Expr] -> Either Text F.Expr
+translateBuiltinApp kn args = do
+  let stem = KN.nameStem kn
+      local = KN.nameLocal kn
+      printName = F.Name "println_str" 0
+      showIntName = F.Name "show_int" 0
+  case (stem, local, args) of
+    -- println(x, show) → println_str(show_int(x))
+    -- Koka passes the value and implicit show function; we call show directly
+    ("println", _, [val, _showFn]) -> do
+      val' <- translateExpr val
+      pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
+    ("println", _, [val]) -> do
+      val' <- translateExpr val
+      pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
+    (_, "show/println", [val, _showFn]) -> do
+      val' <- translateExpr val
+      pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
+    (_, "show/println", [val]) -> do
+      val' <- translateExpr val
+      pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
+    -- show(x) → show_int(x)
+    ("show", _, [val]) -> do
+      val' <- translateExpr val
+      pure $ F.EApp (F.EVar showIntName) [val']
+    -- Fallback: generic translation
+    _ -> do
+      args' <- mapM translateExpr args
+      pure $ F.EApp (F.EVar (translateNameK kn)) args'
 
 -- | foldlM implementation
 foldlM :: Monad m => (a -> b -> m a) -> a -> [b] -> m a

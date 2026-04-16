@@ -19,8 +19,12 @@
 #include "kk_cycle.h"
 #include "kk_arena.h"
 
-/* Forward declaration for string tracking (defined later) */
+/* Forward declarations for string tracking (defined later) */
 static void kk_register_string(int64_t ptr);
+static void kk_unregister_string(int64_t ptr);
+/* Forward declarations for string refcounting (different layout than cons) */
+void kk_str_retain(int64_t s_i);
+void kk_str_drop(int64_t s_i);
 
 /* Raw allocation: size in bytes */
 void* kk_alloc(int64_t size) {
@@ -49,6 +53,8 @@ static inline int64_t* kk_rc_ptr(int64_t ptr) {
 
 void kk_retain(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
+    /* Strings have a different layout (rc at offset 0, not -8) */
+    if (kk_is_string(ptr)) { kk_str_retain(ptr); return; }
     int64_t* rc = kk_rc_ptr(ptr);
     /* Increment only the count bits, preserve color */
     int64_t count = (*rc & KK_RC_MASK) + 1;
@@ -67,6 +73,8 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
 
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
+    /* Strings have a different layout (rc at offset 0, not -8) */
+    if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
     int64_t* rc = kk_rc_ptr(ptr);
     int64_t count = (*rc & KK_RC_MASK);
     if (count <= 1) {
@@ -407,6 +415,7 @@ void kk_str_drop(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return;
     if (--s->rc > 0) return;
+    kk_unregister_string(s_i);
     if (s->kind == KK_STR_LEAF) {
         if (s->owns_bytes) free((void*)s->u.bytes);
     } else {
@@ -785,6 +794,18 @@ static void kk_register_string(int64_t ptr) {
             string_table[probe] = ptr;
             return;
         }
+    }
+}
+
+static void kk_unregister_string(int64_t ptr) {
+    int64_t idx = (ptr >> 3) & (KK_STRING_TABLE_SIZE - 1);
+    for (int64_t i = 0; i < KK_STRING_TABLE_SIZE; i++) {
+        int64_t probe = (idx + i) & (KK_STRING_TABLE_SIZE - 1);
+        if (string_table[probe] == ptr) {
+            string_table[probe] = 0;
+            return;
+        }
+        if (string_table[probe] == 0) return;
     }
 }
 

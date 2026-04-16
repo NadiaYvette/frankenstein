@@ -23,13 +23,20 @@
 /* ------------------------------------------------------------------ */
 
 /* Helper: wrap a 1-arg function pointer in a closure.
- * Field 0 = function pointer (cast to i64).
- * The caller (map, foldr, etc.) will extract and call it.
- * Uses CLOS tag so the closure dispatch can distinguish closures from data. */
+ * Closure convention: call1(clos, arg) calls clos->field[0](clos, arg).
+ * So field 0 must be a trampoline that extracts the real fn from field 1
+ * and calls fn(arg), discarding the closure argument.
+ * Uses CLOS tag so kk_drop skips field 0 (code pointer). */
 #define CLOS_TAG_CM 0x434C4F53
+static int64_t trampoline_1arg(int64_t clos, int64_t arg) {
+    int64_t fn_ptr = kk_field(clos, 1);
+    typedef int64_t (*raw1_t)(int64_t);
+    return ((raw1_t)(intptr_t)fn_ptr)(arg);
+}
 static int64_t mk_closure1(int64_t (*fn)(int64_t)) {
-    int64_t c = kk_alloc_con(CLOS_TAG_CM, 1);
-    kk_set_field(c, 0, (int64_t)fn);
+    int64_t c = kk_alloc_con(CLOS_TAG_CM, 2);
+    kk_set_field(c, 0, (int64_t)(intptr_t)trampoline_1arg);
+    kk_set_field(c, 1, (int64_t)(intptr_t)fn);
     return c;
 }
 

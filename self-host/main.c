@@ -584,12 +584,11 @@ int main(void) {
     printf("\n[15] MlirEmit/Emitter.o — emitProgramText (full pass)\n");
     /* ============================================================== */
     {
-        /* emitProgramText is 43k+ lines of MLIR with deep closure dispatch
-         * chains that require additional shim work (sanitizeName, mapDef,
-         * etc.).  Deferred until the closure-as-value stubs are resolved.
-         * The emitter module IS linked and its symbols ARE present — only
-         * the runtime closure dispatch crashes. */
-        printf("  SKIP: emitProgramText deferred (closure dispatch WIP)\n");
+        /* emitProgramText uses GHC's State monad internally (the Emit
+         * monad is State EmitState).  The >>= bind shim requires more
+         * work — the closure dispatch jumps to address 0x1 inside
+         * bind_runner.  Deferred until State monad shim is hardened. */
+        printf("  SKIP: emitProgramText deferred (State monad >>= shim WIP)\n");
     }
 
     /* ================================================================ */

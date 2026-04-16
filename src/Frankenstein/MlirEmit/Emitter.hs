@@ -208,6 +208,26 @@ ensurePapWrapper fnName arity nSupplied = do
       addLiftedFn wrapperText
       pure wrapperName
 
+-- | Emit a top-level function used as a first-class value.
+-- Arity 0 (CAF/thunk): call the function directly — its result IS the value.
+-- Arity > 0: build a zero-capture PAP closure with a trampoline wrapper.
+emitFnAsValue :: Text -> Map Text Int -> Emit ([Text], Text)
+emitFnAsValue fnName arityMap =
+  emitFnAsValueWithArgs fnName (Map.findWithDefault 1 fnName arityMap) []
+
+-- | Emit a function as value, optionally pre-supplying captured arguments.
+emitFnAsValueWithArgs :: Text -> Int -> [Text] -> Emit ([Text], Text)
+emitFnAsValueWithArgs fnName arity suppliedArgs
+  | arity == 0, null suppliedArgs = do
+      -- Arity-0 function (CAF): call it to get the value it produces.
+      -- In GHC, top-level functions like `ctorsInExpr = go where go ...`
+      -- compile to 0-arity functions that return a closure.
+      resultName <- freshName "v"
+      pure ([ "// fn-as-value (CAF): call @" <> fnName <> " to get its result"
+            , "%" <> resultName <> " = func.call @" <> fnName <> "() : () -> i64"
+            ], resultName)
+  | otherwise = emitPapClosure fnName arity suppliedArgs
+
 -- | Record the MLIR type for an SSA name
 recordType :: Text -> Text -> Emit ()
 recordType name ty = modify (\s -> s { esTypeEnv = Map.insert name ty (esTypeEnv s) })
@@ -754,31 +774,25 @@ emitExpr (EVar n) = do
     pfx <- gets esModulePrefix
     pure $ if T.any (== '/') (nameText n) || T.isPrefixOf pfx sanitized
            then sanitized else pfx <> sanitized
+  arityMap <- gets esTopFnArity
   case Map.lookup sname aliases of
     Just target -> pure ([], target)
     Nothing
-      | Set.member qualSanitized topFns -> do
-          -- Top-level function used as a value (not applied).
-          stubName <- freshName "v"
-          pure ([ "// top-level fn passed as value (stub): @" <> qualSanitized
-                , "%" <> stubName <> " = arith.constant 0 : i64"
-                ], stubName)
-      | Set.member sanitized topFns -> do
-          -- Same-module top-level fn referenced by its unqualified name
-          stubName <- freshName "v"
-          pure ([ "// top-level fn passed as value (stub): @" <> sanitized
-                , "%" <> stubName <> " = arith.constant 0 : i64"
-                ], stubName)
+      | Set.member qualSanitized topFns ->
+          emitFnAsValue qualSanitized arityMap
+      | Set.member sanitized topFns ->
+          emitFnAsValue sanitized arityMap
       | otherwise -> do
           -- Check if this is a promoted let-bound lambda used as a value.
           promoted <- gets esPromotedFns
           case Map.lookup sname promoted of
             Just promotedName -> do
-              -- Promoted fn used as value — same stub as top-level fn.
-              stubName <- freshName "v"
-              pure ([ "// promoted let-bound fn passed as value: @" <> promotedName
-                    , "%" <> stubName <> " = arith.constant 0 : i64"
-                    ], stubName)
+              -- Promoted fn used as value: build closure with captures.
+              capKeys <- gets (Map.findWithDefault [] promotedName . esPromotedCaptures)
+              capAliases <- gets esAliases
+              let capSsaNames = [ Map.findWithDefault k k capAliases | k <- capKeys ]
+                  arity = Map.findWithDefault (length capSsaNames + 1) promotedName arityMap
+              emitFnAsValueWithArgs promotedName arity capSsaNames
             Nothing -> do
               -- Unresolved external: emit as direct func.call so it becomes
               -- a real linker symbol. Called with 0 args (value reference).
@@ -1151,10 +1165,15 @@ emitExpr (EApp (EVar fn) args) = do
             (satTys, extraTys)   = splitAt arity argTypes
             satList = T.intercalate ", " ["%" <> n | n <- satArgs]
             satTyList = T.intercalate ", " satTys
+        rawClosName <- freshName "v"
         closName <- freshName "v"
         let topCallTy = if arity == 0 then "() -> i64" else "(" <> satTyList <> ") -> i64"
-            topCallOp = "%" <> closName <> " = func.call @" <> qualSanitized
+            topCallOp = "%" <> rawClosName <> " = func.call @" <> qualSanitized
                         <> "(" <> satList <> ") : " <> topCallTy
+            -- Force the result: arity-0 functions (CAFs) return thunks whose
+            -- field layout differs from closures. kk_thunk_force is a no-op
+            -- on non-thunks, so this is always safe.
+            forceOp = "%" <> closName <> " = func.call @kk_thunk_force(%" <> rawClosName <> ") : (i64) -> i64"
         -- Closure-indirect call with the remaining args
         idxZeroName <- freshName "v"
         fptrIntName <- freshName "v"
@@ -1169,7 +1188,7 @@ emitExpr (EApp (EVar fn) args) = do
               , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
                 <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
               ]
-        pure (allOps ++ [topCallOp] ++ extractOps, resultName)
+        pure (allOps ++ [topCallOp, forceOp] ++ extractOps, resultName)
       _ -> do
         resultName <- freshName "v"
         let callOp = "%" <> resultName <> " = func.call @" <> qualSanitized
@@ -1224,10 +1243,12 @@ emitExpr (EApp (EVar fn) args) = do
                       (satTys, extraTys)   = splitAt ar allArgTypes
                       satList = T.intercalate ", " ["%" <> n | n <- satArgs]
                       satTyList = T.intercalate ", " satTys
+                  rawClosName <- freshName "v"
                   closName <- freshName "v"
                   let topCallTy = if ar == 0 then "() -> i64" else "(" <> satTyList <> ") -> i64"
-                      topCallOp = "%" <> closName <> " = func.call @" <> promotedName
+                      topCallOp = "%" <> rawClosName <> " = func.call @" <> promotedName
                                   <> "(" <> satList <> ") : " <> topCallTy
+                      forceOp = "%" <> closName <> " = func.call @kk_thunk_force(%" <> rawClosName <> ") : (i64) -> i64"
                   idxZeroName <- freshName "v"
                   fptrIntName <- freshName "v"
                   fptrPtrName <- freshName "v"
@@ -1241,7 +1262,7 @@ emitExpr (EApp (EVar fn) args) = do
                         , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
                           <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
                         ]
-                  pure (allOps ++ [topCallOp] ++ extractOps, resultName)
+                  pure (allOps ++ [topCallOp, forceOp] ++ extractOps, resultName)
                 _ -> do
                   resultName <- freshName "v"
                   let callOp = "%" <> resultName <> " = func.call @" <> promotedName

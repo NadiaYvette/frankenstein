@@ -126,10 +126,22 @@ perceusExpr scope expr = case expr of
           droppedBody boundNames
     in ELet bgs' retainedBody
 
-  -- Case: each branch may use the scrutinee differently
+  -- Case: Koka-style ownership.  When the scrutinee is a variable we can
+  -- drop it inside each branch (consuming it).  Pattern-bound fields that
+  -- the branch actually uses are retained first so they survive the
+  -- recursive kk_drop of the scrutinee.  Dead fields are NOT dropped
+  -- individually — they are freed when the scrutinee's rc reaches 0 and
+  -- kk_drop recursively visits its children.
+  --
+  -- This is safe for shared scrutinees: if the scrutinee has rc > 1 the
+  -- drop merely decrements without freeing, so the children stay alive for
+  -- the next selector call.
   ECase scrut branches ->
     let scrut' = perceusExpr scope scrut
-        branches' = map (perceusBranch scope) branches
+        mScrutVar = case scrut of
+          EVar n -> Just n
+          _      -> Nothing
+        branches' = map (perceusBranch scope mScrutVar) branches
     in ECase scrut' branches'
 
   -- Retain/Drop/Release already present: recurse
@@ -156,21 +168,42 @@ perceusExpr scope expr = case expr of
 perceusBindGroup :: Map Name Multiplicity -> Bind -> Bind
 perceusBindGroup scope b = b { bindExpr = perceusExpr scope (bindExpr b) }
 
-perceusBranch :: Map Name Multiplicity -> Branch -> Branch
-perceusBranch scope br =
+perceusBranch :: Map Name Multiplicity -> Maybe Name -> Branch -> Branch
+perceusBranch scope mScrutVar br =
   let -- Extend scope with pattern-bound variables
       patVars = patternVars (branchPattern br)
       scope' = foldl (\s (n, _) -> Map.insert n Many s) scope patVars
       body = branchBody br
       bodyFree = freeVars body
-      -- Drop unused non-linear pattern variables (K spec: unusedNonLinear)
+      body' = perceusExpr scope' body
+
+      -- Used pattern variables (need retaining before scrutinee drop)
+      usedPats = [ n | (n, _) <- patVars
+                 , Set.member n bodyFree ]
+      -- Unused pattern variables (for fallback when no scrutinee var)
       unusedPats = [ n | (n, _) <- patVars
                    , not (Set.member n bodyFree)
                    , Map.findWithDefault Many n scope' /= Linear ]
-      body' = perceusExpr scope' body
-      droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
-                          body' unusedPats
-  in br { branchBody = droppedBody }
+  in case mScrutVar of
+    Just sv | not (null patVars) ->
+      -- Koka-style: retain used fields FIRST, then drop the scrutinee.
+      -- Order matters: retain must precede drop because kk_drop is
+      -- recursive and would free the fields before retain bumps their rc.
+      let -- First: drop the scrutinee (innermost — emitted AFTER retains)
+          droppedBody = ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar sv)) DefVal]]
+                             body'
+          -- Then: wrap retains around the drop (outermost — emitted BEFORE drop)
+          retainedBody = foldr
+            (\n e -> ELet [[Bind (Name "_retain" 0) unitType (ERetain (EVar n)) DefVal]] e)
+            droppedBody usedPats
+      in br { branchBody = retainedBody }
+    _ ->
+      -- Fallback: no scrutinee variable (complex expression) or no pattern vars
+      -- (literal/wildcard pattern).  Drop unused pattern variables individually.
+      let droppedBody = foldr
+            (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
+            body' unusedPats
+      in br { branchBody = droppedBody }
 
 -- | Extract multiplicity from a Bind.
 -- Always returns Many since Bind carries no explicit multiplicity field.

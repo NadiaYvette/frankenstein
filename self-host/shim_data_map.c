@@ -61,32 +61,46 @@ static int64_t map_val(int64_t m)   { return kk_field(m, 2); }
 static int64_t map_left(int64_t m)  { return kk_field(m, 3); }
 static int64_t map_right(int64_t m) { return kk_field(m, 4); }
 
-/* Simple unbalanced BST insert (sufficient for self-hosting demo) */
+/* Simple unbalanced BST insert (sufficient for self-hosting demo).
+ *
+ * When creating a new node that shares fields from the old node `m`, we
+ * must retain those fields.  kk_drop now recursively drops children, so
+ * when the old tree is dropped the shared fields would be freed unless
+ * the new tree holds its own reference. */
 static int64_t map_insert(int64_t k, int64_t v, int64_t m) {
     if (map_is_tip(m))
         return map_bin(1, k, v, map_tip(), map_tip());
     int64_t cmp = kk_compare(k, map_key(m));
     if (cmp < 0) {
         int64_t new_left = map_insert(k, v, map_left(m));
-        return map_bin(map_size(new_left) + map_size(map_right(m)) + 1,
-                       map_key(m), map_val(m), new_left, map_right(m));
+        int64_t ok = map_key(m);   kk_retain(ok);
+        int64_t ov = map_val(m);   kk_retain(ov);
+        int64_t or_ = map_right(m); kk_retain(or_);
+        return map_bin(map_size(new_left) + map_size(or_) + 1,
+                       ok, ov, new_left, or_);
     } else if (cmp > 0) {
         int64_t new_right = map_insert(k, v, map_right(m));
-        return map_bin(map_size(map_left(m)) + map_size(new_right) + 1,
-                       map_key(m), map_val(m), map_left(m), new_right);
+        int64_t ok = map_key(m);   kk_retain(ok);
+        int64_t ov = map_val(m);   kk_retain(ov);
+        int64_t ol = map_left(m);  kk_retain(ol);
+        return map_bin(map_size(ol) + map_size(new_right) + 1,
+                       ok, ov, ol, new_right);
     } else {
-        /* Key exists: update value (strict) */
-        return map_bin(map_size(m), k, v, map_left(m), map_right(m));
+        /* Key exists: update value — share old subtrees */
+        int64_t ol = map_left(m);  kk_retain(ol);
+        int64_t or_ = map_right(m); kk_retain(or_);
+        return map_bin(map_size(m), k, v, ol, or_);
     }
 }
 
-/* Lookup: returns Maybe (Nothing = tag 0; Just x = tag 1, 1 field) */
+/* Lookup: returns Maybe (Nothing = tag 0; Just x = tag 1, 1 field).
+ * Retain the found value — the map still holds its own reference. */
 static int64_t map_lookup(int64_t k, int64_t m) {
     while (!map_is_tip(m)) {
         int64_t cmp = kk_compare(k, map_key(m));
         if (cmp < 0) m = map_left(m);
         else if (cmp > 0) m = map_right(m);
-        else return kk_just(map_val(m));
+        else { int64_t v = map_val(m); kk_retain(v); return kk_just(v); }
     }
     return kk_nothing();
 }
@@ -106,16 +120,19 @@ static int64_t map_find_with_default(int64_t def, int64_t k, int64_t m) {
         int64_t cmp = kk_compare(k, map_key(m));
         if (cmp < 0) m = map_left(m);
         else if (cmp > 0) m = map_right(m);
-        else return map_val(m);
+        else { int64_t v = map_val(m); kk_retain(v); return v; }
     }
     return def;
 }
 
-/* In-order traversal to list of (k,v) pairs */
+/* In-order traversal to list of (k,v) pairs.
+ * Retain key/value — the map still holds its own references. */
 static int64_t map_to_list_go(int64_t m, int64_t acc) {
     if (map_is_tip(m)) return acc;
     acc = map_to_list_go(map_right(m), acc);
-    int64_t pair = kk_pair(map_key(m), map_val(m));
+    int64_t k = map_key(m); kk_retain(k);
+    int64_t v = map_val(m); kk_retain(v);
+    int64_t pair = kk_pair(k, v);
     acc = kk_cons(pair, acc);
     acc = map_to_list_go(map_left(m), acc);
     return acc;
@@ -125,11 +142,12 @@ static int64_t map_to_list(int64_t m) {
     return map_to_list_go(m, kk_nil());
 }
 
-/* In-order values only */
+/* In-order values only — retain values extracted from the map. */
 static int64_t map_elems_go(int64_t m, int64_t acc) {
     if (map_is_tip(m)) return acc;
     acc = map_elems_go(map_right(m), acc);
-    acc = kk_cons(map_val(m), acc);
+    int64_t v = map_val(m); kk_retain(v);
+    acc = kk_cons(v, acc);
     acc = map_elems_go(map_left(m), acc);
     return acc;
 }
@@ -138,16 +156,19 @@ static int64_t map_elems(int64_t m) {
     return map_elems_go(m, kk_nil());
 }
 
-/* Union: left-biased */
+/* Union: left-biased.
+ * Retain m1 subtrees that get shared into the result. */
 static int64_t map_union(int64_t m1, int64_t m2) {
-    if (map_is_tip(m1)) return m2;
-    if (map_is_tip(m2)) return m1;
+    if (map_is_tip(m1)) { kk_retain(m2); return m2; }
+    if (map_is_tip(m2)) { kk_retain(m1); return m1; }
     /* Insert all of m2 into m1 (simple but O(n*m)) */
+    kk_retain(m1);
     int64_t result = m1;
     int64_t list = map_to_list(m2);
     while (!kk_is_nil(list)) {
         int64_t pair = kk_list_head(list);
-        int64_t k = kk_fst(pair), v = kk_snd(pair);
+        int64_t k = kk_fst(pair); kk_retain(k);
+        int64_t v = kk_snd(pair); kk_retain(v);
         /* Left-biased: don't overwrite existing keys in m1 */
         if (!map_member(k, result))
             result = map_insert(k, v, result);
@@ -158,18 +179,20 @@ static int64_t map_union(int64_t m1, int64_t m2) {
 
 /* Union with combining function */
 static int64_t map_union_with(int64_t f, int64_t m1, int64_t m2) {
-    if (map_is_tip(m1)) return m2;
-    if (map_is_tip(m2)) return m1;
+    if (map_is_tip(m1)) { kk_retain(m2); return m2; }
+    if (map_is_tip(m2)) { kk_retain(m1); return m1; }
+    kk_retain(m1);
     int64_t result = m1;
     int64_t list = map_to_list(m2);
     while (!kk_is_nil(list)) {
         int64_t pair = kk_list_head(list);
-        int64_t k = kk_fst(pair), v2 = kk_snd(pair);
+        int64_t k = kk_fst(pair); kk_retain(k);
+        int64_t v2 = kk_snd(pair); kk_retain(v2);
         int64_t existing = map_lookup(k, result);
         if (kk_tag(existing) == KK_JUST_TAG) {
-            /* Combine: f(existing_val, v2) */
+            /* Combine: f(existing_val, v2) — retain args, closure may consume */
             int64_t v1 = kk_field(existing, 0);
-            /* f is a closure: field 0 = fn ptr, field 1+ = captures */
+            kk_retain(v1); kk_retain(v2);
             int64_t fn_ptr = kk_field(f, 0);
             typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
             int64_t combined = ((fn2_t)fn_ptr)(f, v1, v2);
@@ -182,26 +205,30 @@ static int64_t map_union_with(int64_t f, int64_t m1, int64_t m2) {
     return result;
 }
 
-/* fromList: insert each pair */
+/* fromList: insert each pair — retain key/value from borrowed list pairs */
 static int64_t map_from_list(int64_t list) {
     int64_t result = map_tip();
     while (!kk_is_nil(list)) {
         int64_t pair = kk_list_head(list);
-        result = map_insert(kk_fst(pair), kk_snd(pair), result);
+        int64_t k = kk_fst(pair); kk_retain(k);
+        int64_t v = kk_snd(pair); kk_retain(v);
+        result = map_insert(k, v, result);
         list = kk_list_tail(list);
     }
     return result;
 }
 
-/* fromListWith: insert with combining function */
+/* fromListWith: insert with combining function — retain from borrowed list */
 static int64_t map_from_list_with(int64_t f, int64_t list) {
     int64_t result = map_tip();
     while (!kk_is_nil(list)) {
         int64_t pair = kk_list_head(list);
-        int64_t k = kk_fst(pair), v = kk_snd(pair);
+        int64_t k = kk_fst(pair); kk_retain(k);
+        int64_t v = kk_snd(pair); kk_retain(v);
         int64_t existing = map_lookup(k, result);
         if (kk_tag(existing) == KK_JUST_TAG) {
             int64_t v1 = kk_field(existing, 0);
+            kk_retain(v1); kk_retain(v);
             int64_t fn_ptr = kk_field(f, 0);
             typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
             int64_t combined = ((fn2_t)fn_ptr)(f, v1, v);
@@ -214,11 +241,12 @@ static int64_t map_from_list_with(int64_t f, int64_t list) {
     return result;
 }
 
-/* unionsWith: fold unionWith over a list of maps */
+/* unionsWith: fold unionWith over a list of maps — retain from borrowed list */
 static int64_t map_unions_with(int64_t f, int64_t maps) {
     int64_t result = map_tip();
     while (!kk_is_nil(maps)) {
-        result = map_union_with(f, result, kk_list_head(maps));
+        int64_t h = kk_list_head(maps); kk_retain(h);
+        result = map_union_with(f, result, h);
         maps = kk_list_tail(maps);
     }
     return result;

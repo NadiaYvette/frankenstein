@@ -24,6 +24,8 @@ typedef int64_t (*fn1_t)(int64_t, int64_t);
 typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
 
 static int64_t call1(int64_t clos, int64_t a) {
+    /* Retain argument — the closure (compiled with Perceus) may consume it. */
+    kk_retain(a);
     clos = kk_thunk_force(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw1_t)(int64_t);
@@ -32,6 +34,8 @@ static int64_t call1(int64_t clos, int64_t a) {
     return ((fn1_t)(intptr_t)kk_field(clos, 0))(clos, a);
 }
 static int64_t call2(int64_t clos, int64_t a, int64_t b) {
+    kk_retain(a);
+    kk_retain(b);
     clos = kk_thunk_force(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw2_t)(int64_t, int64_t);

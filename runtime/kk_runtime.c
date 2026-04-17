@@ -306,6 +306,10 @@ static kk_string_t* kk_str_alloc_concat(kk_string_t* l, kk_string_t* r) {
     s->owns_bytes = 0;
     s->u.cat.l    = l;
     s->u.cat.r    = r;
+    /* Concat node owns references to its children.
+     * Retain them so they survive independent drops of the originals. */
+    if (l) l->rc++;
+    if (r) r->rc++;
     return s;
 }
 
@@ -475,11 +479,18 @@ void kk_str_retain(int64_t s_i) {
 void kk_str_drop(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return;
-    if (s->rc > 0) s->rc--;
-    /* Don't free strings yet — string interning and map keys can hold
-     * hidden references that Perceus doesn't track.  Constructor cells
-     * are freed via the arena; strings leak until we add string interning
-     * with weak references. */
+    if (s->rc <= 0) return;  /* already dead — don't double-free */
+    s->rc--;
+    if (s->rc > 0) return;   /* still shared */
+    /* Sole owner — free string and its children. */
+    kk_unregister_string(s_i);
+    if (s->kind == KK_STR_CONCAT) {
+        kk_str_drop((int64_t)s->u.cat.l);
+        kk_str_drop((int64_t)s->u.cat.r);
+    } else if (s->kind == KK_STR_LEAF && s->owns_bytes) {
+        free((void*)s->u.bytes);
+    }
+    free(s);
 }
 
 /* Public wrappers for shim use */

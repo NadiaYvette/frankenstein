@@ -117,6 +117,8 @@ static int64_t unbox_char(int64_t c) {
  * For predicates (Char -> Bool), the closure takes (closure, char_codepoint)
  * and returns 0/1. */
 static int64_t call_closure_1(int64_t closure, int64_t arg) {
+    /* Retain arg — closure may consume it via Perceus drop */
+    kk_retain(arg);
     closure = kk_thunk_force(closure);
     if (!kk_is_heap_ptr(closure)) {
         typedef int64_t (*raw1_t)(int64_t);

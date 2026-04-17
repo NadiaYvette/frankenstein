@@ -61,19 +61,23 @@ static int64_t set_elem(int64_t s)  { return kk_field(s, 1); }
 static int64_t set_left(int64_t s)  { return kk_field(s, 2); }
 static int64_t set_right(int64_t s) { return kk_field(s, 3); }
 
+/* Retain shared fields from old node when creating new nodes. */
 static int64_t set_insert(int64_t x, int64_t s) {
     if (set_is_tip(s))
         return set_bin(1, x, set_tip(), set_tip());
     int64_t cmp = kk_compare(x, set_elem(s));
     if (cmp < 0) {
         int64_t nl = set_insert(x, set_left(s));
-        return set_bin(set_size(nl) + set_size(set_right(s)) + 1,
-                       set_elem(s), nl, set_right(s));
+        int64_t oe = set_elem(s);  kk_retain(oe);
+        int64_t or_ = set_right(s); kk_retain(or_);
+        return set_bin(set_size(nl) + set_size(or_) + 1, oe, nl, or_);
     } else if (cmp > 0) {
         int64_t nr = set_insert(x, set_right(s));
-        return set_bin(set_size(set_left(s)) + set_size(nr) + 1,
-                       set_elem(s), set_left(s), nr);
+        int64_t oe = set_elem(s);  kk_retain(oe);
+        int64_t ol = set_left(s);  kk_retain(ol);
+        return set_bin(set_size(ol) + set_size(nr) + 1, oe, ol, nr);
     }
+    kk_retain(s);
     return s; /* already present */
 }
 
@@ -89,20 +93,24 @@ static int64_t set_member(int64_t x, int64_t s) {
 
 static int64_t set_delete(int64_t x, int64_t s);
 
-/* Find minimum element */
+/* Find minimum element — caller is responsible for retaining the result */
 static int64_t set_find_min(int64_t s) {
     while (!set_is_tip(set_left(s)))
         s = set_left(s);
     return set_elem(s);
 }
+/* Note: set_find_min returns a borrowed ref — callers (set_delete) already retain it */
 
-/* Delete minimum */
+/* Delete minimum — retain shared fields */
 static int64_t set_delete_min(int64_t s) {
-    if (set_is_tip(set_left(s)))
-        return set_right(s);
+    if (set_is_tip(set_left(s))) {
+        int64_t r = set_right(s); kk_retain(r);
+        return r;
+    }
     int64_t nl = set_delete_min(set_left(s));
-    return set_bin(set_size(nl) + set_size(set_right(s)) + 1,
-                   set_elem(s), nl, set_right(s));
+    int64_t oe = set_elem(s);   kk_retain(oe);
+    int64_t or_ = set_right(s); kk_retain(or_);
+    return set_bin(set_size(nl) + set_size(or_) + 1, oe, nl, or_);
 }
 
 static int64_t set_delete(int64_t x, int64_t s) {
@@ -110,28 +118,35 @@ static int64_t set_delete(int64_t x, int64_t s) {
     int64_t cmp = kk_compare(x, set_elem(s));
     if (cmp < 0) {
         int64_t nl = set_delete(x, set_left(s));
-        return set_bin(set_size(nl) + set_size(set_right(s)) + 1,
-                       set_elem(s), nl, set_right(s));
+        int64_t oe = set_elem(s);   kk_retain(oe);
+        int64_t or_ = set_right(s); kk_retain(or_);
+        return set_bin(set_size(nl) + set_size(or_) + 1, oe, nl, or_);
     } else if (cmp > 0) {
         int64_t nr = set_delete(x, set_right(s));
-        return set_bin(set_size(set_left(s)) + set_size(nr) + 1,
-                       set_elem(s), set_left(s), nr);
+        int64_t oe = set_elem(s);  kk_retain(oe);
+        int64_t ol = set_left(s);  kk_retain(ol);
+        return set_bin(set_size(ol) + set_size(nr) + 1, oe, ol, nr);
     } else {
         /* Found — delete this node */
-        if (set_is_tip(set_left(s))) return set_right(s);
-        if (set_is_tip(set_right(s))) return set_left(s);
-        int64_t succ = set_find_min(set_right(s));
+        if (set_is_tip(set_left(s))) {
+            int64_t r = set_right(s); kk_retain(r); return r;
+        }
+        if (set_is_tip(set_right(s))) {
+            int64_t l = set_left(s); kk_retain(l); return l;
+        }
+        int64_t succ = set_find_min(set_right(s)); kk_retain(succ);
         int64_t nr = set_delete_min(set_right(s));
-        return set_bin(set_size(set_left(s)) + set_size(nr) + 1,
-                       succ, set_left(s), nr);
+        int64_t ol = set_left(s); kk_retain(ol);
+        return set_bin(set_size(ol) + set_size(nr) + 1, succ, ol, nr);
     }
 }
 
-/* In-order traversal to sorted list */
+/* In-order traversal to sorted list — retain elements shared from set nodes */
 static int64_t set_to_list_go(int64_t s, int64_t acc) {
     if (set_is_tip(s)) return acc;
     acc = set_to_list_go(set_right(s), acc);
-    acc = kk_cons(set_elem(s), acc);
+    int64_t e = set_elem(s); kk_retain(e);
+    acc = kk_cons(e, acc);
     acc = set_to_list_go(set_left(s), acc);
     return acc;
 }
@@ -141,24 +156,28 @@ static int64_t set_to_asc_list(int64_t s) {
 }
 
 static int64_t set_union(int64_t s1, int64_t s2) {
-    if (set_is_tip(s1)) return s2;
-    if (set_is_tip(s2)) return s1;
+    if (set_is_tip(s1)) { kk_retain(s2); return s2; }
+    if (set_is_tip(s2)) { kk_retain(s1); return s1; }
     /* Insert all of s2 into s1 */
     int64_t list = set_to_asc_list(s2);
+    kk_retain(s1);
     int64_t result = s1;
     while (!kk_is_nil(list)) {
-        result = set_insert(kk_list_head(list), result);
+        int64_t h = kk_list_head(list); kk_retain(h);
+        result = set_insert(h, result);
         list = kk_list_tail(list);
     }
     return result;
 }
 
 static int64_t set_difference(int64_t s1, int64_t s2) {
-    if (set_is_tip(s1) || set_is_tip(s2)) return s1;
+    if (set_is_tip(s1) || set_is_tip(s2)) { kk_retain(s1); return s1; }
     int64_t list = set_to_asc_list(s2);
+    kk_retain(s1);
     int64_t result = s1;
     while (!kk_is_nil(list)) {
-        result = set_delete(kk_list_head(list), result);
+        int64_t h = kk_list_head(list); kk_retain(h);
+        result = set_delete(h, result);
         list = kk_list_tail(list);
     }
     return result;
@@ -167,7 +186,8 @@ static int64_t set_difference(int64_t s1, int64_t s2) {
 static int64_t set_from_list(int64_t list) {
     int64_t result = set_tip();
     while (!kk_is_nil(list)) {
-        result = set_insert(kk_list_head(list), result);
+        int64_t h = kk_list_head(list); kk_retain(h);
+        result = set_insert(h, result);
         list = kk_list_tail(list);
     }
     return result;
@@ -176,7 +196,8 @@ static int64_t set_from_list(int64_t list) {
 static int64_t set_unions(int64_t sets) {
     int64_t result = set_tip();
     while (!kk_is_nil(sets)) {
-        result = set_union(result, kk_list_head(sets));
+        int64_t h = kk_list_head(sets); kk_retain(h);
+        result = set_union(result, h);
         sets = kk_list_tail(sets);
     }
     return result;

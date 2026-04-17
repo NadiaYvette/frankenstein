@@ -60,9 +60,12 @@ static int64_t call0(int64_t clos) {
 }
 
 static int64_t call1(int64_t clos, int64_t a) {
+    /* Retain argument — the called closure (compiled with Perceus) may
+     * consume it (drop after extracting fields).  The caller's data
+     * structure still holds a reference, so we must keep it alive. */
+    kk_retain(a);
     clos = resolve_callable(clos);
     if (!kk_is_heap_ptr(clos)) {
-        /* Raw function pointer — call as 1-arg function */
         typedef int64_t (*raw1_t)(int64_t);
         return ((raw1_t)(intptr_t)clos)(a);
     }
@@ -71,9 +74,10 @@ static int64_t call1(int64_t clos, int64_t a) {
 }
 
 static int64_t call2(int64_t clos, int64_t a, int64_t b) {
+    kk_retain(a);
+    kk_retain(b);
     clos = resolve_callable(clos);
     if (!kk_is_heap_ptr(clos)) {
-        /* Raw function pointer — call as 2-arg function */
         typedef int64_t (*raw2_t)(int64_t, int64_t);
         return ((raw2_t)(intptr_t)clos)(a, b);
     }

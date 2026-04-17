@@ -69,11 +69,10 @@ void kk_retain(int64_t ptr) {
 
 int64_t kk_tag(int64_t ptr);  /* forward decl */
 
-/* Closure objects store a raw function pointer in field 0 and captured
- * values (which may be heap pointers) in fields 1..n. The code pointer
- * is *not* a heap pointer and must not be dropped, so the codegen tags
- * closures with KK_CLOSURE_TAG and kk_drop skips field 0 for them. */
-#define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" */
+/* Special tags — must be defined before kk_drop which dispatches on them. */
+#define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" — field 0 is raw fn ptr */
+#define KK_THUNK_TAG   0x4C415A59  /* "LAZY" — field 0: eval flag, field 1: fn/result */
+#define KK_EVV_TAG     0x45565630  /* "EVV0" — all fields are handler fn ptrs */
 
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
@@ -93,20 +92,39 @@ void kk_drop(int64_t ptr) {
         *rc = (*rc & KK_COLOR_MASK) | (count - 1);
         return;
     }
-    /* Sole owner (rc == 1) — mark as dead but don't free.
+    /* Sole owner (rc == 1) — drop children, then free.
      *
-     * Freeing objects here would be correct in a purely linear world, but
-     * GHC's lazy evaluation introduces sharing that Perceus doesn't track:
-     * thunk caching, selector thunks, string interning, etc.  Actual
-     * deallocation causes use-after-free because other references to the
-     * same object (through shared thunks or retained closures) survive
-     * past the drop.
-     *
-     * Instead, we just mark rc=0 (dead) so future drops are no-ops.
-     * The arena allocator reclaims all memory at exit.  This is correct
-     * and avoids leaking refcounts (shared objects properly decrement)
-     * while never freeing objects that might still be reachable. */
-    *rc = 0;
+     * kk_thunk_force retains cached results on every read, so lazy
+     * selector thunk sharing is properly refcounted.  It is now safe
+     * to recursively drop children and free the object. */
+    *rc = 0;  /* mark dead first — prevents re-entrant double-free */
+
+    int64_t tag = kk_tag(ptr);
+    int64_t nf = kk_nfields(ptr);
+    int64_t* fields = (int64_t*)(ptr + 8);
+
+    if (tag == KK_CLOSURE_TAG) {
+        /* Closures: field 0 is a raw function pointer — skip it.
+         * Fields 1..nfields-1 are captured values — drop them. */
+        for (int64_t i = 1; i < nf; i++)
+            kk_drop(fields[i]);
+    } else if (tag == KK_THUNK_TAG) {
+        /* Thunks: field 0 = evaluated flag (integer, skip).
+         * Field 1 = fn_ptr if unevaluated, cached result if evaluated.
+         * Only drop field 1 when evaluated (cached result is a heap value). */
+        if (fields[0] != 0)  /* evaluated */
+            kk_drop(fields[1]);
+    } else if (tag == KK_EVV_TAG) {
+        /* Evidence vectors: all fields are handler fn pointers — skip */
+    } else {
+        /* Regular constructors: drop all fields */
+        for (int64_t i = 0; i < nf; i++)
+            kk_drop(fields[i]);
+    }
+
+    kk_unregister_nfields(ptr);
+    /* kk_arena_free: no-op for arena-owned, free() for malloc'd */
+    kk_arena_free((void*)(intptr_t)(ptr - 8));
 }
 
 void kk_release(int64_t ptr) {
@@ -458,12 +476,10 @@ void kk_str_drop(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return;
     if (s->rc > 0) s->rc--;
-    /* Don't free strings even at rc=0.  Lazy thunk sharing means the same
-     * string can be referenced from multiple contexts (cached thunk results,
-     * closure captures) that Perceus doesn't track.  Freeing here causes
-     * use-after-free in string-heavy code like the MLIR emitter.
-     * Strings are malloc'd (not arena) so they leak — acceptable for
-     * bootstrapping where correctness trumps memory management. */
+    /* Don't free strings yet — string interning and map keys can hold
+     * hidden references that Perceus doesn't track.  Constructor cells
+     * are freed via the arena; strings leak until we add string interning
+     * with weak references. */
 }
 
 /* Public wrappers for shim use */
@@ -703,7 +719,7 @@ void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
 
 #include <stdio.h>
 
-#define KK_EVV_TAG 0x45565630  /* "EVV0" */
+/* KK_EVV_TAG defined at top of file */
 
 /* Create an evidence vector with nops operation slots */
 int64_t kk_evv_create(int64_t nops) {
@@ -943,7 +959,7 @@ int64_t mercury_collect_choices(int64_t fn_ptr) {
  *                 1 = evaluated   (value_or_fn_ptr is cached result)
  */
 
-#define KK_THUNK_TAG 0x4C415A59  /* "LAZY" */
+/* KK_THUNK_TAG defined at top of file */
 
 /* Create a thunk wrapping a zero-arg function pointer */
 int64_t kk_thunk_create(int64_t fn_ptr) {
@@ -954,20 +970,32 @@ int64_t kk_thunk_create(int64_t fn_ptr) {
     return thunk;
 }
 
-/* Force a thunk: if unevaluated, call the function and cache the result. */
+/* Force a thunk: if unevaluated, call the function and cache the result.
+ *
+ * Retain semantics: every call to kk_thunk_force returns a reference that
+ * the caller "owns" (and will eventually drop via Perceus).  On the first
+ * evaluation we retain the result because the thunk's cache now holds a
+ * second reference.  On cache hits we retain again so the caller gets its
+ * own reference.  When the thunk itself is freed (rc→0), kk_drop drops
+ * the cached result, releasing the thunk's reference.  This correctly
+ * handles GHC's selector thunks, where multiple selectors share one
+ * cached pair and each drops it independently. */
 int64_t kk_thunk_force(int64_t thunk) {
     if (!kk_is_heap_ptr(thunk)) return thunk;  /* not a thunk, return as-is */
     int64_t tag = kk_tag(thunk);
     if (tag != KK_THUNK_TAG) return thunk;     /* not a thunk, return as-is */
     int64_t evaluated = kk_field(thunk, 0);
     if (evaluated) {
-        return kk_field(thunk, 1);             /* already forced */
+        int64_t result = kk_field(thunk, 1);
+        kk_retain(result);                     /* caller will drop this ref */
+        return result;
     }
     /* Call the zero-arg function */
     int64_t fn_ptr = kk_field(thunk, 1);
     typedef int64_t (*thunk_fn_t)(void);
     int64_t result = ((thunk_fn_t)fn_ptr)();
-    /* Cache the result */
+    /* Cache the result — retain because the thunk now owns a reference */
+    kk_retain(result);
     kk_set_field(thunk, 0, 1);                /* mark as evaluated */
     kk_set_field(thunk, 1, result);           /* store result */
     return result;

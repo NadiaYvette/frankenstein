@@ -40,6 +40,7 @@
                  U Core_Core_tnameType$1
                  U Data_ByteString_length$1
                  U Data_ByteString_unpack$1
+                 U Data_Char_digitToInt$1
                  U Data_Map_Internal_elems$1
                  U Data_Map_Internal_empty$0
                  U Data_Map_Internal_findWithDefault$2
@@ -74,6 +75,7 @@
                  U Data_Set_Internal_unions$1
                  U Data_Text_all$2
                  U Data_Text_any$2
+                 U Data_Text_break$2
                  U Data_Text_breakOn$2
                  U Data_Text_breakOn$3
                  U Data_Text_breakOnEnd$3
@@ -89,6 +91,8 @@
                  U Data_Text_Encoding_decodeUtf8With$2
                  U Data_Text_Encoding_encodeUtf8$1
                  U Data_Text_Encoding_Error_lenientDecode$0
+                 U Data_Text_foldl_$2
+                 U Data_Text_head$1
                  U Data_Text_init$1
                  U Data_Text_intercalate$1
                  U Data_Text_intercalate$2
@@ -110,6 +114,7 @@
                  U Data_Text_Show_singleton$1
                  U Data_Text_Show_unpack$1
                  U Data_Text_span$2
+                 U Data_Text_splitAt$2
                  U Data_Text_splitOn$2
                  U Data_Text_splitOn$3
                  U Data_Text_strip$0
@@ -118,6 +123,7 @@
                  U Data_Text_stripPrefix$2
                  U Data_Text_stripStart$0
                  U Data_Text_stripStart$1
+                 U Data_Text_tail$1
                  U Data_Text_take$2
                  U Data_Text_takeWhile$1
                  U Data_Text_takeWhile$2
@@ -126,6 +132,8 @@
                  U Data_Text_unlines$1
                  U Frankenstein_Core_ConTags_assignProgramTags$1
                  U Frankenstein_Core_ConTags_conKey$1
+                 U Frankenstein_Core_EffectOpt_isAbortHandler$1
+                 U Frankenstein_Core_EffectOpt_wild$0
                  U Frankenstein_Core_FlattenPatterns_zeze$0
                  U Frankenstein_Core_Perceus_zp$0
                  U Frankenstein_Core_Types_bindExpr$0
@@ -227,7 +235,6 @@
                  U GHC_Internal_Base_eqString$2
                  U GHC_Internal_Base_flip$1
                  U GHC_Internal_Base_fmap$1
-                 U GHC_Internal_Base_fmap$2
                  U GHC_Internal_Base_foldr$3
                  U GHC_Internal_Base_id$0
                  U GHC_Internal_Base_map$1
@@ -244,6 +251,7 @@
                  U GHC_Internal_Base_zlzg$2
                  U GHC_Internal_Base_zpzp$0
                  U GHC_Internal_Base_zpzp$2
+                 U GHC_Internal_Char_chr$1
                  U GHC_Internal_Classes_ip$1
                  U GHC_Internal_Classes_max$0
                  U GHC_Internal_Classes_max$2
@@ -293,6 +301,7 @@
                  U GHC_Internal_Enum_enumFromTo$2
                  U GHC_Internal_Enum_fromEnum$1
                  U GHC_Internal_Enum_toEnum$1
+                 U GHC_Internal_Err_error$0
                  U GHC_Internal_Err_error$1
                  U GHC_Internal_Err_undefined$0
                  U GHC_Internal_IO_catch$2
@@ -307,6 +316,7 @@
                  U GHC_Internal_List_init$2
                  U GHC_Internal_List_last$1
                  U GHC_Internal_List_last$2
+                 U GHC_Internal_List_lookup$0
                  U GHC_Internal_List_lookup$2
                  U GHC_Internal_List_repeat$1
                  U GHC_Internal_List_replicate$2
@@ -323,8 +333,10 @@
                  U GHC_Internal_List_znzn$3
                  U GHC_Internal_Maybe_zdfEqMaybe$0
                  U GHC_Internal_Num_fromInteger$1
+                 U GHC_Internal_Real_fromIntegral$0
                  U GHC_Internal_Real_fromIntegral$1
                  U GHC_Internal_Real_fromRational$1
+                 U GHC_Internal_Real_round$1
                  U GHC_Internal_Real_toInteger$1
                  U GHC_Internal_Show_show$0
                  U GHC_Internal_Show_show$1
@@ -336,6 +348,7 @@
                  U GHC_Internal_Text_Read_reads$1
                  U GHC_Internal_Unicode_isDigit$0
                  U GHC_Internal_Unicode_isDigit$1
+                 U GHC_Internal_Unicode_isHexDigit$0
                  U GHC_Internal_Unicode_isSpace$0
                  U GHC_parseModule$1
                  U GHC_runGhc$1
@@ -376,8 +389,32 @@
                  U Kind_Kind_kindStar$0
                  U Language_Haskell_Syntax_Basic_field_label$1
                  U Language_Haskell_Syntax_Module_Name_moduleNameString$1
+                 U longjmp
+                 U OrganIR_Parse_parseOrganIR$1
+                 U OrganIR_Types_conFields$1
+                 U OrganIR_Types_conName$1
+                 U OrganIR_Types_defExpr$1
+                 U OrganIR_Types_defName$1
+                 U OrganIR_Types_defSort$1
+                 U OrganIR_Types_defType$1
+                 U OrganIR_Types_defVisibility$1
+                 U OrganIR_Types_dtConstructors$1
+                 U OrganIR_Types_dtName$1
+                 U OrganIR_Types_dtTypeParams$1
+                 U OrganIR_Types_edName$1
+                 U OrganIR_Types_edOperations$1
+                 U OrganIR_Types_edTypeParams$1
+                 U OrganIR_Types_irModule$1
+                 U OrganIR_Types_modDataTypes$1
+                 U OrganIR_Types_modDefs$1
+                 U OrganIR_Types_modEffectDecls$1
+                 U OrganIR_Types_modName$1
+                 U OrganIR_Types_opName$1
+                 U OrganIR_Types_opType$1
+                 U OrganIR_Types_qnModule$1
                  U putc
                  U rewind
+                 U _setjmp
                  U stderr
                  U stdin
                  U stdout

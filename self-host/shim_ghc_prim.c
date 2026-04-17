@@ -212,8 +212,34 @@ int64_t ghc_base_listconcat_2(int64_t a, int64_t b) { return append_impl(a, b); 
 int64_t ghc_base_apply_2(int64_t f, int64_t x) __asm__("GHC_Internal_Base_zd$2");
 int64_t ghc_base_apply_2(int64_t f, int64_t x) { return call1(f, x); }
 
-/* --- >>= (Z-encoded: zgzgze) --- State monad bind */
+/* --- >>= (Z-encoded: zgzgze) --- monad bind */
 
+/* Marker value returned by zdfMonadEither$0 */
+#define KK_EITHER_MONAD_MARKER 0xEE17E8LL
+
+/* Either monad bind: if Left, short-circuit; if Right, unwrap and apply f.
+ * Different modules assign different tags to Left/Right:
+ *   Consumer: Left=45, Right=65
+ *   Parse:    Left=68, Right=90
+ * We check all known tag values. */
+static int is_either_left(int64_t v) {
+    if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
+    int64_t tag = kk_tag(v);
+    return tag == 45 || tag == 68;
+}
+static int is_either_right(int64_t v) {
+    if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
+    int64_t tag = kk_tag(v);
+    return tag == 65 || tag == 90;
+}
+
+static int64_t either_bind(int64_t m, int64_t f) {
+    if (is_either_left(m)) return m;
+    int64_t a = is_either_right(m) ? kk_field(m, 0) : m;
+    return call1(f, a);
+}
+
+/* State monad bind runner */
 static int64_t bind_runner(int64_t clos, int64_t s) {
     int64_t m = kk_field(clos, 1);
     int64_t f = kk_field(clos, 2);
@@ -231,7 +257,7 @@ int64_t ghc_base_bind_2(int64_t m, int64_t f) {
 
 int64_t ghc_base_bind_3(int64_t dict, int64_t m, int64_t f) __asm__("GHC_Internal_Base_zgzgze$3");
 int64_t ghc_base_bind_3(int64_t dict, int64_t m, int64_t f) {
-    (void)dict;
+    if (dict == KK_EITHER_MONAD_MARKER) return either_bind(m, f);
     return make_closure2(&bind_runner, m, f);
 }
 
@@ -338,8 +364,35 @@ int64_t ghc_base_pure_0(void) { return make_closure0(&pure_partial); }
 int64_t ghc_base_pure_1(int64_t a) __asm__("GHC_Internal_Base_pure$1");
 int64_t ghc_base_pure_1(int64_t a) { return make_closure1(&pure_runner, a); }
 
+/* Either monad: pure a = Right a
+ * We must pick a Right tag.  Since the result flows back into the same
+ * module that called >>=, and the caller's continuation already pattern-
+ * matches by tag, we need to use the CALLER's Right tag.  Without
+ * per-module dictionaries the best we can do is pick tag 90 (Parse) or 65
+ * (Consumer).  Because the Either monad `pure` is most heavily used inside
+ * Parse.hs (the do-notation desugaring), we use 90 as default.
+ * For Consumer, `pure` isn't used in the Either path — consumeProgram
+ * only calls parseOrganIR then case-matches the result.  So 90 is safe. */
+#define EITHER_RIGHT_TAG_DEFAULT 90
+#define EITHER_LEFT_TAG_DEFAULT  68
+
+static int64_t either_right(int64_t a) {
+    int64_t c = kk_alloc_con(EITHER_RIGHT_TAG_DEFAULT, 1);
+    kk_set_field(c, 0, a);
+    return c;
+}
+
+static int64_t either_left(int64_t err) {
+    int64_t c = kk_alloc_con(EITHER_LEFT_TAG_DEFAULT, 1);
+    kk_set_field(c, 0, err);
+    return c;
+}
+
 int64_t ghc_base_pure_2(int64_t d, int64_t a) __asm__("GHC_Internal_Base_pure$2");
-int64_t ghc_base_pure_2(int64_t d, int64_t a) { (void)d; return make_closure1(&pure_runner, a); }
+int64_t ghc_base_pure_2(int64_t d, int64_t a) {
+    if (d == KK_EITHER_MONAD_MARKER) return either_right(a);
+    return make_closure1(&pure_runner, a);
+}
 
 int64_t ghc_base_p1Monad_0(void) __asm__("GHC_Internal_Base_zdp1Monad$0");
 int64_t ghc_base_p1Monad_0(void) { return 0; }
@@ -420,6 +473,28 @@ int64_t ghc_real_fromRational_1(int64_t n) __asm__("GHC_Internal_Real_fromRation
 int64_t ghc_real_fromRational_1(int64_t n) { return n; }
 int64_t ghc_real_toInteger_1(int64_t n) __asm__("GHC_Internal_Real_toInteger$1");
 int64_t ghc_real_toInteger_1(int64_t n) { return n; }
+
+/* round :: Double -> Integer  (bit-pattern in, int64 out) */
+int64_t ghc_real_round_1(int64_t n) __asm__("GHC_Internal_Real_round$1");
+int64_t ghc_real_round_1(int64_t n) {
+    union { double d; int64_t i; } u;
+    u.i = n;
+    /* Use llround for proper rounding (round half to even not needed for JSON) */
+    double d = u.d;
+    return (int64_t)(d >= 0 ? d + 0.5 : d - 0.5);
+}
+
+/* fromIntegral$0: fromIntegral as a closure (identity for int-to-int) */
+static int64_t tram_fromIntegral(int64_t clos, int64_t arg) {
+    (void)clos;
+    return arg; /* identity for int-to-int */
+}
+int64_t ghc_real_fromIntegral_0(void) __asm__("GHC_Internal_Real_fromIntegral$0");
+int64_t ghc_real_fromIntegral_0(void) {
+    int64_t c = kk_alloc_con(0x434C4F53, 1);
+    kk_set_field(c, 0, (int64_t)(intptr_t)tram_fromIntegral);
+    return c;
+}
 
 int64_t ghc_enum_fromEnum_1(int64_t n) __asm__("GHC_Internal_Enum_fromEnum$1");
 int64_t ghc_enum_fromEnum_1(int64_t n) { return n; }

@@ -251,6 +251,18 @@ int64_t ghc_list_lookup_2(int64_t key, int64_t xs) {
     return kk_nothing();
 }
 
+/* lookup$0: lookup as a closure (2-arg function value) */
+static int64_t tram_lookup(int64_t clos, int64_t key, int64_t xs) {
+    (void)clos;
+    return ghc_list_lookup_2(key, xs);
+}
+int64_t ghc_list_lookup_0(void) __asm__("GHC_Internal_List_lookup$0");
+int64_t ghc_list_lookup_0(void) {
+    int64_t c = kk_alloc_con(0x434C4F53, 1);
+    kk_set_field(c, 0, (int64_t)(intptr_t)tram_lookup);
+    return c;
+}
+
 int64_t ghc_list_dropWhile_1(int64_t p) __asm__("GHC_Internal_List_dropWhile$1");
 int64_t ghc_list_dropWhile_1(int64_t p) { return make_closure1(&dropWhile_apply, p); }
 int64_t ghc_list_dropWhile_2(int64_t p, int64_t xs) __asm__("GHC_Internal_List_dropWhile$2");
@@ -470,9 +482,49 @@ int64_t ghc_traversable_mapM_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data
 int64_t ghc_traversable_mapM_2(int64_t f, int64_t xs) {
     return make_closure2(&mapM_state_runner, f, xs);
 }
+/* Either monad mapM: traverse list, short-circuit on Left */
+#define KK_EITHER_MONAD_MARKER 0xEE17E8LL
+/* Either Left tags from different modules */
+static int is_either_left(int64_t v) {
+    if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
+    int64_t tag = kk_tag(v);
+    return tag == 45 || tag == 68;  /* Consumer=45, Parse=68 */
+}
+static int is_either_right(int64_t v) {
+    if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
+    int64_t tag = kk_tag(v);
+    return tag == 65 || tag == 90;  /* Consumer=65, Parse=90 */
+}
+
+static int64_t either_mapM(int64_t f, int64_t xs) {
+    int64_t *arr = NULL; int64_t cap = 0, n = 0;
+    while (!kk_is_nil(xs)) {
+        int64_t x = kk_list_head(xs);
+        kk_retain(f);
+        int64_t r = call1(f, x);
+        /* Check for Left (error) */
+        if (is_either_left(r)) {
+            free(arr);
+            return r;  /* propagate Left */
+        }
+        /* Right: unwrap the value */
+        int64_t a = is_either_right(r) ? kk_field(r, 0) : r;
+        if (n >= cap) { cap = cap ? cap * 2 : 16; arr = realloc(arr, (size_t)cap * sizeof(int64_t)); }
+        arr[n++] = a;
+        xs = kk_list_tail(xs);
+    }
+    int64_t result_list = array_to_list(arr, n);
+    free(arr);
+    /* Wrap in Right (use tag 90 — Parse module default) */
+    int64_t right = kk_alloc_con(90, 1);
+    kk_set_field(right, 0, result_list);
+    return right;
+}
+
 int64_t ghc_traversable_mapM_3(int64_t d, int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Traversable_mapM$3");
 int64_t ghc_traversable_mapM_3(int64_t d, int64_t f, int64_t xs) {
-    (void)d; return ghc_traversable_mapM_2(f, xs);
+    if (d == KK_EITHER_MONAD_MARKER) return either_mapM(f, xs);
+    return ghc_traversable_mapM_2(f, xs);
 }
 
 /* ================================================================== */
@@ -549,12 +601,13 @@ int64_t ghc_maybe_mapMaybe_2(int64_t f, int64_t xs) {
 int64_t ghc_maybe_fEqMaybe_0(void) __asm__("GHC_Internal_Maybe_zdfEqMaybe$0");
 int64_t ghc_maybe_fEqMaybe_0(void) { return 0; }
 
+
 int64_t ghc_either_fApplicative_0(void) __asm__("GHC_Internal_Data_Either_zdfApplicativeEither$0");
-int64_t ghc_either_fApplicative_0(void) { return 0; }
+int64_t ghc_either_fApplicative_0(void) { return KK_EITHER_MONAD_MARKER; }
 int64_t ghc_either_fFunctor_0(void) __asm__("GHC_Internal_Data_Either_zdfFunctorEither$0");
-int64_t ghc_either_fFunctor_0(void) { return 0; }
+int64_t ghc_either_fFunctor_0(void) { return KK_EITHER_MONAD_MARKER; }
 int64_t ghc_either_fMonad_0(void) __asm__("GHC_Internal_Data_Either_zdfMonadEither$0");
-int64_t ghc_either_fMonad_0(void) { return 0; }
+int64_t ghc_either_fMonad_0(void) { return KK_EITHER_MONAD_MARKER; }
 
 /* <$> (Z-encoded: zlzdzg) = fmap for lists */
 int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor_zlzdzg$2");
@@ -651,9 +704,44 @@ int64_t ghc_read_reads_1(int64_t s) __asm__("GHC_Internal_Text_Read_reads$1");
 int64_t ghc_read_reads_1(int64_t s) {
     char *cstr = kk_str_dup_cstr(s);
     char *end;
-    int64_t val = strtol(cstr, &end, 10);
-    if (end == cstr) { free(cstr); return kk_nil(); }
-    int64_t rest = kk_str_alloc_leaf_owned(end, (int64_t)strlen(end));
+    /* Try integer parse first */
+    int64_t ival = strtol(cstr, &end, 10);
+    if (end != cstr && (*end == '\0' || *end == ' ' || *end == ')' || *end == ']')) {
+        /* Successful integer parse — check for float indicators */
+        char *fend;
+        double dval = strtod(cstr, &fend);
+        if (fend > end) {
+            /* Float consumed more chars (e.g. "3.14") — return as float.
+             * Haskell reads for Double returns (Double, String).
+             * We represent Double as its int64 bit pattern. */
+            int64_t rest_len = (int64_t)strlen(fend);
+            char *rest_buf = (char*)malloc((size_t)rest_len + 1);
+            memcpy(rest_buf, fend, (size_t)rest_len + 1);
+            int64_t rest = kk_str_alloc_leaf_owned(rest_buf, rest_len);
+            union { double d; int64_t i; } u;
+            u.d = dval;
+            free(cstr);
+            return kk_cons(kk_pair(u.i, rest), kk_nil());
+        }
+        int64_t rest_len = (int64_t)strlen(end);
+        char *rest_buf = (char*)malloc((size_t)rest_len + 1);
+        memcpy(rest_buf, end, (size_t)rest_len + 1);
+        int64_t rest = kk_str_alloc_leaf_owned(rest_buf, rest_len);
+        free(cstr);
+        return kk_cons(kk_pair(ival, rest), kk_nil());
+    }
+    /* Try float parse (handles "3.14e2" etc.) */
+    double dval = strtod(cstr, &end);
+    if (end != cstr) {
+        int64_t rest_len = (int64_t)strlen(end);
+        char *rest_buf = (char*)malloc((size_t)rest_len + 1);
+        memcpy(rest_buf, end, (size_t)rest_len + 1);
+        int64_t rest = kk_str_alloc_leaf_owned(rest_buf, rest_len);
+        union { double d; int64_t i; } u;
+        u.d = dval;
+        free(cstr);
+        return kk_cons(kk_pair(u.i, rest), kk_nil());
+    }
     free(cstr);
-    return kk_cons(kk_pair(val, rest), kk_nil());
+    return kk_nil();
 }

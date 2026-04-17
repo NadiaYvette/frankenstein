@@ -124,3 +124,35 @@ ALIAS1(Frankenstein_RustBridge_MirParse_parseStmt)
 ALIAS1(Frankenstein_RustBridge_MirParse_parseTerminator)
 ALIAS1(Frankenstein_RustBridge_MirParse_switchBlock)
 ALIAS1(Frankenstein_RustBridge_MirParse_switchVal)
+
+/* =================================================================== */
+/*  OrganIR/Types.hs selectors (cross-module: Consumer → Types)        */
+/* =================================================================== */
+
+ALIAS1(OrganIR_Types_conFields)
+ALIAS1(OrganIR_Types_conName)
+ALIAS1(OrganIR_Types_defExpr)
+ALIAS1(OrganIR_Types_defName)
+ALIAS1(OrganIR_Types_defSort)
+ALIAS1(OrganIR_Types_defType)
+ALIAS1(OrganIR_Types_defVisibility)
+ALIAS1(OrganIR_Types_dtConstructors)
+ALIAS1(OrganIR_Types_dtName)
+ALIAS1(OrganIR_Types_dtTypeParams)
+ALIAS1(OrganIR_Types_edName)
+ALIAS1(OrganIR_Types_edOperations)
+ALIAS1(OrganIR_Types_edTypeParams)
+ALIAS1(OrganIR_Types_irModule)
+ALIAS1(OrganIR_Types_modDataTypes)
+ALIAS1(OrganIR_Types_modDefs)
+ALIAS1(OrganIR_Types_modEffectDecls)
+ALIAS1(OrganIR_Types_modName)
+ALIAS1(OrganIR_Types_opName)
+ALIAS1(OrganIR_Types_opType)
+ALIAS1(OrganIR_Types_qnModule)
+
+/* =================================================================== */
+/*  OrganIR/Parse.hs (cross-module: Consumer → Parse)                  */
+/* =================================================================== */
+
+ALIAS1(OrganIR_Parse_parseOrganIR)

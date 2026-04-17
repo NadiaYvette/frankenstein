@@ -936,3 +936,119 @@ int64_t bs_unpack_1(int64_t b) {
     }
     return result;
 }
+
+/* --- head / tail --- */
+
+static int64_t text_head(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return 0; }
+    int64_t bytes_used;
+    int64_t cp = utf8_decode(buf, &bytes_used);
+    free(buf);
+    return cp;
+}
+
+static int64_t text_tail(int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf || len == 0) { free(buf); return kk_string_empty(); }
+    int64_t bytes_used;
+    utf8_decode(buf, &bytes_used);
+    int64_t r = text_from_buf(buf + bytes_used, len - bytes_used);
+    free(buf);
+    return r;
+}
+
+int64_t text_head_1(int64_t s) __asm__("Data_Text_head$1");
+int64_t text_head_1(int64_t s) { return text_head(s); }
+
+int64_t text_tail_1(int64_t s) __asm__("Data_Text_tail$1");
+int64_t text_tail_1(int64_t s) { return text_tail(s); }
+
+/* --- break (predicate version) --- */
+
+/* T.break pred text: split at first char where pred is true.
+ * Returns (before, after) as a Haskell tuple. */
+static int64_t text_break_pred(int64_t pred, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_pair(kk_string_empty(), kk_string_empty());
+    int64_t off = 0;
+    while (off < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + off, &bytes_used);
+        int64_t r = call_closure_1(pred, cp);
+        if (r) {
+            int64_t before = text_from_buf(buf, off);
+            int64_t after  = text_from_buf(buf + off, len - off);
+            free(buf);
+            return kk_pair(before, after);
+        }
+        off += bytes_used;
+    }
+    int64_t whole = text_from_buf(buf, len);
+    free(buf);
+    return kk_pair(whole, kk_string_empty());
+}
+
+int64_t text_break_2(int64_t pred, int64_t s) __asm__("Data_Text_break$2");
+int64_t text_break_2(int64_t pred, int64_t s) { return text_break_pred(pred, s); }
+
+/* --- splitAt --- */
+
+static int64_t text_split_at(int64_t n, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return kk_pair(kk_string_empty(), kk_string_empty());
+    int64_t byte_off = utf8_advance(buf, len, n);
+    int64_t before = text_from_buf(buf, byte_off);
+    int64_t after  = text_from_buf(buf + byte_off, len - byte_off);
+    free(buf);
+    return kk_pair(before, after);
+}
+
+int64_t text_splitAt_2(int64_t n, int64_t s) __asm__("Data_Text_splitAt$2");
+int64_t text_splitAt_2(int64_t n, int64_t s) { return text_split_at(n, s); }
+
+/* --- foldl' --- */
+
+/* T.foldl' f z text: strict left fold over codepoints */
+static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
+    int64_t len;
+    char* buf = text_flatten(s, &len);
+    if (!buf) return z;
+    int64_t acc = z;
+    int64_t off = 0;
+    while (off < len) {
+        int64_t bytes_used;
+        int64_t cp = utf8_decode(buf + off, &bytes_used);
+        /* f is a 2-arg closure: f(acc, char) -> new_acc */
+        int64_t fn_ptr = kk_field(kk_thunk_force(f), 0);
+        typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
+        acc = ((fn2_t)fn_ptr)(f, acc, cp);
+        off += bytes_used;
+    }
+    free(buf);
+    return acc;
+}
+
+/* Data_Text_foldl_$2(f, z) is a partial application: T.foldl' f z
+ * Returns a closure that, when called with text, does the fold.
+ * From the MLIR: called as foldl'(closure_wrapping_lambda, 0) and the
+ * result is returned as a Text->a closure. */
+static int64_t foldl_trampoline(int64_t clos, int64_t text_arg) {
+    int64_t f = kk_field(clos, 1);
+    int64_t z = kk_field(clos, 2);
+    return text_foldl_strict(f, z, text_arg);
+}
+
+int64_t text_foldl__2(int64_t f, int64_t z) __asm__("Data_Text_foldl_$2");
+int64_t text_foldl__2(int64_t f, int64_t z) {
+    /* Return a closure: when called with text, executes foldl' f z text */
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 3);
+    kk_set_field(c, 0, (int64_t)(intptr_t)foldl_trampoline);
+    kk_set_field(c, 1, f);
+    kk_set_field(c, 2, z);
+    return c;
+}

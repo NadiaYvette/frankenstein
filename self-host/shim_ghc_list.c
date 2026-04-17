@@ -377,6 +377,26 @@ int64_t ghc_foldable_elem_0(void) __asm__("GHC_Internal_Data_Foldable_elem$0");
 int64_t ghc_foldable_elem_0(void) { return make_closure0(&elem_1_code); }
 int64_t ghc_foldable_elem_2(int64_t x, int64_t xs) __asm__("GHC_Internal_Data_Foldable_elem$2");
 int64_t ghc_foldable_elem_2(int64_t x, int64_t xs) {
+    /* xs may be a rope/Text string (e.g. from kk_string_from_literal used for
+     * a [Char] literal with OverloadedStrings).  In that case, iterate UTF-8
+     * codepoints and compare against x (a boxed Char, field 0 = codepoint). */
+    if (kk_is_string(xs)) {
+        char* buf = kk_str_dup_cstr(xs);
+        int64_t len = kk_str_len(xs);
+        /* Extract the codepoint from x (boxed Char, field 0 = codepoint) */
+        int64_t cp_x = kk_is_heap_ptr(x) ? kk_field(x, 0) : x;
+        for (int64_t i = 0; i < len; ) {
+            unsigned char b = (unsigned char)buf[i];
+            int64_t cp;
+            if (b < 0x80)      { cp = b; i += 1; }
+            else if (b < 0xE0) { cp = ((b & 0x1F) << 6) | (buf[i+1] & 0x3F); i += 2; }
+            else if (b < 0xF0) { cp = ((b & 0x0F) << 12) | ((buf[i+1] & 0x3F) << 6) | (buf[i+2] & 0x3F); i += 3; }
+            else               { cp = ((b & 0x07) << 18) | ((buf[i+1] & 0x3F) << 12) | ((buf[i+2] & 0x3F) << 6) | (buf[i+3] & 0x3F); i += 4; }
+            if (cp == cp_x) { free(buf); return 1; }
+        }
+        free(buf);
+        return 0;
+    }
     while (!kk_is_nil(xs)) {
         int64_t h = kk_list_head(xs);
         if (kk_is_string(x) && kk_is_string(h)) { if (kk_str_eq(x, h)) return 1; }
@@ -642,17 +662,58 @@ int64_t ghc_either_fFunctor_0(void) { return KK_EITHER_MONAD_MARKER; }
 int64_t ghc_either_fMonad_0(void) __asm__("GHC_Internal_Data_Either_zdfMonadEither$0");
 int64_t ghc_either_fMonad_0(void) { return KK_EITHER_MONAD_MARKER; }
 
-/* <$> (Z-encoded: zlzdzg) = fmap for lists */
-int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor_zlzdzg$2");
-int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) {
+/* <$> (Z-encoded: zlzdzg) = fmap */
+/* List fmap */
+static int64_t fmap_list(int64_t f, int64_t xs) {
     int64_t *arr; int64_t n = list_to_array(xs, &arr);
     for (int64_t i = 0; i < n; i++) arr[i] = call1(f, arr[i]);
     int64_t result = array_to_list(arr, n);
     free(arr);
     return result;
 }
+/* Either fmap: fmap f (Right x) = Right (f x); fmap f (Left x) = Left x */
+#define KK_LEFT_TAG  50386
+#define KK_RIGHT_TAG 11965
+static int64_t fmap_either(int64_t f, int64_t xs) {
+    if (!kk_is_heap_ptr(xs)) return xs;
+    int64_t tag = kk_tag(xs);
+    if (tag == KK_RIGHT_TAG) {
+        int64_t val = kk_field(xs, 0);
+        int64_t mapped = call1(f, val);
+        int64_t r = kk_alloc_con(KK_RIGHT_TAG, 1);
+        kk_set_field(r, 0, mapped);
+        return r;
+    }
+    return xs;  /* Left unchanged */
+}
+/* Maybe fmap: fmap f (Just x) = Just (f x); fmap f Nothing = Nothing */
+#define KK_NOTHING_TAG 53440
+#define KK_JUST_TAG    61886
+static int64_t fmap_maybe(int64_t f, int64_t xs) {
+    if (!kk_is_heap_ptr(xs)) return xs;
+    int64_t tag = kk_tag(xs);
+    if (tag == KK_JUST_TAG) {
+        int64_t val = kk_field(xs, 0);
+        int64_t mapped = call1(f, val);
+        int64_t r = kk_alloc_con(KK_JUST_TAG, 1);
+        kk_set_field(r, 0, mapped);
+        return r;
+    }
+    return xs;  /* Nothing unchanged */
+}
+int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor_zlzdzg$2");
+int64_t ghc_functor_fmap_2(int64_t f, int64_t xs) { return fmap_list(f, xs); }
 int64_t ghc_functor_fmap_3(int64_t d, int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Functor_zlzdzg$3");
-int64_t ghc_functor_fmap_3(int64_t d, int64_t f, int64_t xs) { (void)d; return ghc_functor_fmap_2(f, xs); }
+int64_t ghc_functor_fmap_3(int64_t d, int64_t f, int64_t xs) {
+    if (d == KK_EITHER_MONAD_MARKER) return fmap_either(f, xs);
+    /* Heuristic: if xs looks like an Either or Maybe, dispatch accordingly */
+    if (kk_is_heap_ptr(xs)) {
+        int64_t tag = kk_tag(xs);
+        if (tag == KK_LEFT_TAG || tag == KK_RIGHT_TAG) return fmap_either(f, xs);
+        if (tag == KK_NOTHING_TAG || tag == KK_JUST_TAG) return fmap_maybe(f, xs);
+    }
+    return fmap_list(f, xs);
+}
 
 int64_t ghc_tuple_fst_0(void) __asm__("GHC_Internal_Data_Tuple_fst$0");
 int64_t ghc_tuple_fst_0(void) { return make_closure0(&fst_code); }

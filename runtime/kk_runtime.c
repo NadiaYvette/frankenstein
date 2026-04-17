@@ -57,6 +57,8 @@ void kk_retain(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
     /* Strings have a different layout (rc at offset 0, not -8) */
     if (kk_is_string(ptr)) { kk_str_retain(ptr); return; }
+    /* Validate arena ownership before touching refcount — same rationale as kk_drop */
+    if (!kk_arena_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
     /* Increment only the count bits, preserve color */
     int64_t count = (*rc & KK_RC_MASK) + 1;
@@ -74,24 +76,37 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
 #define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" */
 
 void kk_drop(int64_t ptr) {
-    /* BOOTSTRAPPING MODE: kk_drop is a no-op.
+    if (!kk_is_heap_ptr(ptr)) return;
+    /* Strings have a different refcount layout */
+    if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
+    /* Validate that the pointer is actually arena-owned.  Compiled code
+     * may pass code pointers, tagged values, or stale integers that
+     * happen to look heap-like to kk_is_heap_ptr.  Reading *(ptr-8) for
+     * such values would segfault.  kk_arena_owns walks the slab list
+     * but the list is short (one node per ~1 MiB of allocations). */
+    if (!kk_arena_owns((const void*)(intptr_t)ptr)) return;
+    int64_t* rc = kk_rc_ptr(ptr);
+    int64_t count = *rc & KK_RC_MASK;
+    if (count == 0) return;  /* already freed or corrupt — don't double-free */
+    if (count > 1) {
+        /* Shared — just decrement */
+        *rc = (*rc & KK_COLOR_MASK) | (count - 1);
+        return;
+    }
+    /* Sole owner (rc == 1) — mark as dead but don't free.
      *
-     * GHC compiles lazy let-bindings as selector thunks that share a cached
-     * pair.  Perceus inserts drops in each selector for the field it doesn't
-     * use.  When two selectors force the same cached pair, the first selector's
-     * drop frees a field the second selector still needs → use-after-free.
-     * This pattern is pervasive (464 thunk forces in Emitter.o alone).
+     * Freeing objects here would be correct in a purely linear world, but
+     * GHC's lazy evaluation introduces sharing that Perceus doesn't track:
+     * thunk caching, selector thunks, string interning, etc.  Actual
+     * deallocation causes use-after-free because other references to the
+     * same object (through shared thunks or retained closures) survive
+     * past the drop.
      *
-     * For the self-hosted binary, correctness matters more than memory
-     * management.  Disabling kk_drop eliminates ALL use-after-free and
-     * double-free bugs.  The binary leaks memory but produces correct output
-     * and exits immediately afterward — acceptable for bootstrapping.
-     *
-     * A proper fix requires either:
-     * (a) Making Perceus aware of shared lazy thunks (don't insert drops in
-     *     selectors when the thunk is shared), or
-     * (b) Using a tracing GC instead of refcounting for lazy evaluation. */
-    (void)ptr;
+     * Instead, we just mark rc=0 (dead) so future drops are no-ops.
+     * The arena allocator reclaims all memory at exit.  This is correct
+     * and avoids leaking refcounts (shared objects properly decrement)
+     * while never freeing objects that might still be reachable. */
+    *rc = 0;
 }
 
 void kk_release(int64_t ptr) {
@@ -442,15 +457,13 @@ void kk_str_retain(int64_t s_i) {
 void kk_str_drop(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return;
-    if (--s->rc > 0) return;
-    kk_unregister_string(s_i);
-    if (s->kind == KK_STR_LEAF) {
-        if (s->owns_bytes) free((void*)s->u.bytes);
-    } else {
-        kk_str_drop((int64_t)s->u.cat.l);
-        kk_str_drop((int64_t)s->u.cat.r);
-    }
-    free(s);
+    if (s->rc > 0) s->rc--;
+    /* Don't free strings even at rc=0.  Lazy thunk sharing means the same
+     * string can be referenced from multiple contexts (cached thunk results,
+     * closure captures) that Perceus doesn't track.  Freeing here causes
+     * use-after-free in string-heavy code like the MLIR emitter.
+     * Strings are malloc'd (not arena) so they leak — acceptable for
+     * bootstrapping where correctness trumps memory management. */
 }
 
 /* Public wrappers for shim use */
@@ -941,7 +954,7 @@ int64_t kk_thunk_create(int64_t fn_ptr) {
     return thunk;
 }
 
-/* Force a thunk: if unevaluated, call the function and cache the result */
+/* Force a thunk: if unevaluated, call the function and cache the result. */
 int64_t kk_thunk_force(int64_t thunk) {
     if (!kk_is_heap_ptr(thunk)) return thunk;  /* not a thunk, return as-is */
     int64_t tag = kk_tag(thunk);

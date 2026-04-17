@@ -1106,7 +1106,7 @@ int64_t kk_is_nil(int64_t list) {
 }
 
 int64_t kk_pair(int64_t a, int64_t b) {
-    int64_t p = kk_alloc_con(0, 2);
+    int64_t p = kk_alloc_con(KK_PAIR_TAG, 2);
     kk_set_field(p, 0, a);
     kk_set_field(p, 1, b);
     return p;

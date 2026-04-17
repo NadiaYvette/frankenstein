@@ -219,9 +219,7 @@ static int64_t mk_lit_int(int64_t n) {
 /* Build ELam([(name, type)], body) — a single-arg lambda. */
 static int64_t mk_lam1(const char *param, int64_t unique, int64_t body) {
     int64_t name = mk_name(param, unique);
-    int64_t pair = kk_alloc_con(0, 2);
-    kk_set_field(pair, 0, name);
-    kk_set_field(pair, 1, ph());
+    int64_t pair = kk_pair(name, ph());
     int64_t params = cons(pair, nil());
     int64_t lam = kk_alloc_con(TAG_ELam, 2);
     kk_set_field(lam, 0, params);
@@ -776,12 +774,8 @@ int main(void) {
         printf("  ... test: simple add function\n"); fflush(stdout);
         {
             /* add = \(x,y) -> x + y */
-            int64_t pp_x = kk_alloc_con(0, 2);
-            kk_set_field(pp_x, 0, mk_name("x", 1));
-            kk_set_field(pp_x, 1, ph());
-            int64_t pp_y = kk_alloc_con(0, 2);
-            kk_set_field(pp_y, 0, mk_name("y", 2));
-            kk_set_field(pp_y, 1, ph());
+            int64_t pp_x = kk_pair(mk_name("x", 1), ph());
+            int64_t pp_y = kk_pair(mk_name("y", 2), ph());
             int64_t add_body_app = kk_alloc_con(TAG_EApp, 2);
             kk_set_field(add_body_app, 0, mk_evar("+", 0));
             kk_set_field(add_body_app, 1, cons(mk_evar("x", 1), cons(mk_evar("y", 2), nil())));
@@ -857,9 +851,7 @@ int main(void) {
         kk_set_field(case_expr, 1, cons(branch_base, cons(branch_rec, nil())));
 
         /* \n -> case n of ... */
-        int64_t param_pair = kk_alloc_con(0, 2);
-        kk_set_field(param_pair, 0, mk_name("n", 1));
-        kk_set_field(param_pair, 1, ph());
+        int64_t param_pair = kk_pair(mk_name("n", 1), ph());
         int64_t fac_body = kk_alloc_con(TAG_ELam, 2);
         kk_set_field(fac_body, 0, cons(param_pair, nil()));
         kk_set_field(fac_body, 1, case_expr);

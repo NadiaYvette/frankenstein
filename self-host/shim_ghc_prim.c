@@ -546,7 +546,7 @@ int64_t ghc_patError_1(int64_t msg) {
 static int64_t try_code(int64_t clos, int64_t action) {
     (void)clos;
     int64_t result = call0(action);
-    int64_t right = kk_alloc_con(1, 1);
+    int64_t right = kk_alloc_con(EITHER_RIGHT_TAG_DEFAULT, 1);
     kk_set_field(right, 0, result);
     return right;
 }

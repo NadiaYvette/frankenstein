@@ -723,19 +723,30 @@ typedef struct {
 static kk_handler_frame_t kk_handler_stack[KK_MAX_HANDLER_FRAMES];
 static int64_t kk_handler_sp = 0;
 
-/* Rescue a boxed value from the arena rollback region.
+/* Deep-rescue a boxed value from the arena rollback region.
  *
  * If `val` is a heap pointer inside the region that kk_arena_rollback(cp)
  * is about to free, memcpy the entire cell (refcount + tag + fields) into
- * a fresh malloc allocation and return the new pointer-to-tag.  Otherwise
- * return `val` unchanged.
+ * a fresh malloc allocation and return the new pointer-to-tag.  Then
+ * recursively rescue any fields that also point into the rollback region.
  *
- * This is a shallow rescue: fields of the cell that themselves point into
- * the rollback region are NOT recursively rescued. For abort handlers that
- * return scalars (the common case), this is sufficient. Deep rescue can
- * be added later if needed. */
+ * Strings (malloc'd, not arena-allocated) are never in the rollback region
+ * and are skipped.  Arena-allocated cells can't form cycles (fields are set
+ * once, always pointing at older allocations), so recursion terminates.
+ *
+ * depth_limit prevents runaway recursion in pathological cases. */
+#define KK_RESCUE_DEPTH_LIMIT 256
+
+static int64_t kk_rescue_from_arena_depth(int64_t val, kk_arena_checkpoint_t cp, int depth);
+
 static int64_t kk_rescue_from_arena(int64_t val, kk_arena_checkpoint_t cp) {
+    return kk_rescue_from_arena_depth(val, cp, 0);
+}
+
+static int64_t kk_rescue_from_arena_depth(int64_t val, kk_arena_checkpoint_t cp, int depth) {
     if (!kk_is_heap_ptr(val)) return val;
+    if (kk_is_string(val)) return val;  /* strings are malloc'd, not arena */
+    if (depth >= KK_RESCUE_DEPTH_LIMIT) return val;  /* safety limit */
     /* The Frankenstein pointer points at the tag; refcount is at (ptr - 8). */
     void* block = (void*)(val - 8);
     if (!kk_arena_in_rollback_region(block, cp)) return val;
@@ -747,6 +758,11 @@ static int64_t kk_rescue_from_arena(int64_t val, kk_arena_checkpoint_t cp) {
     memcpy(copy, block, cell_bytes);
     int64_t new_ptr = (int64_t)&copy[1];  /* pointer to tag */
     kk_register_nfields(new_ptr, nf);
+    /* Recursively rescue fields that point into the rollback region. */
+    int64_t* fields = (int64_t*)(new_ptr + 8);
+    for (int64_t i = 0; i < nf; i++) {
+        fields[i] = kk_rescue_from_arena_depth(fields[i], cp, depth + 1);
+    }
     return new_ptr;
 }
 
@@ -761,8 +777,8 @@ static int64_t kk_rescue_from_arena(int64_t val, kk_arena_checkpoint_t cp) {
  * Arena integration: on entry, an arena checkpoint is saved. On abort,
  * the arena is rolled back to the checkpoint, freeing all constructor
  * cells allocated during the body. If the abort result is itself a heap
- * value in the rollback region, it is rescued (shallow copy to malloc)
- * before rollback.
+ * value in the rollback region, it is deep-rescued (recursively copied
+ * to malloc, including transitive field references) before rollback.
  *
  * body_closure: a Frankenstein closure (boxed heap value).
  *   field 0 = function pointer (int64_t (*)(int64_t closure))

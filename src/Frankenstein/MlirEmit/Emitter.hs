@@ -1907,16 +1907,27 @@ emitConChain tagName scrutName structTy [(qn, pats, body)] (Just defaultExpr) = 
   (fieldOps, _) <- emitPatternBindings scrutName structTy pats
   (thenOps, thenResult) <- emitExpr body
   modify (\s -> s { esAliases = savedA })
+  -- Dead-branch safety: pattern-bound variables from the then-branch may
+  -- be referenced in the default expression (dead code from single-ctor
+  -- types that classifyBranches didn't optimize away). Pre-register them
+  -- as zero aliases so the else branch doesn't emit broken extern calls.
+  deadZero <- freshName "v"
+  let patVarNames = [ nameToSsa nm | PatVar nm _ <- pats ]
+      deadAliases = foldr (\k m -> Map.insert k deadZero m) savedA patVarNames
+      deadZeroOp  = "%" <> deadZero <> " = arith.constant 0 : i64"
+  modify (\s -> s { esAliases = deadAliases })
   (elseOps, elseResult) <- emitExpr defaultExpr
   modify (\s -> s { esAliases = savedA })
   resultName <- freshName "v"
+  let elseOpsWithZero = if null patVarNames then elseOps
+                        else deadZeroOp : elseOps
   let ifOps =
         [ "%" <> resultName <> " = scf.if %" <> cmpName <> " -> i64 {" ] ++
         map ("  " <>) (fieldOps ++ thenOps) ++
         [ "  scf.yield %" <> thenResult <> " : i64"
         , "} else {"
         ] ++
-        map ("  " <>) elseOps ++
+        map ("  " <>) elseOpsWithZero ++
         [ "  scf.yield %" <> elseResult <> " : i64"
         , "}"
         ]

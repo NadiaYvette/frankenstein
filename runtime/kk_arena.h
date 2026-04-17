@@ -46,4 +46,27 @@ int64_t kk_arena_bytes_allocated(void);
 /* Total bytes currently held in slabs (capacity, not utilisation). */
 int64_t kk_arena_bytes_reserved(void);
 
+/* ---- Checkpoint / rollback (for abort effect cleanup) ----
+ *
+ * A checkpoint captures the arena's current position (slab + offset).
+ * kk_arena_rollback frees everything allocated after the checkpoint,
+ * reclaiming memory that would otherwise leak when longjmp skips
+ * Perceus drop operations in an abandoned continuation.
+ *
+ * Usage:
+ *   kk_arena_checkpoint_t cp = kk_arena_checkpoint();
+ *   ... allocate stuff ...
+ *   kk_arena_rollback(cp);  // everything since cp is freed
+ */
+typedef struct {
+    void*  slab;     /* opaque: the slab at checkpoint time */
+    size_t used;     /* bump offset within that slab */
+} kk_arena_checkpoint_t;
+
+kk_arena_checkpoint_t kk_arena_checkpoint(void);
+void kk_arena_rollback(kk_arena_checkpoint_t cp);
+
+/* True iff `ptr` falls in the region that would be freed by rollback to `cp`. */
+int kk_arena_in_rollback_region(const void* ptr, kk_arena_checkpoint_t cp);
+
 #endif /* KK_ARENA_H */

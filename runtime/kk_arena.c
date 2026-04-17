@@ -116,3 +116,48 @@ void kk_arena_reset(void) {
 
 int64_t kk_arena_bytes_allocated(void) { return g_total_alloc_bytes; }
 int64_t kk_arena_bytes_reserved(void)  { return g_total_slab_bytes; }
+
+/* ---- Checkpoint / rollback ---- */
+
+kk_arena_checkpoint_t kk_arena_checkpoint(void) {
+    kk_arena_checkpoint_t cp;
+    cp.slab = (void*)g_head;
+    cp.used = g_head ? g_head->used : 0;
+    return cp;
+}
+
+void kk_arena_rollback(kk_arena_checkpoint_t cp) {
+    kk_slab* target = (kk_slab*)cp.slab;
+    /* Free all slabs newer than the checkpoint slab. */
+    while (g_head != NULL && g_head != target) {
+        kk_slab* next = g_head->next;
+        g_total_slab_bytes -= (int64_t)g_head->cap;
+        g_total_alloc_bytes -= (int64_t)g_head->used;
+        free(g_head);
+        g_head = next;
+    }
+    /* Reset the checkpoint slab's bump pointer. */
+    if (g_head != NULL && g_head == target) {
+        g_total_alloc_bytes -= (int64_t)(g_head->used - cp.used);
+        g_head->used = cp.used;
+    }
+}
+
+int kk_arena_in_rollback_region(const void* ptr, kk_arena_checkpoint_t cp) {
+    if (ptr == NULL) return 0;
+    uintptr_t u = (uintptr_t)ptr;
+    kk_slab* target = (kk_slab*)cp.slab;
+    /* Check slabs newer than checkpoint (all of these will be freed). */
+    for (kk_slab* s = g_head; s != NULL && s != target; s = s->next) {
+        uintptr_t lo = (uintptr_t)s->data;
+        uintptr_t hi = lo + s->used;
+        if (u >= lo && u < hi) return 1;
+    }
+    /* Check the checkpoint slab itself: bytes after cp.used are in the region. */
+    if (target != NULL) {
+        uintptr_t lo = (uintptr_t)target->data + cp.used;
+        uintptr_t hi = (uintptr_t)target->data + target->used;
+        if (u >= lo && u < hi) return 1;
+    }
+    return 0;
+}

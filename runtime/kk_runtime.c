@@ -712,10 +712,38 @@ typedef struct {
     jmp_buf env;
     int64_t tag;
     int64_t result;
+    kk_arena_checkpoint_t arena_cp;  /* arena state at handler entry */
 } kk_handler_frame_t;
 
 static kk_handler_frame_t kk_handler_stack[KK_MAX_HANDLER_FRAMES];
 static int64_t kk_handler_sp = 0;
+
+/* Rescue a boxed value from the arena rollback region.
+ *
+ * If `val` is a heap pointer inside the region that kk_arena_rollback(cp)
+ * is about to free, memcpy the entire cell (refcount + tag + fields) into
+ * a fresh malloc allocation and return the new pointer-to-tag.  Otherwise
+ * return `val` unchanged.
+ *
+ * This is a shallow rescue: fields of the cell that themselves point into
+ * the rollback region are NOT recursively rescued. For abort handlers that
+ * return scalars (the common case), this is sufficient. Deep rescue can
+ * be added later if needed. */
+static int64_t kk_rescue_from_arena(int64_t val, kk_arena_checkpoint_t cp) {
+    if (!kk_is_heap_ptr(val)) return val;
+    /* The Frankenstein pointer points at the tag; refcount is at (ptr - 8). */
+    void* block = (void*)(val - 8);
+    if (!kk_arena_in_rollback_region(block, cp)) return val;
+    /* Compute cell size: 2 header words + nfields payload words. */
+    int64_t nf = kk_nfields(val);
+    size_t cell_bytes = (size_t)(2 + nf) * 8;
+    int64_t* copy = (int64_t*)malloc(cell_bytes);
+    if (!copy) return val;  /* OOM fallback: leak rather than crash */
+    memcpy(copy, block, cell_bytes);
+    int64_t new_ptr = (int64_t)&copy[1];  /* pointer to tag */
+    kk_register_nfields(new_ptr, nf);
+    return new_ptr;
+}
 
 /* Execute a body under a handler frame (callback-based setjmp pattern).
  *
@@ -724,6 +752,12 @@ static int64_t kk_handler_sp = 0;
  * setjmp, then the body closure. If the body (or anything it calls)
  * invokes kk_handler_abort with a matching tag, longjmp returns here
  * and we return the abort value instead.
+ *
+ * Arena integration: on entry, an arena checkpoint is saved. On abort,
+ * the arena is rolled back to the checkpoint, freeing all constructor
+ * cells allocated during the body. If the abort result is itself a heap
+ * value in the rollback region, it is rescued (shallow copy to malloc)
+ * before rollback.
  *
  * body_closure: a Frankenstein closure (boxed heap value).
  *   field 0 = function pointer (int64_t (*)(int64_t closure))
@@ -742,6 +776,7 @@ int64_t kk_handler_exec(int64_t tag, int64_t body_closure) {
     kk_handler_frame_t *frame = &kk_handler_stack[kk_handler_sp++];
     frame->tag = tag;
     frame->result = 0;
+    frame->arena_cp = kk_arena_checkpoint();
     /* Extract function pointer from closure field 0 */
     int64_t fptr = kk_field(body_closure, 0);
     if (setjmp(frame->env) == 0) {
@@ -750,8 +785,11 @@ int64_t kk_handler_exec(int64_t tag, int64_t body_closure) {
         kk_handler_sp--;  /* pop handler frame */
         return result;
     } else {
-        /* Abort path: longjmp landed here */
-        return frame->result;
+        /* Abort path: longjmp landed here.
+         * Rescue the result value from the arena before rollback. */
+        int64_t result = kk_rescue_from_arena(frame->result, frame->arena_cp);
+        kk_arena_rollback(frame->arena_cp);
+        return result;
     }
 }
 

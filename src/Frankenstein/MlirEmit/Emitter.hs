@@ -67,7 +67,6 @@ data EmitState = EmitState
   , esLiftedFns     :: ![Text]  -- accumulated lifted lambda functions
   , esTypeEnv       :: !(Map Text Text)  -- SSA name -> MLIR type
   , esStringLits    :: ![(Text, Text)]   -- global name -> string content
-  , esEvidenceScope :: !(Map Text Text)  -- effect name -> evidence SSA variable name
   , esAliases       :: !(Map Text Text)  -- name alias: let x = y → x maps to y
   , esEffectDialect :: !Bool              -- emit frankenstein.* dialect ops for effects
   , esTopFns        :: !(Set Text)        -- MLIR names of top-level func.func defs
@@ -279,7 +278,7 @@ emitProgramText prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
+      initState = EmitState 0 [] Map.empty [] Map.empty False
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
@@ -504,7 +503,7 @@ emitProgramWithEffects prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty True
+      initState = EmitState 0 [] Map.empty [] Map.empty True
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
@@ -604,7 +603,7 @@ emitProgramWasm prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      initState = EmitState 0 [] Map.empty [] Map.empty Map.empty False
+      initState = EmitState 0 [] Map.empty [] Map.empty False
                          qualifiedTopNames
                          (buildTopFnArity modPrefix renamedDefs)
                          Set.empty
@@ -1689,9 +1688,9 @@ emitExpr (EFunRef qn) = do
         , "%" <> fptrName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
         ], fptrName)
 
--- Effect operations: after the evidence pass, EPerform/EHandle should be
--- desugared to plain ELet/EApp. These cases handle any residual nodes
--- (e.g. if the evidence pass didn't fully desugar).
+-- Effect operations: the evidence pass desugars EPerform/EHandle to plain
+-- ELet/EApp before the emitter sees them. In dialect mode (--emit-effect-mlir)
+-- we emit frankenstein.* ops; in lowered mode, residual nodes are a bug.
 
 emitExpr (EPerform qn args) = do
   effectMode <- gets esEffectDialect
@@ -1707,31 +1706,9 @@ emitExpr (EPerform qn args) = do
       let dialectOp = "%" <> resultName <> " = "
             <> renderOp (FrankPerform effName opName' argNames)
       pure (allOps ++ [dialectOp], resultName)
-    else do
-      -- Lowered mode: evidence-passing indirect calls
-      let effName = qnameModule qn
-      evScope <- gets esEvidenceScope
-      argResults <- mapM emitExpr args
-      let allOps = concatMap fst argResults
-          argNames = map snd argResults
-      case Map.lookup effName evScope of
-        Just evVarName -> do
-          fptrName <- freshName "v"
-          resultName <- freshName "v"
-          let argList = T.intercalate ", " ["%" <> n | n <- argNames]
-              argTys = T.intercalate ", " (replicate (length argNames) "i64")
-              ops = [ "// perform " <> nameText (qnameName qn) <> " via evidence"
-                    , "%" <> fptrName <> " = llvm.inttoptr %" <> evVarName <> " : i64 to !llvm.ptr"
-                    , "%" <> resultName <> " = llvm.call %" <> fptrName
-                        <> "(" <> argList <> ") : !llvm.ptr, (" <> argTys <> ") -> i64"
-                    ]
-          pure (allOps ++ ops, resultName)
-        Nothing -> do
-          resultName <- freshName "v"
-          pure (allOps ++
-                [ "// perform " <> nameText (qnameName qn) <> " -- no handler in scope"
-                , "%" <> resultName <> " = func.call @kk_unhandled_effect() : () -> i64"
-                ], resultName)
+    else
+      error $ "emitter bug: residual EPerform after evidence pass: "
+           ++ show (qnameModule qn) ++ "/" ++ show (nameText (qnameName qn))
 
 emitExpr (EHandle effRow handler body) = do
   effectMode <- gets esEffectDialect
@@ -1750,15 +1727,9 @@ emitExpr (EHandle effRow handler body) = do
             ]
       -- The body result is the handle result
       pure (handlerOps ++ bodyOps ++ dialectOps, bodyName)
-    else do
-      -- Lowered mode: install evidence, emit body, restore scope
-      (handlerOps, handlerName) <- emitExpr handler
-      let effName = effectRowNameEmit effRow
-      oldScope <- gets esEvidenceScope
-      modify (\s -> s { esEvidenceScope = Map.insert effName handlerName (esEvidenceScope s) })
-      (bodyOps, bodyName) <- emitExpr body
-      modify (\s -> s { esEvidenceScope = oldScope })
-      pure (handlerOps ++ bodyOps, bodyName)
+    else
+      error $ "emitter bug: residual EHandle after evidence pass: "
+           ++ show (effectRowNameEmit effRow)
 
 -- Catch-all removed: all Expr constructors are handled above
 

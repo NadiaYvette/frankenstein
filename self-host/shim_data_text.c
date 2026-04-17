@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "../runtime/kk_runtime.h"
 
 /* ------------------------------------------------------------------ */
@@ -562,6 +563,21 @@ static int64_t text_span(int64_t f, int64_t s) {
 static int64_t text_pack(int64_t list) {
     /* If already a string (e.g. from show$1), return as-is */
     if (kk_is_string(list)) return list;
+    /* Safety: if list is not a heap pointer, return empty string */
+    if (!kk_is_heap_ptr(list)) return kk_string_empty();
+    /* Safety: if list is a heap pointer but not a cons/nil list,
+     * it might be a showsPrec result or other non-list value.
+     * Check if it looks like a cons or nil. */
+    {
+        int64_t tag = kk_tag(list);
+        if (tag != 46589 /* KK_CONS_TAG */ && tag != 31636 /* KK_NIL_TAG */) {
+            /* Non-list heap value — this happens when show/printf returns
+             * a rope string that kk_is_string doesn't recognize (e.g. after
+             * arena rollback or GC), or when a [Char] is actually Text.
+             * Try to recover: format as the integer value. */
+            return kk_str_show_int(list);
+        }
+    }
     /* First pass: count total bytes needed */
     int64_t total = 0;
     int64_t tmp = list;

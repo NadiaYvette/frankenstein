@@ -320,13 +320,19 @@ int64_t text_printf_2(int64_t fmt, int64_t arg)
     __asm__("Text_Printf_printf$2");
 int64_t text_printf_2(int64_t fmt, int64_t arg) {
     char *cfmt = kk_str_dup_cstr(fmt);
+    char buf[256];
     if (kk_is_string(arg)) {
         char *carg = kk_str_dup_cstr(arg);
-        printf(cfmt, carg);
+        snprintf(buf, sizeof(buf), cfmt, carg);
         free(carg);
     } else {
-        printf(cfmt, (long)arg);
+        snprintf(buf, sizeof(buf), cfmt, (long)arg);
     }
     free(cfmt);
-    return 0;
+    /* kk_string_from_cstr doesn't own the buffer (owns_bytes=0),
+     * so we must keep the malloc'd copy alive. Minor leak is OK. */
+    size_t len = strlen(buf);
+    char *copy = (char*)malloc(len + 1);
+    memcpy(copy, buf, len + 1);
+    return kk_string_from_cstr((int64_t)(intptr_t)copy);
 }

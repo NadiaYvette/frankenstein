@@ -165,7 +165,9 @@ int main(int argc, char** argv) {
     int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
 
     if (!kk_is_string(mlir)) {
-        fprintf(stderr, "Error: emitProgramText did not return a string\n");
+        fprintf(stderr, "Error: emitProgramText did not return a string (ptr=%p heap=%d tag=%ld)\n",
+                (void*)mlir, kk_is_heap_ptr(mlir) ? 1 : 0,
+                kk_is_heap_ptr(mlir) ? kk_tag(mlir) : -1);
         return 1;
     }
 

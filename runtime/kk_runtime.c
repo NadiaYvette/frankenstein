@@ -964,7 +964,7 @@ int64_t kk_thunk_force(int64_t thunk) {
 /*  String tracking — distinguish kk_string_t from kk_alloc_con       */
 /* ================================================================== */
 
-#define KK_STRING_TABLE_SIZE 8192
+#define KK_STRING_TABLE_SIZE 65536
 static int64_t string_table[KK_STRING_TABLE_SIZE];
 
 /* String registration log — records every registered string pointer in

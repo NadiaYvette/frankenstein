@@ -135,7 +135,6 @@
                  U Frankenstein_Core_ConTags_conKey$1
                  U Frankenstein_Core_ConTags_mod$0
                  U Frankenstein_Core_EffectOpt_isAbortHandler$1
-                 U Frankenstein_Core_EffectOpt_wild$0
                  U Frankenstein_Core_FlattenPatterns_zeze$0
                  U Frankenstein_Core_Perceus_zp$0
                  U Frankenstein_Core_Types_bindExpr$0
@@ -361,6 +360,7 @@
                  U GHC_Types_FieldLabel_flLabel$1
                  U GHC_Types_Id_idDemandInfo$1
                  U GHC_Types_Id_isDataConId_maybe$1
+                 U GHC_Types_Id_isDeadBinder$1
                  U GHC_Types_Name_getOccString$1
                  U GHC_Types_Name_nameModule_maybe$1
                  U GHC_Types_Name_nameUnique$1

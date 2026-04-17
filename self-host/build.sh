@@ -185,6 +185,7 @@ EXPECTED[maybesum]=42
 EXPECTED[listsum]=15
 EXPECTED[tree]=6
 EXPECTED[alloc_stress]=100100000
+EXPECTED[effect_ask]=84
 
 E2E_PASS=0
 E2E_FAIL=0
@@ -218,6 +219,41 @@ for example in nested maybesum listsum tree alloc_stress; do
     continue
   fi
   # Run and check
+  RESULT=$("$OUT/$example-self-bin" 2>/dev/null)
+  if [ "$RESULT" = "${EXPECTED[$example]}" ]; then
+    echo "PASS ($RESULT)"
+    E2E_PASS=$((E2E_PASS + 1))
+  else
+    echo "FAIL (expected ${EXPECTED[$example]}, got '$RESULT')"
+    E2E_FAIL=$((E2E_FAIL + 1))
+  fi
+done
+# Effect-using OrganIR JSON examples (test effectOptimize + evidencePass)
+for example in effect_ask; do
+  echo -n "  $example.json: "
+  if ! ./self-host/frankenstein-self-compiler "examples/$example.json" -o "$OUT/$example-self.mlir" 2>/dev/null; then
+    echo "FAIL (self-hosted compiler)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
+  if ! $MLIR_OPT "$OUT/$example-self.mlir" 2>/dev/null \
+       | mlir-translate --mlir-to-llvmir > "$OUT/$example-self.ll" 2>/dev/null; then
+    echo "FAIL (mlir-opt/translate)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
+  if ! clang -c -o "$OUT/$example-self-ir.o" "$OUT/$example-self.ll" 2>/dev/null; then
+    echo "FAIL (clang -c)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
+  if ! clang -o "$OUT/$example-self-bin" \
+       "$OUT/$example-self-ir.o" "$OUT/kk_rt_standalone.o" \
+       "$OUT/kk_arena_standalone.o" "$OUT/kk_cycle_standalone.o" -lm 2>/dev/null; then
+    echo "FAIL (link)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
   RESULT=$("$OUT/$example-self-bin" 2>/dev/null)
   if [ "$RESULT" = "${EXPECTED[$example]}" ]; then
     echo "PASS ($RESULT)"

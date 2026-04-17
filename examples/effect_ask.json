@@ -1,0 +1,57 @@
+{
+  "schema_version": "0.1.0",
+  "metadata": {
+    "source_language": "haskell",
+    "compiler_version": "frankenstein",
+    "shim_version": "0.1.0"
+  },
+  "module": {
+    "name": "EffectAsk",
+    "definitions": [
+      {
+        "name": {"module": "EffectAsk", "name": {"text": "main", "unique": 10}},
+        "type": {
+          "fn": {
+            "args": [],
+            "effect": {"effects": []},
+            "result": {"con": {"qname": {"module": "std", "name": {"text": "int", "unique": 0}}}}
+          }
+        },
+        "expr": {
+          "ehandle": {
+            "effect": {"module": "", "name": {"text": "ask", "unique": 0}},
+            "handler": {
+              "elam": {
+                "params": [{"name": {"text": "x", "unique": 1}}],
+                "body": {"elit": {"int": 42}}
+              }
+            },
+            "body": {
+              "eapp": {
+                "fn": {"evar": {"text": "+", "unique": 0}},
+                "args": [
+                  {"eperform": {"effect": {"module": "ask", "name": {"text": "get", "unique": 0}}, "op": "get"}},
+                  {"eperform": {"effect": {"module": "ask", "name": {"text": "get", "unique": 0}}, "op": "get"}}
+                ]
+              }
+            }
+          }
+        },
+        "sort": "fun",
+        "visibility": "public",
+        "arity": 0
+      }
+    ],
+    "effect_decls": [
+      {
+        "name": {"module": "", "name": {"text": "ask", "unique": 0}},
+        "operations": [
+          {
+            "name": "get",
+            "type": {"con": {"qname": {"module": "std", "name": {"text": "int", "unique": 0}}}}
+          }
+        ]
+      }
+    ]
+  }
+}

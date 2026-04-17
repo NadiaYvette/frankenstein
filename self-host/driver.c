@@ -154,9 +154,15 @@ int main(int argc, char** argv) {
         prog = ((fn2_t)(intptr_t)fp)(closure, prog);
     }
 
-    /* Skip evidence pass — not needed for effect-free programs.
-     * TODO: fix cross-module tag mismatch that causes infinite recursion
-     * in the evidence traversal when processing cross-module Core IR. */
+    /* Evidence pass: resolve EHandle/EPerform into plain function calls.
+     * Collect all effect declarations from the program, then run the
+     * evidence-passing translation using the global registry (mirrors
+     * what the host compiler does in app/Main.hs). */
+    if (verbose) fprintf(stderr, "Running evidencePass...\n");
+    {
+        int64_t globalEffects = Frankenstein_Core_Evidence_collectGlobalEffects(prog);
+        prog = Frankenstein_Core_Evidence_evidencePassGlobal(globalEffects, prog);
+    }
 
     if (verbose) fprintf(stderr, "Running insertPerceus...\n");
     prog = Frankenstein_Core_Perceus_insertPerceus(prog);

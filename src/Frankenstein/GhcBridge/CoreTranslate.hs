@@ -39,7 +39,7 @@ import GHC.Types.Var
 import GHC.Types.Name (getOccString, nameUnique, nameModule_maybe)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Literal (Literal(..))
-import GHC.Types.Id (idDemandInfo, isDataConId_maybe)
+import GHC.Types.Id (idDemandInfo, isDataConId_maybe, isDeadBinder)
 import GHC.Types.Demand (isStrictDmd, isAbsDmd)
 import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys, dataConFieldLabels)
 import GHC.Unit.Module (moduleNameString, moduleName)
@@ -182,9 +182,22 @@ trExpr (Case scrut bndr _ty [Alt (DataAlt dc) [innerBndr] rhs])
         , F.bindSort = F.DefVal
         }
       ]] (trExpr rhs)
--- General case: translate scrutinee and alternatives
-trExpr (Case scrut _bndr _ty alts) =
-  F.ECase (trExpr scrut) (map translateAlt alts)
+-- General case: translate scrutinee and alternatives.
+-- When the case binder is live (used in alternatives, e.g. from @-patterns
+-- like handler@(ELam ...)), bind it with a let so it's available in the body.
+trExpr (Case scrut bndr _ty alts)
+  | isDeadBinder bndr =
+      F.ECase (trExpr scrut) (map translateAlt alts)
+  | otherwise =
+      let bndrName = translateName bndr
+          bndrBind = F.Bind
+            { F.bindName = bndrName
+            , F.bindType = translateType (varType bndr)
+            , F.bindExpr = trExpr scrut
+            , F.bindSort = F.DefVal
+            }
+      in F.ELet [[bndrBind]]
+           (F.ECase (F.EVar bndrName) (map translateAlt alts))
 
 -- Cast: drop coercion, recurse
 trExpr (Cast e _co) = trExpr e

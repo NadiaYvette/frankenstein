@@ -17,6 +17,7 @@ module Frankenstein.Core.EffectOpt
   , inlineLocalHandlers
   , eliminateIdentityHandlers
   , annotateTailResumptive
+  , isAbortHandler
   , EffectOptStats(..)
   , effectOptimizeWithStats
   ) where
@@ -74,7 +75,11 @@ inlineLocalHandlers = fst . inlineLocalHandler emptyStats
 
 inlineLocalHandler :: EffectOptStats -> Expr -> (Expr, EffectOptStats)
 inlineLocalHandler stats expr = case expr of
-  EHandle effRow handler@(ELam _params _handlerBody) body ->
+  EHandle effRow handler@(ELam _params _handlerBody) body
+    -- Do NOT inline abort handlers — inlining an abort handler is semantically
+    -- wrong because the continuation after the perform site would still execute.
+    -- Abort handlers need setjmp/longjmp codegen in the evidence pass instead.
+    | not (isAbortHandler handler) ->
     let effName = effectRowNameText effRow
         performCount = countPerforms effName body
     in if performCount > 0
@@ -216,6 +221,47 @@ isTailResumptiveHandler (ELam params body)
       in isTailCall resumeName body
   | otherwise = False
 isTailResumptiveHandler _ = False
+
+-- | Check if a handler is an abort handler (never calls resume).
+-- An abort handler is a lambda that doesn't reference its resume parameter.
+-- Convention: resume is the LAST parameter (same as tail-resumptive check).
+-- Handlers with fewer than 2 params have no resume param → always abort.
+-- | Detect abort handlers: handlers that take a resume parameter but never call it.
+-- Convention: in Koka-style effects, a handler takes (args..., resume).
+-- If the last parameter (resume) is unused in the body, the handler is "abort"
+-- (it discards the continuation). Single-param handlers are NOT abort — they
+-- are tail-resumptive (the value replaces the perform site directly).
+isAbortHandler :: Expr -> Bool
+isAbortHandler (ELam params body)
+  | length params >= 2 =
+      let resumeName = nameText (fst (last params))
+      in not (containsName resumeName body)
+  | otherwise = False  -- single-param or no-param → not abort (tail-resumptive)
+isAbortHandler _ = False
+
+-- | Check if a name appears anywhere in an expression
+containsName :: Text -> Expr -> Bool
+containsName name expr = case expr of
+  EVar n         -> nameText n == name
+  ELit _         -> False
+  ECon _         -> False
+  EApp fn as     -> containsName name fn || any (containsName name) as
+  ELam _ body    -> containsName name body
+  ELet bgs body  -> any (\bg -> any (containsName name . bindExpr) bg) bgs
+                     || containsName name body
+  ECase scrut brs -> containsName name scrut
+                     || any (containsName name . branchBody) brs
+  EHandle _ h b  -> containsName name h || containsName name b
+  EPerform _ as  -> any (containsName name) as
+  EDelay e       -> containsName name e
+  EForce e       -> containsName name e
+  ERetain e      -> containsName name e
+  ERelease e     -> containsName name e
+  EDrop e        -> containsName name e
+  EReuse e1 e2   -> containsName name e1 || containsName name e2
+  ETypeApp e _   -> containsName name e
+  ETypeLam _ e   -> containsName name e
+  EFunRef _      -> False
 
 -- | Check if every path through an expression ends with a call to the named function.
 isTailCall :: Text -> Expr -> Bool

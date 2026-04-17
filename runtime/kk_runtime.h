@@ -160,4 +160,8 @@ int64_t kk_snd(int64_t pair);
 int64_t kk_nothing(void);
 int64_t kk_just(int64_t x);
 
+/* Abort effect support (setjmp/longjmp) */
+int64_t kk_handler_exec(int64_t tag, int64_t body_closure);
+int64_t kk_handler_abort(int64_t tag, int64_t value);
+
 #endif /* KK_RUNTIME_H */

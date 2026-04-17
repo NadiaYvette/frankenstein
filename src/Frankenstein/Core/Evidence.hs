@@ -25,6 +25,7 @@ module Frankenstein.Core.Evidence
   ) where
 
 import Frankenstein.Core.Types
+import Frankenstein.Core.EffectOpt (isAbortHandler)
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -38,14 +39,21 @@ type EvidenceScope = Map Text Name
 -- variable name that holds that specific operation handler.
 type OpScope = Map (Text, Text) Name
 
+-- | Abort effect scope: maps effect name to (tag literal, handler expression)
+-- so that EPerform for an abort effect can emit kk_handler_abort(tag, handler(args)).
+-- We store the handler expression (not just a name) so it can be inlined directly
+-- into the lifted body lambda, avoiding free-variable capture issues.
+type AbortScope = Map Text (Int, Expr)
+
 -- | Combined scope for evidence pass
 data Scope = Scope
   { scopeEvidence :: !EvidenceScope
   , scopeOps     :: !OpScope
+  , scopeAbort   :: !AbortScope
   } deriving (Show)
 
 emptyScope :: Scope
-emptyScope = Scope Map.empty Map.empty
+emptyScope = Scope Map.empty Map.empty Map.empty
 
 insertEvidence :: Text -> Name -> Scope -> Scope
 insertEvidence eff evName s = s { scopeEvidence = Map.insert eff evName (scopeEvidence s) }
@@ -102,7 +110,7 @@ evidencePassGlobal globalEffects prog =
 -- | Transform a single definition
 evidencePassDef :: [EffectDecl] -> Def -> Def
 evidencePassDef effs def = def
-  { defExpr = evidenceExpr effs emptyScope (defExpr def)
+  { defExpr = fst (evidenceExpr effs emptyScope 0 (defExpr def))
   }
 
 -- | Transform an expression, replacing EHandle/EPerform with plain calls.
@@ -119,131 +127,213 @@ evidencePassDef effs def = def
 --         ev_console_println = evv_select(ev_console, 0)
 --         ev_console_print   = evv_select(ev_console, 1)
 --     in body[perform console/println(args) => ev_console_println(args)]
-evidenceExpr :: [EffectDecl] -> Scope -> Expr -> Expr
-evidenceExpr effs scope expr = case expr of
-  -- The key transformation: handle -> let-bind evidence, transform body
-  EHandle effRow handler body ->
-    let effName = effectRowName effRow
-        evName  = Name ("ev_" <> effName) 0
-        -- Transform the handler (it may itself contain effects)
-        handler' = evidenceExpr effs scope handler
-    in case lookupEffectDecl effs effName of
-      -- Multi-op effect: bind handler, then project each operation
-      Just ed | length (effectOps ed) > 1 ->
-        let -- Bind the evidence record
-            evBind = Bind
-              { bindName = evName
-              , bindType = anyType
-              , bindExpr = handler'
-              , bindSort = DefVal
-              }
-            -- Create a binding for each operation: ev_<eff>_<op> = evv_select(ev_<eff>, idx)
-            opBindsAndNames = zipWith (mkOpBind effName evName) [0..] (effectOps ed)
-            opBinds  = map fst opBindsAndNames
-            -- Build the new scope with all operation names
-            scope' = foldl (\s (opN, varN) -> insertOp effName opN varN s)
-                       (insertEvidence effName evName scope)
-                       (map snd opBindsAndNames)
-            -- Transform the body with the evidence + ops in scope
-            body' = evidenceExpr effs scope' body
-        in ELet [[evBind] ++ opBinds] body'
+--
+-- For abort handlers (no resume parameter), emit callback-based setjmp/longjmp:
+--   EHandle effRow abortHandler body
+--   =>
+--   let tag = <unique int>
+--       body_fn = \() -> body'    -- body closure passed to runtime
+--   in kk_handler_exec(tag, body_fn)
+--   where body' has: EPerform => kk_handler_abort(tag, handler(args))
 
-      -- Single-op or unknown: the handler IS the evidence (simple case)
-      _ ->
-        let scope' = insertEvidence effName evName scope
-            -- For single-op with a known declaration, also register the operation in OpScope
-            scope'' = case lookupEffectDecl effs effName of
-              Just ed | [singleOp] <- effectOps ed ->
-                let opN = nameText (qnameName (opName singleOp))
-                in insertOp effName opN evName scope'
-              _ -> scope'
-            body' = evidenceExpr effs scope'' body
-            evBind = Bind
-              { bindName = evName
-              , bindType = anyType
-              , bindExpr = handler'
-              , bindSort = DefVal
-              }
-        in ELet [[evBind]] body'
+evidenceExpr :: [EffectDecl] -> Scope -> Int -> Expr -> (Expr, Int)
+evidenceExpr effs scope nextTag expr = case expr of
+  -- The key transformation: handle -> let-bind evidence, transform body
+  EHandle effRow handler body
+    -- Abort handler: emit callback-based setjmp/longjmp pattern.
+    -- The body is wrapped in a 0-arg lambda and passed to kk_handler_exec
+    -- as a closure. kk_handler_exec calls setjmp in its own frame, then
+    -- invokes the body. If the body performs an abort, kk_handler_abort
+    -- longjmps back to kk_handler_exec.
+    --
+    -- Generated code:
+    --   let tag = <unique int>
+    --       body_lambda = \() -> body'   -- body' has EPerform inlined
+    --   in kk_handler_exec(tag, body_lambda)
+    --
+    -- Inside body', EPerform becomes:
+    --   kk_handler_abort(tag_literal, handler_expr(args))
+    -- The handler expression is inlined directly (not via name reference)
+    -- so the body lambda has no free variables from the handle scope.
+    | isAbortHandler handler ->
+        let effName = effectRowName effRow
+            (handler', nextTag1) = evidenceExpr effs scope nextTag handler
+            tag = nextTag1
+            -- Register this effect as abort in scope with the handler EXPRESSION
+            -- (not just a name). This way EPerform sites inline the handler directly,
+            -- keeping the body lambda free of handle-scope captures.
+            scope' = scope { scopeAbort = Map.insert effName (tag, handler') (scopeAbort scope) }
+            (body', nextTag2) = evidenceExpr effs scope' (tag + 1) body
+            -- Build: kk_handler_exec(tag, \() -> body')
+            -- The body is wrapped in a 0-arg lambda passed directly as an argument
+            -- (NOT let-bound, to avoid the emitter promoting it to a CAF and calling
+            -- it eagerly). The lambda-lift path in the emitter will create a proper
+            -- closure with field 0 = fptr, which kk_handler_exec invokes via the
+            -- standard closure ABI.
+            bodyLam = ELam [] body'
+            execCall = EApp (EVar (Name "kk_handler_exec" 0))
+              [ELit (LitInt (fromIntegral tag)), bodyLam]
+        in (execCall, nextTag2)
+
+    -- Tail-resumptive / normal handler: existing logic
+    | otherwise ->
+      let effName = effectRowName effRow
+          evName  = Name ("ev_" <> effName) 0
+          (handler', nextTag1) = evidenceExpr effs scope nextTag handler
+      in case lookupEffectDecl effs effName of
+        -- Multi-op effect: bind handler, then project each operation
+        Just ed | length (effectOps ed) > 1 ->
+          let evBind = Bind
+                { bindName = evName
+                , bindType = anyType
+                , bindExpr = handler'
+                , bindSort = DefVal
+                }
+              opBindsAndNames = zipWith (mkOpBind effName evName) [0..] (effectOps ed)
+              opBinds  = map fst opBindsAndNames
+              scope' = foldl (\s (opN, varN) -> insertOp effName opN varN s)
+                         (insertEvidence effName evName scope)
+                         (map snd opBindsAndNames)
+              (body', nextTag2) = evidenceExpr effs scope' nextTag1 body
+          in (ELet [[evBind] ++ opBinds] body', nextTag2)
+
+        -- Single-op or unknown: the handler IS the evidence (simple case)
+        _ ->
+          let scope' = insertEvidence effName evName scope
+              scope'' = case lookupEffectDecl effs effName of
+                Just ed | [singleOp] <- effectOps ed ->
+                  let opN = nameText (qnameName (opName singleOp))
+                  in insertOp effName opN evName scope'
+                _ -> scope'
+              (body', nextTag2) = evidenceExpr effs scope'' nextTag1 body
+              evBind = Bind
+                { bindName = evName
+                , bindType = anyType
+                , bindExpr = handler'
+                , bindSort = DefVal
+                }
+          in (ELet [[evBind]] body', nextTag2)
 
   -- The key transformation: perform -> call through evidence
   EPerform qn args ->
     let effName = qnameModule qn
         opN     = nameText (qnameName qn)
-        args'   = map (evidenceExpr effs scope) args
-    in case Map.lookup (effName, opN) (scopeOps scope) of
-      Just opVarName ->
-        -- Found a specific operation binding: call it directly
-        EApp (EVar opVarName) args'
+        (args', nextTag') = mapAccumEvidence effs scope nextTag args
+    in case Map.lookup effName (scopeAbort scope) of
+      -- Abort effect: emit kk_handler_abort(tag, handler(args, dummy_resume))
+      -- The handler expression is inlined directly from the abort scope.
+      -- Abort handlers take (perform_args..., resume) but never call resume,
+      -- so we pass 0 as a dummy value for the resume parameter.
+      Just (tag, handlerExpr) ->
+        let allArgs = args' ++ [ELit (LitInt 0)]  -- dummy resume
+            handlerCall = EApp handlerExpr allArgs
+            abortCall = EApp (EVar (Name "kk_handler_abort" 0))
+              [ ELit (LitInt (fromIntegral tag))
+              , handlerCall
+              ]
+        in (abortCall, nextTag')
       Nothing ->
-        case Map.lookup effName (scopeEvidence scope) of
-          Just evName ->
-            -- Evidence in scope but no specific op binding.
-            -- For single-op effects, call the evidence directly.
-            -- For multi-op effects, project by operation index.
-            if isSingleOpEffect effs effName
-              then EApp (EVar evName) args'
-              else -- Multi-op: project the operation by index
-                   let idx = lookupOpIndex effs effName opN
-                       projName = Name ("ev_" <> effName <> "_" <> opN) 0
-                       -- Generate: let ev_<eff>_<op> = evv_select(ev_<eff>, <idx>)
-                       --           in ev_<eff>_<op>(args)
-                       selectExpr = EApp (EVar (Name "evv_select" 0))
-                                      [ EVar evName
-                                      , ELit (LitInt (fromIntegral idx))
-                                      ]
-                       projBind = Bind
-                         { bindName = projName
-                         , bindType = anyType
-                         , bindExpr = selectExpr
-                         , bindSort = DefVal
-                         }
-                   in ELet [[projBind]] (EApp (EVar projName) args')
+        -- Normal evidence-passing (tail-resumptive or unhandled)
+        case Map.lookup (effName, opN) (scopeOps scope) of
+          Just opVarName ->
+            (EApp (EVar opVarName) args', nextTag')
           Nothing ->
-            -- No handler in scope -- unhandled effect.
-            -- Emit a call to a well-known default handler function.
-            -- Naming convention: <module>_<effect>_<op>
-            let defaultFn = Name (effName <> "_" <> opN) 0
-            in EApp (EVar defaultFn) args'
+            case Map.lookup effName (scopeEvidence scope) of
+              Just evName ->
+                if isSingleOpEffect effs effName
+                  then (EApp (EVar evName) args', nextTag')
+                  else let idx = lookupOpIndex effs effName opN
+                           projName = Name ("ev_" <> effName <> "_" <> opN) 0
+                           selectExpr = EApp (EVar (Name "evv_select" 0))
+                                          [ EVar evName
+                                          , ELit (LitInt (fromIntegral idx))
+                                          ]
+                           projBind = Bind
+                             { bindName = projName
+                             , bindType = anyType
+                             , bindExpr = selectExpr
+                             , bindSort = DefVal
+                             }
+                       in (ELet [[projBind]] (EApp (EVar projName) args'), nextTag')
+              Nothing ->
+                let defaultFn = Name (effName <> "_" <> opN) 0
+                in (EApp (EVar defaultFn) args', nextTag')
 
   -- Recurse through all other expression forms
-  EVar _     -> expr
-  ELit _     -> expr
-  ECon _     -> expr
+  EVar _     -> (expr, nextTag)
+  ELit _     -> (expr, nextTag)
+  ECon _     -> (expr, nextTag)
 
   EApp fn as ->
-    EApp (evidenceExpr effs scope fn) (map (evidenceExpr effs scope) as)
+    let (fn', nextTag1) = evidenceExpr effs scope nextTag fn
+        (as', nextTag2) = mapAccumEvidence effs scope nextTag1 as
+    in (EApp fn' as', nextTag2)
 
   ELam params body ->
-    ELam params (evidenceExpr effs scope body)
+    let (body', nextTag') = evidenceExpr effs scope nextTag body
+    in (ELam params body', nextTag')
 
   ELet bgs body ->
-    let bgs'  = map (map (\b -> b { bindExpr = evidenceExpr effs scope (bindExpr b) })) bgs
-        body' = evidenceExpr effs scope body
-    in ELet bgs' body'
+    let (bgs', nextTag1) = mapAccumBindGroups effs scope nextTag bgs
+        (body', nextTag2) = evidenceExpr effs scope nextTag1 body
+    in (ELet bgs' body', nextTag2)
 
   ECase scrut branches ->
-    let scrut'    = evidenceExpr effs scope scrut
-        branches' = map (\br -> br { branchBody  = evidenceExpr effs scope (branchBody br)
-                                   , branchGuard = fmap (evidenceExpr effs scope) (branchGuard br)
-                                   }) branches
-    in ECase scrut' branches'
+    let (scrut', nextTag1) = evidenceExpr effs scope nextTag scrut
+        (branches', nextTag2) = mapAccumBranches effs scope nextTag1 branches
+    in (ECase scrut' branches', nextTag2)
 
-  ETypeApp e ts   -> ETypeApp (evidenceExpr effs scope e) ts
-  ETypeLam tvs e  -> ETypeLam tvs (evidenceExpr effs scope e)
+  ETypeApp e ts   -> let (e', n) = evidenceExpr effs scope nextTag e in (ETypeApp e' ts, n)
+  ETypeLam tvs e  -> let (e', n) = evidenceExpr effs scope nextTag e in (ETypeLam tvs e', n)
 
   -- Perceus ops: recurse
-  ERetain e       -> ERetain  (evidenceExpr effs scope e)
-  ERelease e      -> ERelease (evidenceExpr effs scope e)
-  EDrop e         -> EDrop    (evidenceExpr effs scope e)
-  EReuse e1 e2    -> EReuse   (evidenceExpr effs scope e1) (evidenceExpr effs scope e2)
+  ERetain e       -> let (e', n) = evidenceExpr effs scope nextTag e in (ERetain e', n)
+  ERelease e      -> let (e', n) = evidenceExpr effs scope nextTag e in (ERelease e', n)
+  EDrop e         -> let (e', n) = evidenceExpr effs scope nextTag e in (EDrop e', n)
+  EReuse e1 e2    -> let (e1', n1) = evidenceExpr effs scope nextTag e1
+                         (e2', n2) = evidenceExpr effs scope n1 e2
+                     in (EReuse e1' e2', n2)
 
   -- Laziness: recurse
-  EDelay e        -> EDelay (evidenceExpr effs scope e)
-  EForce e        -> EForce (evidenceExpr effs scope e)
+  EDelay e        -> let (e', n) = evidenceExpr effs scope nextTag e in (EDelay e', n)
+  EForce e        -> let (e', n) = evidenceExpr effs scope nextTag e in (EForce e', n)
 
   -- Function reference: pass through
-  EFunRef _       -> expr
+  EFunRef _       -> (expr, nextTag)
+
+-- | Helper: map evidenceExpr over a list of expressions, threading the tag counter
+mapAccumEvidence :: [EffectDecl] -> Scope -> Int -> [Expr] -> ([Expr], Int)
+mapAccumEvidence _effs _scope n [] = ([], n)
+mapAccumEvidence effs scope n (e:es) =
+  let (e', n1) = evidenceExpr effs scope n e
+      (es', n2) = mapAccumEvidence effs scope n1 es
+  in (e':es', n2)
+
+-- | Helper: map over bind groups threading the tag counter
+mapAccumBindGroups :: [EffectDecl] -> Scope -> Int -> [[Bind]] -> ([[Bind]], Int)
+mapAccumBindGroups _effs _scope n [] = ([], n)
+mapAccumBindGroups effs scope n (bg:bgs) =
+  let (bg', n1) = mapAccumBinds effs scope n bg
+      (bgs', n2) = mapAccumBindGroups effs scope n1 bgs
+  in (bg':bgs', n2)
+
+mapAccumBinds :: [EffectDecl] -> Scope -> Int -> [Bind] -> ([Bind], Int)
+mapAccumBinds _effs _scope n [] = ([], n)
+mapAccumBinds effs scope n (b:bs) =
+  let (e', n1) = evidenceExpr effs scope n (bindExpr b)
+      (bs', n2) = mapAccumBinds effs scope n1 bs
+  in (b { bindExpr = e' } : bs', n2)
+
+-- | Helper: map over branches threading the tag counter
+mapAccumBranches :: [EffectDecl] -> Scope -> Int -> [Branch] -> ([Branch], Int)
+mapAccumBranches _effs _scope n [] = ([], n)
+mapAccumBranches effs scope n (br:brs) =
+  let (body', n1) = evidenceExpr effs scope n (branchBody br)
+      (guard', n2) = case branchGuard br of
+        Nothing -> (Nothing, n1)
+        Just g  -> let (g', n') = evidenceExpr effs scope n1 g in (Just g', n')
+      (brs', n3) = mapAccumBranches effs scope n2 brs
+  in (br { branchBody = body', branchGuard = guard' } : brs', n3)
 
 
 -- | Create a binding for a single operation extracted from an evidence record.

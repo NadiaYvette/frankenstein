@@ -51,6 +51,15 @@ main = do
     DemoMode flags -> do
       let prog = demoFactorialWithMain
       handleOutput prog flags
+    DemoEffect flags -> do
+      let prog = demoEffectProgram
+      handleOutput prog flags
+    DemoAbort flags -> do
+      let prog = demoAbortProgram
+      handleOutput prog flags
+    DemoMultiEffect flags -> do
+      let prog = demoMultiEffectProgram
+      handleOutput prog flags
     SwiftCrossCheck files -> mapM_ swiftCrossCheck files
     CompileFiles files flags -> do
       results <- mapM (compileFile (flagFromJson flags)) files
@@ -108,6 +117,9 @@ defaultFlags = Flags False False False False "a.out" False TargetNative
 data Command
   = ShowHelp
   | DemoMode Flags
+  | DemoEffect Flags
+  | DemoAbort Flags
+  | DemoMultiEffect Flags
   | CompileFiles [FilePath] Flags
   | SwiftCrossCheck [FilePath]
   deriving (Show)
@@ -116,6 +128,9 @@ parseArgs :: [String] -> Command
 parseArgs [] = ShowHelp
 parseArgs args
   | "--help" `elem` args || "-h" `elem` args = ShowHelp
+  | "--demo-effect" `elem` args = DemoEffect (parseFlags args)
+  | "--demo-abort" `elem` args = DemoAbort (parseFlags args)
+  | "--demo-multi-effect" `elem` args = DemoMultiEffect (parseFlags args)
   | "--demo" `elem` args = DemoMode (parseFlags args)
   | "--swift-crosscheck" `elem` args =
       let (files, _) = partition (not . isFlag) (removeArgValues args)
@@ -565,6 +580,160 @@ demoFactorialWithMain = Program
       ]
   , progData = []
   , progEffects = []
+  }
+  where intType = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+
+-- | Demo: tail-resumptive reader effect
+--
+-- effect ask { get : () -> int }
+-- fun main():
+--   handle<ask> { get() + get() } with \() -> 42
+-- Expected output: 84
+--
+-- Naming convention:
+--   EffectRow QName: QName "" "ask"  → effectRowName = "ask"
+--   EPerform QName:  QName "ask" "get" → effName = "ask" (matches)
+demoEffectProgram :: Program
+demoEffectProgram = Program
+  { progName = QName "demo" (Name "effects" 0)
+  , progDefs =
+      [ Def
+          { defName = QName "" (Name "main" 10)
+          , defType = TFun [] EffectRowEmpty intType
+          , defExpr =
+              EHandle
+                (EffectRowExtend (QName "" (Name "ask" 0)) EffectRowEmpty)
+                -- Handler: \() -> 42  (tail-resumptive: returns a constant)
+                (ELam [(Name "x" 1, intType)] (ELit (LitInt 42)))
+                -- Body: perform ask/get() + perform ask/get()
+                (EApp (EVar (Name "+" 0))
+                  [ EPerform (QName "ask" (Name "get" 0)) []
+                  , EPerform (QName "ask" (Name "get" 0)) []
+                  ])
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      ]
+  , progData = []
+  , progEffects =
+      [ EffectDecl
+          { effectName = QName "" (Name "ask" 0)
+          , effectParams = []
+          , effectOps = [OpDecl (QName "ask" (Name "get" 0)) intType]
+          }
+      ]
+  }
+  where intType = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+
+-- | Demo: abort effect (exception-like, uses setjmp/longjmp)
+--
+-- effect exn { raise : int -> never }
+-- fun main():
+--   handle<exn> {
+--     perform exn/raise(42)   -- aborts here
+--     99                      -- NEVER reached
+--   } with \msg -> msg        -- abort handler: returns the raised value
+-- Expected output: 42
+demoAbortProgram :: Program
+demoAbortProgram = Program
+  { progName = QName "demo" (Name "abort" 0)
+  , progDefs =
+      [ Def
+          { defName = QName "" (Name "main" 10)
+          , defType = TFun [] EffectRowEmpty intType
+          , defExpr =
+              EHandle
+                (EffectRowExtend (QName "" (Name "exn" 0)) EffectRowEmpty)
+                -- Abort handler: \msg resume -> msg (resume unused → abort)
+                (ELam [(Name "msg" 1, intType), (Name "resume" 3, intType)]
+                       (EVar (Name "msg" 1)))
+                -- Body: perform exn/raise(42); 99
+                -- (The 99 should NEVER be reached due to abort)
+                (ELet [[Bind
+                  { bindName = Name "_unused" 2
+                  , bindType = intType
+                  , bindExpr = EPerform (QName "exn" (Name "raise" 0)) [ELit (LitInt 42)]
+                  , bindSort = DefVal
+                  }]]
+                  (ELit (LitInt 99)))
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      ]
+  , progData = []
+  , progEffects =
+      [ EffectDecl
+          { effectName = QName "" (Name "exn" 0)
+          , effectParams = []
+          , effectOps = [OpDecl (QName "exn" (Name "raise" 0)) intType]
+          }
+      ]
+  }
+  where intType = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+
+-- | Multi-effect demo: compose a reader effect (tail-resumptive) with an
+-- exception effect (abort) in the same program.
+--
+-- handle<exn> {
+--   handle<ask> {
+--     let x = perform ask/get()       -- returns 10
+--     if x > 5: perform exn/raise(x)  -- aborts with 10
+--     x + 1
+--   } with \() -> 10                  -- reader: always returns 10
+-- } with \v resume -> v * 2           -- abort: doubles the value
+--
+-- Expected: ask returns 10, x > 5 is true, exn/raise(10) aborts,
+-- abort handler computes 10 * 2 = 20.
+demoMultiEffectProgram :: Program
+demoMultiEffectProgram = Program
+  { progName = QName "demo" (Name "multi_effect" 0)
+  , progDefs =
+      [ Def
+          { defName = QName "" (Name "main" 10)
+          , defType = TFun [] EffectRowEmpty intType
+          , defExpr =
+              -- Outer: handle<exn> { ... } with \v resume -> v * 2
+              EHandle
+                (EffectRowExtend (QName "" (Name "exn" 0)) EffectRowEmpty)
+                -- Abort handler: \v resume -> v * 2 (resume unused → abort)
+                (ELam [(Name "v" 1, intType), (Name "resume" 3, intType)]
+                  (EApp (EVar (Name "*" 0)) [EVar (Name "v" 1), ELit (LitInt 2)]))
+                -- Inner: handle<ask> { body } with \() -> 10
+                (EHandle
+                  (EffectRowExtend (QName "" (Name "ask" 0)) EffectRowEmpty)
+                  -- Reader handler: \() -> 10 (tail-resumptive)
+                  (ELam [(Name "x" 4, intType)] (ELit (LitInt 10)))
+                  -- Body: let x = perform ask/get()
+                  --       in if x > 5 then perform exn/raise(x) else x + 1
+                  (ELet [[Bind
+                    { bindName = Name "x" 5
+                    , bindType = intType
+                    , bindExpr = EPerform (QName "ask" (Name "get" 0)) []
+                    , bindSort = DefVal
+                    }]]
+                    (ECase (EApp (EVar (Name ">" 0)) [EVar (Name "x" 5), ELit (LitInt 5)])
+                      [ Branch (PatLit (LitInt 1)) Nothing
+                          (EPerform (QName "exn" (Name "raise" 0)) [EVar (Name "x" 5)])
+                      , Branch (PatVar (Name "_" 0) intType) Nothing
+                          (EApp (EVar (Name "+" 0)) [EVar (Name "x" 5), ELit (LitInt 1)])
+                      ])))
+          , defSort = DefFun
+          , defVisibility = Public
+          }
+      ]
+  , progData = []
+  , progEffects =
+      [ EffectDecl
+          { effectName = QName "" (Name "ask" 0)
+          , effectParams = []
+          , effectOps = [OpDecl (QName "ask" (Name "get" 0)) intType]
+          }
+      , EffectDecl
+          { effectName = QName "" (Name "exn" 0)
+          , effectParams = []
+          , effectOps = [OpDecl (QName "exn" (Name "raise" 0)) intType]
+          }
+      ]
   }
   where intType = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
 

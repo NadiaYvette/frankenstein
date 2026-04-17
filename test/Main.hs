@@ -10,7 +10,7 @@ import Frankenstein.Core.Perceus (insertPerceus, analyzeUsage, freeVars)
 import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.DeriveSelectors (deriveSelectors, recordSelectors)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
-  , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive)
+  , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive, isAbortHandler)
 import Frankenstein.Core.FlattenPatterns (flattenPatternsExpr)
 import Frankenstein.Core.ConTags (assignProgramTags, collectReferencedCtors)
 import Frankenstein.MercuryBridge.HldsParse
@@ -233,7 +233,11 @@ containsDrop _ _                    = False
 evidenceTests :: TestTree
 evidenceTests = testGroup "Evidence"
   [ testCase "evidencePass eliminates EHandle/EPerform" $
-      let exnEffect = EffectRowExtend (mkQName "exn" "raise") EffectRowEmpty
+      -- Naming convention:
+      --   EffectRow QName: QName "" "exn" → effectRowName = "exn"
+      --   EPerform QName:  QName "exn" "raise" → effName = "exn" (matches!)
+      --   EffectDecl:      effectName = QName "" "exn" → flattened = "exn"
+      let exnEffect = EffectRowExtend (mkQName "" "exn") EffectRowEmpty
           -- A handler that catches the exception
           handler = ELam [(mkName "e", anyType)] (ELit (LitInt 0))
           -- A body that performs the effect
@@ -243,7 +247,7 @@ evidenceTests = testGroup "Evidence"
           prog = mkProgram "test" "evidence"
             [ mkFunDef "test" "f" handleExpr anyType ]
           effDecl = EffectDecl
-            { effectName   = mkQName "exn" "raise"
+            { effectName   = mkQName "" "exn"
             , effectParams = []
             , effectOps    = [OpDecl (mkQName "exn" "raise") anyType]
             }
@@ -255,6 +259,9 @@ evidenceTests = testGroup "Evidence"
           (not (containsHandle resultExpr))
         assertBool "should not contain EPerform after evidence pass"
           (not (containsPerform resultExpr))
+        -- Verify the handler was actually bound (not falling through to default)
+        assertBool "evidence pass should bind handler as ev_exn (let-expression)"
+          (isELet resultExpr)
 
   , testCase "evidencePass: unhandled effect becomes default call" $
       let body = EPerform (mkQName "exn" "raise") [ELit (LitString "err")]
@@ -324,6 +331,20 @@ containsPerform _                  = False
 isEApp :: Expr -> Bool
 isEApp (EApp {}) = True
 isEApp _         = False
+
+isELet :: Expr -> Bool
+isELet (ELet {}) = True
+isELet _         = False
+
+containsVarNamed :: Text -> Expr -> Bool
+containsVarNamed name (EVar n)       = T.isInfixOf name (nameText n)
+containsVarNamed name (EApp f args)  = containsVarNamed name f || any (containsVarNamed name) args
+containsVarNamed name (ELam _ body)  = containsVarNamed name body
+containsVarNamed name (ELet bgs body)= any (\bg -> any (containsVarNamed name . bindExpr) bg) bgs
+                                        || containsVarNamed name body
+containsVarNamed name (ECase s brs)  = containsVarNamed name s
+                                        || any (containsVarNamed name . branchBody) brs
+containsVarNamed _ _                 = False
 
 -------------------------------------------------------------------------------
 -- D. Effect Optimization tests
@@ -442,6 +463,66 @@ effectOptTests = testGroup "Effect Optimization"
           mlir = emitProgramWithEffects prog
       in assertBool "should contain frankenstein.perform"
            (T.isInfixOf "frankenstein.perform" mlir)
+
+  , testCase "isAbortHandler: single-param handler is NOT abort" $
+      -- \msg -> 0  (single param → tail-resumptive, not abort)
+      let handler = ELam [(Name "msg" 1, intType)] (ELit (LitInt 0))
+      in assertBool "single-param handler should NOT be abort" (not (isAbortHandler handler))
+
+  , testCase "isAbortHandler: two-param handler with resume call is NOT abort" $
+      -- \x k -> k(x)  (tail-resumptive, uses resume)
+      let handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (EApp (EVar (Name "k" 2)) [EVar (Name "x" 1)])
+      in assertBool "tail-resumptive handler should NOT be abort" (not (isAbortHandler handler))
+
+  , testCase "isAbortHandler: two-param handler without resume is abort" $
+      -- \x k -> x  (never calls k → abort handler)
+      let handler = ELam [(Name "x" 1, intType), (Name "k" 2, intType)]
+                      (EVar (Name "x" 1))
+      in assertBool "handler ignoring resume should be abort" (isAbortHandler handler)
+
+  , testCase "inlineLocalHandlers: skips abort handlers" $
+      -- Abort handlers must NOT be inlined (inlining is semantically wrong
+      -- because the continuation after perform would still execute).
+      -- Use a 2-param handler with unused resume → abort.
+      let exnEff = EffectRowExtend (QName "" (Name "exn" 0)) EffectRowEmpty
+          handler = ELam [(Name "msg" 1, intType), (Name "k" 2, intType)]
+                      (EVar (Name "msg" 1))
+          body = EPerform (QName "exn" (Name "raise" 0)) [ELit (LitInt 42)]
+          expr = EHandle exnEff handler body
+          result = inlineLocalHandlers expr
+      in assertBool "abort handler should NOT be inlined (EHandle should remain)"
+           (containsHandle result)
+
+  , testCase "evidencePass: abort handler emits kk_handler_exec/abort" $
+      -- Verify the evidence pass generates callback-based setjmp/longjmp code.
+      -- Abort handler: 2 params, resume (last) unused.
+      let exnEffect = EffectRowExtend (QName "" (Name "exn" 0)) EffectRowEmpty
+          handler = ELam [(Name "msg" 1, anyType), (Name "resume" 2, anyType)]
+                      (EVar (Name "msg" 1))
+          body = EPerform (QName "exn" (Name "raise" 0)) [ELit (LitInt 42)]
+          handleExpr = EHandle exnEffect handler body
+          prog = mkProgram "test" "abort_ev"
+            [ mkFunDef "test" "f" handleExpr anyType ]
+          effDecl = EffectDecl
+            { effectName   = QName "" (Name "exn" 0)
+            , effectParams = []
+            , effectOps    = [OpDecl (QName "exn" (Name "raise" 0)) anyType]
+            }
+          progWithEffects = prog { progEffects = [effDecl] }
+          result = evidencePass progWithEffects
+          resultExpr = defExpr (head (progDefs result))
+      in do
+        assertBool "should not contain EHandle after evidence pass"
+          (not (containsHandle resultExpr))
+        assertBool "should not contain EPerform after evidence pass"
+          (not (containsPerform resultExpr))
+        -- The generated code should reference kk_handler_exec (callback pattern)
+        assertBool "abort codegen should contain kk_handler_exec reference"
+          (containsVarNamed "kk_handler_exec" resultExpr)
+        -- And kk_handler_abort inside the body lambda
+        assertBool "abort codegen should contain kk_handler_abort reference"
+          (containsVarNamed "kk_handler_abort" resultExpr)
   ]
 
 -------------------------------------------------------------------------------

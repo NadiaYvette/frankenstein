@@ -18,6 +18,18 @@
 #include <string.h>
 #include "../runtime/kk_runtime.h"
 
+/* Tagged Bool helpers.  Compiled Haskell represents True/False as
+ * heap-allocated constructors with stableConTag-derived tags.
+ * C shims use plain 0/1.  tobool() bridges both representations. */
+#define KK_TRUE_TAG  24914   /* stableConTag "True"  */
+#define KK_FALSE_TAG 44872   /* stableConTag "False" */
+static inline int tobool(int64_t v) {
+    if (v == 0) return 0;
+    if (v == 1) return 1;
+    if (kk_is_heap_ptr(v)) return kk_tag(v) == KK_TRUE_TAG;
+    return v != 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Closure calling helpers                                             */
 /* ------------------------------------------------------------------ */
@@ -395,7 +407,7 @@ int64_t ghc_base_p1Monad_0(void) { return 0; }
 /* && (Z-encoded: zbzb) — logical and */
 static int64_t and_apply(int64_t clos, int64_t b) {
     int64_t a = kk_field(clos, 1);
-    return (a && b) ? 1 : 0;
+    return (tobool(a) && tobool(b)) ? 1 : 0;
 }
 static int64_t and_code(int64_t clos, int64_t a) {
     (void)clos;
@@ -403,12 +415,12 @@ static int64_t and_code(int64_t clos, int64_t a) {
 }
 
 int64_t ghc_classes_and_2(int64_t a, int64_t b) __asm__("GHC_Internal_Classes_zbzb$2");
-int64_t ghc_classes_and_2(int64_t a, int64_t b) { return (a && b) ? 1 : 0; }
+int64_t ghc_classes_and_2(int64_t a, int64_t b) { return (tobool(a) && tobool(b)) ? 1 : 0; }
 
 /* || (Z-encoded: zozo) — logical or */
 static int64_t or_apply(int64_t clos, int64_t b) {
     int64_t a = kk_field(clos, 1);
-    return (a || b) ? 1 : 0;
+    return (tobool(a) || tobool(b)) ? 1 : 0;
 }
 static int64_t or_code(int64_t clos, int64_t a) {
     (void)clos;
@@ -416,14 +428,14 @@ static int64_t or_code(int64_t clos, int64_t a) {
 }
 
 int64_t ghc_classes_or_2(int64_t a, int64_t b) __asm__("GHC_Internal_Classes_zozo$2");
-int64_t ghc_classes_or_2(int64_t a, int64_t b) { return (a || b) ? 1 : 0; }
+int64_t ghc_classes_or_2(int64_t a, int64_t b) { return (tobool(a) || tobool(b)) ? 1 : 0; }
 
-static int64_t not_code(int64_t clos, int64_t x) { (void)clos; return x ? 0 : 1; }
+static int64_t not_code(int64_t clos, int64_t x) { (void)clos; return tobool(x) ? 0 : 1; }
 
 int64_t ghc_classes_not_0(void)   __asm__("GHC_Internal_Classes_not$0");
 int64_t ghc_classes_not_0(void)   { return make_closure0(&not_code); }
 int64_t ghc_classes_not_1(int64_t x) __asm__("GHC_Internal_Classes_not$1");
-int64_t ghc_classes_not_1(int64_t x) { return x ? 0 : 1; }
+int64_t ghc_classes_not_1(int64_t x) { return tobool(x) ? 0 : 1; }
 
 int64_t ghc_classes_fEqList_0(void) __asm__("GHC_Internal_Classes_zdfEqList$0");
 int64_t ghc_classes_fEqList_0(void) { return 0; }
@@ -454,12 +466,21 @@ int64_t ghc_num_op_0(void) { return make_closure0(&num_op_code); }
 int64_t ghc_num_op_2(int64_t a, int64_t b) __asm__("GHC_Internal_Num__$2");
 int64_t ghc_num_op_2(int64_t a, int64_t b) { return a + b; }
 int64_t ghc_num_fromInteger_1(int64_t n) __asm__("GHC_Internal_Num_fromInteger$1");
-int64_t ghc_num_fromInteger_1(int64_t n) { return n; }
+int64_t ghc_num_fromInteger_1(int64_t n) {
+    /* The compiler may pass a boxed Integer (heap object with a numeric
+     * value in field 0) or a raw int.  Unbox if needed so downstream
+     * arithmetic (arith.subi, arith.cmpi) works on raw ints. */
+    if (kk_is_heap_ptr(n)) return kk_field(n, 0);
+    return n;
+}
 int64_t ghc_num_negate_1(int64_t n) __asm__("GHC_Internal_Num_negate$1");
 int64_t ghc_num_negate_1(int64_t n) { return -n; }
 
 int64_t ghc_real_fromIntegral_1(int64_t n) __asm__("GHC_Internal_Real_fromIntegral$1");
-int64_t ghc_real_fromIntegral_1(int64_t n) { return n; }
+int64_t ghc_real_fromIntegral_1(int64_t n) {
+    if (kk_is_heap_ptr(n)) return kk_field(n, 0);
+    return n;
+}
 int64_t ghc_real_fromRational_1(int64_t n) __asm__("GHC_Internal_Real_fromRational$1");
 int64_t ghc_real_fromRational_1(int64_t n) { return n; }
 int64_t ghc_real_toInteger_1(int64_t n) __asm__("GHC_Internal_Real_toInteger$1");

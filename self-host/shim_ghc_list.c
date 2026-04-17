@@ -54,6 +54,24 @@ static int64_t make_closure2(void* fp, int64_t c1, int64_t c2) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Bool representation helpers.                                         */
+/*  Compiled Haskell code represents True/False as heap-allocated        */
+/*  constructors with stableConTag tags.  C shims use 0/1.               */
+/* ------------------------------------------------------------------ */
+#define KK_TRUE_TAG  24914   /* stableConTag "True"  */
+#define KK_FALSE_TAG 44872   /* stableConTag "False" */
+
+/* Convert a tagged Bool (or C int) to C int.  Handles both:
+ *  - C-style: 0 = false, nonzero = true
+ *  - Tagged:  heap object with tag KK_TRUE_TAG or KK_FALSE_TAG        */
+static inline int tobool(int64_t v) {
+    if (v == 0) return 0;
+    if (v == 1) return 1;
+    if (kk_is_heap_ptr(v)) return kk_tag(v) == KK_TRUE_TAG;
+    return v != 0;  /* fallback for raw ints */
+}
+
+/* ------------------------------------------------------------------ */
 /*  Forward declarations for closure code pointers                      */
 /* ------------------------------------------------------------------ */
 
@@ -315,7 +333,7 @@ int64_t ghc_list_scanl_3(int64_t f, int64_t z, int64_t xs) {
 int64_t ghc_foldable_all_2(int64_t p, int64_t xs) __asm__("GHC_Internal_Data_Foldable_all$2");
 int64_t ghc_foldable_all_2(int64_t p, int64_t xs) {
     while (!kk_is_nil(xs)) {
-        if (!call1(p, kk_list_head(xs))) return 0;
+        if (!tobool(call1(p, kk_list_head(xs)))) return 0;
         xs = kk_list_tail(xs);
     }
     return 1;
@@ -326,7 +344,7 @@ int64_t ghc_foldable_any_1(int64_t p) { return make_closure1(&any_apply, p); }
 int64_t ghc_foldable_any_2(int64_t p, int64_t xs) __asm__("GHC_Internal_Data_Foldable_any$2");
 int64_t ghc_foldable_any_2(int64_t p, int64_t xs) {
     while (!kk_is_nil(xs)) {
-        if (call1(p, kk_list_head(xs))) return 1;
+        if (tobool(call1(p, kk_list_head(xs)))) return 1;
         xs = kk_list_tail(xs);
     }
     return 0;
@@ -457,6 +475,8 @@ static int64_t sum_code(int64_t clos, int64_t xs) { (void)clos; return ghc_folda
 /* mapM for the State monad: f returns State actions (closures s -> (a, s')).
  * mapM f xs = \s -> fold over xs threading state, collecting results.
  * Returns a State action closure that, when applied to state, threads it. */
+static int64_t either_mapM(int64_t f, int64_t xs);  /* forward decl */
+
 static int64_t mapM_state_runner(int64_t clos, int64_t s) {
     int64_t f  = kk_field(clos, 1);
     int64_t xs = kk_field(clos, 2);
@@ -478,9 +498,24 @@ static int64_t mapM_state_runner(int64_t clos, int64_t s) {
     return kk_pair(result_list, s);
 }
 
-int64_t ghc_traversable_mapM_2(int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Traversable_mapM$2");
-int64_t ghc_traversable_mapM_2(int64_t f, int64_t xs) {
-    return make_closure2(&mapM_state_runner, f, xs);
+#ifndef KK_EITHER_MONAD_MARKER
+#define KK_EITHER_MONAD_MARKER 0xEE17E8LL
+#endif
+/* mapM$2 receives (monad_dict, f) and returns a closure waiting for xs.
+ * For Either monad (dict == KK_EITHER_MONAD_MARKER), uses either_mapM.
+ * For other monads (State etc.), returns a State-style closure. */
+static int64_t mapM_either_runner(int64_t clos, int64_t xs) {
+    int64_t f = kk_field(clos, 1);
+    return either_mapM(f, xs);
+}
+int64_t ghc_traversable_mapM_2(int64_t monad_dict, int64_t f) __asm__("GHC_Internal_Data_Traversable_mapM$2");
+int64_t ghc_traversable_mapM_2(int64_t monad_dict, int64_t f) {
+    if (monad_dict == KK_EITHER_MONAD_MARKER) {
+        return make_closure1(&mapM_either_runner, f);
+    }
+    /* Non-Either: treat args as (f, xs) for backward compat with State monad.
+     * In State monad context, GHC may pass (f, xs) directly. */
+    return make_closure2(&mapM_state_runner, monad_dict, f);
 }
 /* Either monad mapM: traverse list, short-circuit on Left */
 #define KK_EITHER_MONAD_MARKER 0xEE17E8LL
@@ -521,8 +556,8 @@ static int64_t either_mapM(int64_t f, int64_t xs) {
 
 int64_t ghc_traversable_mapM_3(int64_t d, int64_t f, int64_t xs) __asm__("GHC_Internal_Data_Traversable_mapM$3");
 int64_t ghc_traversable_mapM_3(int64_t d, int64_t f, int64_t xs) {
-    if (d == KK_EITHER_MONAD_MARKER) return either_mapM(f, xs);
-    return ghc_traversable_mapM_2(f, xs);
+    (void)d;
+    return either_mapM(f, xs);
 }
 
 /* ================================================================== */
@@ -663,16 +698,25 @@ int64_t ghc_sysio_writeFile_2(int64_t path, int64_t content) {
 /*  GHC.Internal.Unicode                                                */
 /* ================================================================== */
 
-static int64_t isDigit_code(int64_t clos, int64_t c) { (void)clos; return (c >= '0' && c <= '9') ? 1 : 0; }
+/* Chars arrive boxed (C# tag=30786, codepoint in field 0). Unbox before comparing. */
+#define CHAR_BOX_TAG_U 30786
+static int64_t unbox_char_u(int64_t c) {
+    if (kk_is_heap_ptr(c) && kk_tag(c) == CHAR_BOX_TAG_U)
+        return kk_field(c, 0);
+    return c;
+}
+
+static int64_t isDigit_code(int64_t clos, int64_t c) { (void)clos; int64_t v = unbox_char_u(c); return (v >= '0' && v <= '9') ? 1 : 0; }
 static int64_t isSpace_code(int64_t clos, int64_t c) {
     (void)clos;
-    return (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') ? 1 : 0;
+    int64_t v = unbox_char_u(c);
+    return (v == ' ' || v == '\t' || v == '\n' || v == '\r' || v == '\f' || v == '\v') ? 1 : 0;
 }
 
 int64_t ghc_unicode_isDigit_0(void) __asm__("GHC_Internal_Unicode_isDigit$0");
 int64_t ghc_unicode_isDigit_0(void) { return make_closure0(&isDigit_code); }
 int64_t ghc_unicode_isDigit_1(int64_t c) __asm__("GHC_Internal_Unicode_isDigit$1");
-int64_t ghc_unicode_isDigit_1(int64_t c) { return (c >= '0' && c <= '9') ? 1 : 0; }
+int64_t ghc_unicode_isDigit_1(int64_t c) { int64_t v = unbox_char_u(c); return (v >= '0' && v <= '9') ? 1 : 0; }
 int64_t ghc_unicode_isSpace_0(void) __asm__("GHC_Internal_Unicode_isSpace$0");
 int64_t ghc_unicode_isSpace_0(void) { return make_closure0(&isSpace_code); }
 
@@ -680,9 +724,45 @@ int64_t ghc_unicode_isSpace_0(void) { return make_closure0(&isSpace_code); }
 /*  GHC.Internal.Text.Read                                              */
 /* ================================================================== */
 
+/* Convert a Haskell String ([Char] cons-list) to a C string.
+ * Also works if the argument is already a kk_string. */
+static char* haskell_string_to_cstr(int64_t s) {
+    if (kk_is_string(s)) {
+        return kk_str_dup_cstr(s);
+    }
+    /* Walk [Char] cons-list, extract codepoints */
+    int64_t cap = 256, len = 0;
+    char* buf = (char*)malloc((size_t)cap);
+    if (!buf) return NULL;
+    int64_t cur = s;
+    while (kk_is_heap_ptr(cur) && kk_tag(cur) == KK_CONS_TAG) {
+        int64_t ch = kk_field(cur, 0);
+        int64_t cp = unbox_char_u(ch);
+        if (cp > 0 && cp < 128) {
+            if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, (size_t)cap); }
+            buf[len++] = (char)cp;
+        }
+        cur = kk_field(cur, 1);
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Convert result "rest" string back to [Char] cons-list if input was [Char] */
+static int64_t cstr_to_haskell_string(const char* cstr) {
+    int64_t len = (int64_t)strlen(cstr);
+    int64_t result = kk_nil();
+    for (int64_t j = len - 1; j >= 0; j--) {
+        int64_t boxed = kk_alloc_con(CHAR_BOX_TAG_U, 1);
+        kk_set_field(boxed, 0, (int64_t)(unsigned char)cstr[j]);
+        result = kk_cons(boxed, result);
+    }
+    return result;
+}
+
 int64_t ghc_read_read_1(int64_t s) __asm__("GHC_Internal_Text_Read_read$1");
 int64_t ghc_read_read_1(int64_t s) {
-    char *cstr = kk_str_dup_cstr(s);
+    char *cstr = haskell_string_to_cstr(s);
     int64_t val = strtol(cstr, NULL, 10);
     free(cstr);
     return val;
@@ -690,7 +770,7 @@ int64_t ghc_read_read_1(int64_t s) {
 
 int64_t ghc_read_readMaybe_1(int64_t s) __asm__("GHC_Internal_Text_Read_readMaybe$1");
 int64_t ghc_read_readMaybe_1(int64_t s) {
-    char *cstr = kk_str_dup_cstr(s);
+    char *cstr = haskell_string_to_cstr(s);
     char *end;
     int64_t val = strtol(cstr, &end, 10);
     int64_t result = (end != cstr && *end == '\0') ? kk_just(val) : kk_nothing();
@@ -698,9 +778,22 @@ int64_t ghc_read_readMaybe_1(int64_t s) {
     return result;
 }
 
+/* Make a Haskell String from a C string suffix.
+ * If is_charlist, returns [Char] cons-list; otherwise returns kk_string. */
+static int64_t make_rest_string(const char* s, int is_charlist) {
+    if (is_charlist) {
+        return cstr_to_haskell_string(s);
+    }
+    int64_t len = (int64_t)strlen(s);
+    char *buf = (char*)malloc((size_t)len + 1);
+    memcpy(buf, s, (size_t)len + 1);
+    return kk_str_alloc_leaf_owned(buf, len);
+}
+
 int64_t ghc_read_reads_1(int64_t s) __asm__("GHC_Internal_Text_Read_reads$1");
 int64_t ghc_read_reads_1(int64_t s) {
-    char *cstr = kk_str_dup_cstr(s);
+    int is_charlist = !kk_is_string(s);
+    char *cstr = haskell_string_to_cstr(s);
     char *end;
     /* Try integer parse first */
     int64_t ival = strtol(cstr, &end, 10);
@@ -709,32 +802,20 @@ int64_t ghc_read_reads_1(int64_t s) {
         char *fend;
         double dval = strtod(cstr, &fend);
         if (fend > end) {
-            /* Float consumed more chars (e.g. "3.14") — return as float.
-             * Haskell reads for Double returns (Double, String).
-             * We represent Double as its int64 bit pattern. */
-            int64_t rest_len = (int64_t)strlen(fend);
-            char *rest_buf = (char*)malloc((size_t)rest_len + 1);
-            memcpy(rest_buf, fend, (size_t)rest_len + 1);
-            int64_t rest = kk_str_alloc_leaf_owned(rest_buf, rest_len);
+            int64_t rest = make_rest_string(fend, is_charlist);
             union { double d; int64_t i; } u;
             u.d = dval;
             free(cstr);
             return kk_cons(kk_pair(u.i, rest), kk_nil());
         }
-        int64_t rest_len = (int64_t)strlen(end);
-        char *rest_buf = (char*)malloc((size_t)rest_len + 1);
-        memcpy(rest_buf, end, (size_t)rest_len + 1);
-        int64_t rest = kk_str_alloc_leaf_owned(rest_buf, rest_len);
+        int64_t rest = make_rest_string(end, is_charlist);
         free(cstr);
         return kk_cons(kk_pair(ival, rest), kk_nil());
     }
     /* Try float parse (handles "3.14e2" etc.) */
     double dval = strtod(cstr, &end);
     if (end != cstr) {
-        int64_t rest_len = (int64_t)strlen(end);
-        char *rest_buf = (char*)malloc((size_t)rest_len + 1);
-        memcpy(rest_buf, end, (size_t)rest_len + 1);
-        int64_t rest = kk_str_alloc_leaf_owned(rest_buf, rest_len);
+        int64_t rest = make_rest_string(end, is_charlist);
         union { double d; int64_t i; } u;
         u.d = dval;
         free(cstr);

@@ -1,3 +1,4 @@
+                 U bcmp
                  U Common_Error_errors$1
                  U Common_Name_nameLocal$1
                  U Common_Name_nameLocalQual$1
@@ -67,7 +68,6 @@
                  U Data_Set_Internal_notMember$0
                  U Data_Set_Internal_null$1
                  U Data_Set_Internal_singleton$1
-                 U Data_Set_Internal_toAscList$1
                  U Data_Set_Internal_toList$0
                  U Data_Set_Internal_toList$1
                  U Data_Set_Internal_union$2
@@ -130,8 +130,10 @@
                  U Data_Text_uncons$1
                  U Data_Text_unlines$0
                  U Data_Text_unlines$1
+                 U Frankenstein_Core_ConTags_abs$0
                  U Frankenstein_Core_ConTags_assignProgramTags$1
                  U Frankenstein_Core_ConTags_conKey$1
+                 U Frankenstein_Core_ConTags_mod$0
                  U Frankenstein_Core_EffectOpt_isAbortHandler$1
                  U Frankenstein_Core_EffectOpt_wild$0
                  U Frankenstein_Core_FlattenPatterns_zeze$0
@@ -280,7 +282,6 @@
                  U GHC_Internal_Data_Foldable_foldr$3
                  U GHC_Internal_Data_Foldable_forM_$1
                  U GHC_Internal_Data_Foldable_length$1
-                 U GHC_Internal_Data_Foldable_maximum$1
                  U GHC_Internal_Data_Foldable_null$1
                  U GHC_Internal_Data_Foldable_sum$0
                  U GHC_Internal_Data_Foldable_sum$1

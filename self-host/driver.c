@@ -98,22 +98,41 @@ int main(int argc, char** argv) {
     if (verbose) fprintf(stderr, "Read %ld bytes of JSON\n", (long)json_len);
 
     /* OrganIR JSON -> Core IR */
-    if (verbose) fprintf(stderr, "Parsing OrganIR...\n");
+    if (verbose) fprintf(stderr, "Parsing OrganIR (%ld bytes)...\n", (long)json_len);
     int64_t result = Frankenstein_OrganIR_Consumer_consumeProgram(json_text);
 
     /* result is Either String Program.
-     * With hash-based tags: Left=50386, Right=11965 (stable across all modules). */
+     * With hash-based tags: Left=50386, Right=11965 (stable across all modules).
+     * Note: Haskell String = [Char] — a cons-list of ints, not a kk_string.
+     * We extract chars from the cons-list to build the error message. */
     int64_t tag = kk_tag(result);
     if (tag == 50386) {
-        /* Left error_msg */
+        /* Left error_msg — error_msg is [Char] (Haskell String) */
         int64_t err_msg = kk_field(result, 0);
         if (kk_is_string(err_msg)) {
             char* cstr = kk_str_dup_cstr(err_msg);
             fprintf(stderr, "OrganIR parse error: %s\n", cstr);
             free(cstr);
         } else {
-            fprintf(stderr, "OrganIR parse error (non-string error value)\n");
+            /* Extract [Char] cons-list into a C string */
+            char buf[4096];
+            int pos = 0;
+            int64_t cur = err_msg;
+            while (pos < 4095 && kk_is_heap_ptr(cur) && kk_tag(cur) == KK_CONS_TAG) {
+                int64_t ch_box = kk_field(cur, 0);
+                /* Unbox Char: if heap-allocated C# (tag 30786), extract codepoint */
+                int64_t ch = (kk_is_heap_ptr(ch_box) ? kk_field(ch_box, 0) : ch_box);
+                if (ch >= 32 && ch < 127) buf[pos++] = (char)ch;
+                else { buf[pos++] = '?'; }
+                cur = kk_field(cur, 1);
+            }
+            buf[pos] = '\0';
+            fprintf(stderr, "OrganIR parse error: %s\n", buf);
         }
+        return 1;
+    }
+    if (tag != 11965) {
+        fprintf(stderr, "Unexpected tag from consumeProgram: %ld (expected Left=50386 or Right=11965)\n", (long)tag);
         return 1;
     }
 

@@ -123,6 +123,34 @@ int64_t kk_field(int64_t ptr, int64_t idx) {
     return fields[idx];
 }
 
+/* Structural equality for boxed values.
+ * Used by compiled == operator instead of pointer comparison (cmpi eq),
+ * because separately allocated boxes (e.g. Char = C# codepoint) with
+ * the same contents have different addresses.
+ *
+ * Returns 1 if equal, 0 if not. */
+int64_t kk_structural_eq(int64_t a, int64_t b) {
+    /* Fast path: same value (covers unboxed ints, same pointer) */
+    if (a == b) return 1;
+    /* If either is not a heap pointer, they're unboxed — already compared above */
+    if (!kk_is_heap_ptr(a) || !kk_is_heap_ptr(b)) return 0;
+    /* String comparison: use kk_str_compare (content-based) */
+    if (kk_is_string(a) && kk_is_string(b))
+        return kk_str_compare(a, b) == 0 ? 1 : 0;
+    /* Both are heap pointers: compare tags */
+    int64_t tag_a = kk_tag(a);
+    int64_t tag_b = kk_tag(b);
+    if (tag_a != tag_b) return 0;
+    /* Compare fields */
+    int64_t nf_a = kk_nfields(a);
+    int64_t nf_b = kk_nfields(b);
+    if (nf_a != nf_b) return 0;
+    for (int64_t i = 0; i < nf_a; i++) {
+        if (!kk_structural_eq(kk_field(a, i), kk_field(b, i))) return 0;
+    }
+    return 1;
+}
+
 /* Allocate a constructor: tag + nfields payload slots.
  * Returns pointer to the tag (not the refcount).
  * Layout: [rc=1] [tag] [f0] [f1] ... */

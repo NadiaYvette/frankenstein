@@ -131,6 +131,7 @@ int64_t kk_thunk_force(int64_t thunk);
  * kk_is_heap_ptr: returns 1 if the value looks like a heap pointer. */
 int64_t kk_str_compare(int64_t a, int64_t b);
 int64_t kk_compare(int64_t a, int64_t b);
+int64_t kk_structural_eq(int64_t a, int64_t b);
 int64_t kk_is_heap_ptr(int64_t v);
 int64_t kk_is_string(int64_t v);
 int64_t kk_nfields(int64_t ptr);

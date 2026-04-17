@@ -96,6 +96,22 @@ static int utf8_encode(int64_t cp, char* buf) {
     buf[0] = (char)(0xF0 | (cp >> 18)); buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F)); buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[3] = (char)(0x80 | (cp & 0x3F)); return 4;
 }
 
+/* Box a Char codepoint: compiled Haskell code expects Char values as
+ * heap-allocated constructors with the codepoint in field 0.
+ * The tag doesn't matter (code uses kk_field(x,0) to unbox), but we
+ * use C# = stableConTag "C#" = 30786 for consistency. */
+#define CHAR_BOX_TAG 30786
+static int64_t box_char(int64_t cp) {
+    int64_t c = kk_alloc_con(CHAR_BOX_TAG, 1);
+    kk_set_field(c, 0, cp);
+    return c;
+}
+static int64_t unbox_char(int64_t c) {
+    if (kk_is_heap_ptr(c) && kk_tag(c) == CHAR_BOX_TAG)
+        return kk_field(c, 0);
+    return c;
+}
+
 /* Call a Haskell closure: field 0 = fn ptr.
  * For predicates (Char -> Bool), the closure takes (closure, char_codepoint)
  * and returns 0/1. */
@@ -191,7 +207,7 @@ static int64_t text_uncons(int64_t s) {
     int64_t cp = utf8_decode(buf, &bytes_used);
     int64_t rest = text_from_buf(buf + bytes_used, len - bytes_used);
     free(buf);
-    return kk_just(kk_pair(cp, rest));
+    return kk_just(kk_pair(box_char(cp), rest));
 }
 
 static int64_t text_concat(int64_t list) {
@@ -429,8 +445,8 @@ static int64_t text_map(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        int64_t new_cp = call_closure_1(f, cp);
-        opos += utf8_encode(new_cp, out + opos);
+        int64_t new_cp = call_closure_1(f, box_char(cp));
+        opos += utf8_encode(unbox_char(new_cp), out + opos);
     }
     int64_t r = text_from_buf(out, opos);
     free(buf); free(out);
@@ -447,7 +463,7 @@ static int64_t text_all(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (!call_closure_1(f, cp)) { free(buf); return 0; }
+        if (!call_closure_1(f, box_char(cp))) { free(buf); return 0; }
     }
     free(buf);
     return 1;
@@ -463,7 +479,7 @@ static int64_t text_any(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (call_closure_1(f, cp)) { free(buf); return 1; }
+        if (call_closure_1(f, box_char(cp))) { free(buf); return 1; }
     }
     free(buf);
     return 0;
@@ -478,7 +494,7 @@ static int64_t text_take_while(int64_t f, int64_t s) {
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
-        if (!call_closure_1(f, cp)) break;
+        if (!call_closure_1(f, box_char(cp))) break;
         i += bytes_used;
     }
     int64_t r = text_from_buf(buf, i);
@@ -495,7 +511,7 @@ static int64_t text_drop_while(int64_t f, int64_t s) {
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
-        if (!call_closure_1(f, cp)) break;
+        if (!call_closure_1(f, box_char(cp))) break;
         i += bytes_used;
     }
     int64_t r = text_from_buf(buf + i, len - i);
@@ -517,7 +533,7 @@ static int64_t text_drop_while_end(int64_t f, int64_t s) {
             cp_start--;
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + cp_start, &bytes_used);
-        if (!call_closure_1(f, cp)) break;
+        if (!call_closure_1(f, box_char(cp))) break;
         end = cp_start;
     }
     int64_t r = text_from_buf(buf, end);
@@ -534,7 +550,7 @@ static int64_t text_span(int64_t f, int64_t s) {
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
-        if (!call_closure_1(f, cp)) break;
+        if (!call_closure_1(f, box_char(cp))) break;
         i += bytes_used;
     }
     int64_t r = kk_pair(text_from_buf(buf, i), text_from_buf(buf + i, len - i));
@@ -550,7 +566,7 @@ static int64_t text_pack(int64_t list) {
     int64_t total = 0;
     int64_t tmp = list;
     while (!kk_is_nil(tmp)) {
-        int64_t cp = kk_list_head(tmp);
+        int64_t cp = unbox_char(kk_list_head(tmp));
         char dummy[4];
         total += utf8_encode(cp, dummy);
         tmp = kk_list_tail(tmp);
@@ -560,7 +576,7 @@ static int64_t text_pack(int64_t list) {
     if (!buf) return kk_string_empty();
     int64_t pos = 0;
     while (!kk_is_nil(list)) {
-        int64_t cp = kk_list_head(list);
+        int64_t cp = unbox_char(kk_list_head(list));
         pos += utf8_encode(cp, buf + pos);
         list = kk_list_tail(list);
     }
@@ -587,7 +603,7 @@ static int64_t text_unpack(int64_t s) {
     free(buf);
     int64_t result = kk_nil();
     for (int64_t j = n - 1; j >= 0; j--) {
-        result = kk_cons(cps[j], result);
+        result = kk_cons(box_char(cps[j]), result);
     }
     free(cps);
     return result;
@@ -755,7 +771,7 @@ static int64_t text_concatMap(int64_t f, int64_t s) {
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
         kk_retain(f);
-        int64_t piece = call_closure_1(f, cp);
+        int64_t piece = call_closure_1(f, box_char(cp));
         result = kk_str_concat(result, piece);
     }
     free(buf);
@@ -880,7 +896,11 @@ int64_t text_unlines_0(void) {
 
 /* --- Show --- */
 int64_t text_show_singleton_1(int64_t cp) __asm__("Data_Text_Show_singleton$1");
-int64_t text_show_singleton_1(int64_t cp) { return text_singleton(cp); }
+int64_t text_show_singleton_1(int64_t cp) {
+    /* cp is a boxed Char (C# tag=30786, codepoint in field 0) */
+    int64_t raw = (kk_is_heap_ptr(cp) && kk_tag(cp) == CHAR_BOX_TAG) ? kk_field(cp, 0) : cp;
+    return text_singleton(raw);
+}
 
 int64_t text_show_unpack_1(int64_t s) __asm__("Data_Text_Show_unpack$1");
 int64_t text_show_unpack_1(int64_t s) { return text_unpack(s); }
@@ -942,11 +962,11 @@ int64_t bs_unpack_1(int64_t b) {
 static int64_t text_head(int64_t s) {
     int64_t len;
     char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return 0; }
+    if (!buf || len == 0) { free(buf); return box_char(0); }
     int64_t bytes_used;
     int64_t cp = utf8_decode(buf, &bytes_used);
     free(buf);
-    return cp;
+    return box_char(cp);
 }
 
 static int64_t text_tail(int64_t s) {
@@ -978,7 +998,7 @@ static int64_t text_break_pred(int64_t pred, int64_t s) {
     while (off < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + off, &bytes_used);
-        int64_t r = call_closure_1(pred, cp);
+        int64_t r = call_closure_1(pred, box_char(cp));
         if (r) {
             int64_t before = text_from_buf(buf, off);
             int64_t after  = text_from_buf(buf + off, len - off);
@@ -1029,7 +1049,7 @@ static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
          * PAP's clos and the inner function's self parameter. */
         int64_t fn_ptr = kk_field(kk_thunk_force(f), 0);
         typedef int64_t (*fn3_t)(int64_t, int64_t, int64_t, int64_t);
-        acc = ((fn3_t)(intptr_t)fn_ptr)(f, f, acc, cp);
+        acc = ((fn3_t)(intptr_t)fn_ptr)(f, f, acc, box_char(cp));
         off += bytes_used;
     }
     free(buf);

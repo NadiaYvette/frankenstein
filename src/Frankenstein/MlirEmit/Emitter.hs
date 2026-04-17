@@ -408,6 +408,7 @@ emitProgramText prog =
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
+    , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
@@ -548,6 +549,7 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
+    , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
@@ -649,6 +651,7 @@ emitProgramWasm prog =
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
+    , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
     , ""
     , "  // Thunk runtime declarations"
@@ -1377,6 +1380,10 @@ emitExpr (ECase scrut branches) = do
 
     -- Char literal cases: convert to integer comparison
     CharLitCase charBranches defaultExpr ->
+      -- The scrutinee is already unboxed (raw codepoint) because GHC Core
+      -- case on Char always goes through: case c of C# c# -> case c# of ...
+      -- The outer case extracts the codepoint via kk_field(_, 0), so by the
+      -- time we reach the inner case on char literals, the value is raw.
       emitMultiIntCase scrutOps scrutName
         [(toInteger (fromEnum c), e) | (c, e) <- charBranches] defaultExpr
 
@@ -1750,11 +1757,29 @@ emitCmpOp pred' a b = do
   (bOps, bName) <- emitExpr b
   -- Use the tracked type of the left operand for the comparison
   aTy <- lookupType aName
-  cmpName <- freshName "cmp"
-  resultName <- freshName "v"
-  let cmpOp = "%" <> cmpName <> " = arith.cmpi " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : " <> aTy
-      extOp = "%" <> resultName <> " = arith.extui %" <> cmpName <> " : i1 to i64"
-  pure (aOps ++ bOps ++ [cmpOp, extOp], resultName)
+  -- For eq/ne: use structural comparison via runtime function.
+  -- This handles boxed values (e.g. Char = C# codepoint) correctly,
+  -- since pointer equality (cmpi eq) fails for separately allocated
+  -- boxes containing the same value.
+  if pred' `elem` ["eq", "ne"]
+    then do
+      eqName <- freshName "v"
+      resultName <- freshName "v"
+      let callOp = "%" <> eqName <> " = func.call @kk_structural_eq(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+      if pred' == "eq"
+        then pure (aOps ++ bOps ++ [callOp], eqName)
+        else do
+          -- ne: negate the result (1 - eq)
+          oneName <- freshName "v"
+          let oneOp = "%" <> oneName <> " = arith.constant 1 : i64"
+              subOp = "%" <> resultName <> " = arith.subi %" <> oneName <> ", %" <> eqName <> " : i64"
+          pure (aOps ++ bOps ++ [callOp, oneOp, subOp], resultName)
+    else do
+      cmpName <- freshName "cmp"
+      resultName <- freshName "v"
+      let cmpOp = "%" <> cmpName <> " = arith.cmpi " <> pred' <> ", %" <> aName <> ", %" <> bName <> " : " <> aTy
+          extOp = "%" <> resultName <> " = arith.extui %" <> cmpName <> " : i1 to i64"
+      pure (aOps ++ bOps ++ [cmpOp, extOp], resultName)
 
 emitFloatCmpOp :: Text -> Expr -> Expr -> Emit ([Text], Text)
 emitFloatCmpOp pred' a b = do
@@ -2397,7 +2422,7 @@ buildTopFnArity modPfx defs = Map.fromList
 externalRuntimeFns :: Set Text
 externalRuntimeFns = Set.fromList
   [ "kk_drop", "kk_retain", "kk_release", "kk_reuse", "kk_is_unique"
-  , "kk_alloc_con", "kk_set_field", "kk_field", "kk_tag"
+  , "kk_alloc_con", "kk_set_field", "kk_field", "kk_tag", "kk_structural_eq"
   , "kk_thunk_create", "kk_thunk_force"
   , "kk_evv_create", "kk_evv_set", "kk_evv_get", "kk_unhandled_effect"
   , "kk_handler_exec", "kk_handler_abort"
@@ -2417,7 +2442,7 @@ externalRuntimeArity :: Map Text Int
 externalRuntimeArity = Map.fromList
   [ ("kk_drop", 1), ("kk_retain", 1), ("kk_release", 1)
   , ("kk_reuse", 2), ("kk_is_unique", 1)
-  , ("kk_alloc_con", 2), ("kk_set_field", 3), ("kk_field", 2), ("kk_tag", 1)
+  , ("kk_alloc_con", 2), ("kk_set_field", 3), ("kk_field", 2), ("kk_tag", 1), ("kk_structural_eq", 2)
   , ("kk_thunk_create", 1), ("kk_thunk_force", 1)
   , ("kk_evv_create", 1), ("kk_evv_set", 3), ("kk_evv_get", 2)
   , ("kk_unhandled_effect", 0)

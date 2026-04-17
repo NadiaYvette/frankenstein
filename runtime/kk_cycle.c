@@ -108,7 +108,11 @@ int kk_can_be_cyclic(int64_t tag) {
  * for unregistered objects, which means kk_drop won't traverse their
  * children. This is correct because the self-hosted Perceus selectors
  * drop individual fields rather than calling kk_drop on the parent. */
-#define KK_NFIELDS_TABLE_SIZE 4096
+/* With kk_drop disabled (bootstrapping mode), entries are never removed,
+ * so this table must be large enough for ALL allocations during the
+ * program's lifetime. JSON parsing alone can easily produce 100K+ objects.
+ * 1M entries × 16 bytes = 16 MB — acceptable for bootstrapping. */
+#define KK_NFIELDS_TABLE_SIZE (1 << 20)  /* 1,048,576 */
 static struct { int64_t ptr; int64_t nfields; } nfields_table[KK_NFIELDS_TABLE_SIZE];
 
 void kk_register_nfields(int64_t ptr, int64_t nfields) {

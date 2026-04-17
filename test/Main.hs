@@ -308,6 +308,107 @@ evidenceTests = testGroup "Evidence"
                 (not (containsHandle (defExpr mainDef)))
               assertBool "cross-module: no EPerform after global evidence pass"
                 (not (containsPerform (defExpr mainDef)))
+
+  , testCase "cross-module: abort handler across modules produces kk_handler_exec" $
+      -- Module B (e.g. Mercury): declares exn effect, has a function that performs it
+      let exnEffDecl = EffectDecl
+            { effectName   = mkQName "mercury" "exn"
+            , effectParams = []
+            , effectOps    = [OpDecl (mkQName "mercuryexn" "raise") anyType]
+            }
+          modB = (mkProgram "modB" "thrower"
+            [ mkFunDef "modB" "thrower"
+                (EPerform (mkQName "mercuryexn" "raise") [ELit (LitInt 42)])
+                anyType
+            ]) { progEffects = [exnEffDecl] }
+          -- Module A (e.g. Haskell): main handles exn with an ABORT handler, calls thrower
+          -- Abort handler: \msg resume -> msg  (resume unused → abort)
+          modA = mkProgram "modA" "main"
+            [ mkFunDef "modA" "main"
+                (EHandle
+                  (EffectRowExtend (mkQName "mercury" "exn") EffectRowEmpty)
+                  (ELam [(Name "msg" 1, anyType), (Name "resume" 2, anyType)]
+                    (EVar (Name "msg" 1)))
+                  (EApp (EVar (mkName "thrower")) []))
+                anyType
+            ]
+      in case linkProgramsWith False [modA, modB] of
+          Left errs -> assertFailure $ "Link failed: " ++ show errs
+          Right lr ->
+            let merged = lrProgram lr
+                globalEffects = collectGlobalEffects merged
+                result = evidencePassGlobal globalEffects merged
+                mainDef = head
+                  [ d | d <- progDefs result
+                  , T.isInfixOf "main" (nameText (qnameName (defName d)))
+                  ]
+                throwerDef = head
+                  [ d | d <- progDefs result
+                  , T.isInfixOf "thrower" (nameText (qnameName (defName d)))
+                  ]
+            in do
+              assertBool "cross-module abort: no EHandle after evidence pass"
+                (not (containsHandle (defExpr mainDef)))
+              assertBool "cross-module abort: no EPerform after evidence pass"
+                (not (containsPerform (defExpr throwerDef)))
+              -- Abort handler should produce kk_handler_exec (callback-based setjmp)
+              assertBool "cross-module abort: main contains kk_handler_exec"
+                (containsVarNamed "kk_handler_exec" (defExpr mainDef))
+              -- Cross-module perform: thrower's EPerform becomes a default function
+              -- call (mercuryexn_raise), NOT kk_handler_abort — the abort dispatch
+              -- happens at runtime via the handler stack, not at compile time.
+              assertBool "cross-module abort: thrower's perform becomes default call"
+                (containsVarNamed "mercuryexn_raise" (defExpr throwerDef))
+
+  , testCase "cross-module: abort handler MLIR output compiles correctly" $
+      -- Same cross-module setup but verify the MLIR output is well-formed
+      let intType' = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+          exnEffDecl = EffectDecl
+            { effectName   = mkQName "mercury" "exn"
+            , effectParams = []
+            , effectOps    = [OpDecl (mkQName "mercuryexn" "raise") intType']
+            }
+          modB = (mkProgram "modB" "thrower"
+            [ Def
+                { defName = QName "modB" (Name "thrower" 0)
+                , defType = TFun [] EffectRowEmpty intType'
+                , defExpr = EPerform (mkQName "mercuryexn" "raise") [ELit (LitInt 42)]
+                , defSort = DefFun
+                , defVisibility = Public
+                }
+            ]) { progEffects = [exnEffDecl] }
+          modA = mkProgram "modA" "main"
+            [ Def
+                { defName = QName "" (Name "main" 10)
+                , defType = TFun [] EffectRowEmpty intType'
+                , defExpr =
+                    EHandle
+                      (EffectRowExtend (mkQName "mercury" "exn") EffectRowEmpty)
+                      (ELam [(Name "msg" 1, intType'), (Name "resume" 2, intType')]
+                        (EVar (Name "msg" 1)))
+                      (EApp (EVar (Name "thrower" 0)) [])
+                , defSort = DefFun
+                , defVisibility = Public
+                }
+            ]
+      in case linkProgramsWith False [modA, modB] of
+          Left errs -> assertFailure $ "Link failed: " ++ show errs
+          Right lr ->
+            let merged = lrProgram lr
+                globalEffects = collectGlobalEffects merged
+                evidenced = evidencePassGlobal globalEffects merged
+                mlir = emitProgram evidenced
+            in do
+              -- MLIR should contain handler runtime calls
+              assertBool "cross-module abort MLIR: contains @kk_handler_exec"
+                (T.isInfixOf "kk_handler_exec" mlir)
+              assertBool "cross-module abort MLIR: contains @kk_handler_abort"
+                (T.isInfixOf "kk_handler_abort" mlir)
+              -- Should NOT contain residual effect dialect ops
+              assertBool "cross-module abort MLIR: no frankenstein.handle"
+                (not (T.isInfixOf "frankenstein.handle" mlir))
+              assertBool "cross-module abort MLIR: no frankenstein.perform"
+                (not (T.isInfixOf "frankenstein.perform" mlir))
   ]
 
 containsHandle :: Expr -> Bool

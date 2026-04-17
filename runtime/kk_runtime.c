@@ -22,6 +22,8 @@
 /* Forward declarations for string tracking (defined later) */
 static void kk_register_string(int64_t ptr);
 static void kk_unregister_string(int64_t ptr);
+int64_t kk_string_checkpoint(void);
+void kk_string_rollback(int64_t checkpoint, int64_t rescue_ptr);
 /* Forward declarations for string refcounting (different layout than cons) */
 void kk_str_retain(int64_t s_i);
 void kk_str_drop(int64_t s_i);
@@ -700,8 +702,10 @@ int64_t kk_unhandled_effect(void) {
  * kk_handler_abort, longjmp returns to kk_handler_exec.
  *
  * Note: longjmp bypasses Perceus drops in the abandoned continuation.
- * This causes memory leaks, which is acceptable in bootstrapping mode
- * (kk_drop is already a no-op).
+ * Arena checkpoint/rollback reclaims constructor cells in bulk, and
+ * string checkpoint/rollback frees malloc'd strings allocated during
+ * the body. Remaining leaks (e.g. deeply nested transitive references)
+ * are acceptable in bootstrapping mode (kk_drop is already a no-op).
  * ====================================================================== */
 
 #include <setjmp.h>
@@ -713,6 +717,7 @@ typedef struct {
     int64_t tag;
     int64_t result;
     kk_arena_checkpoint_t arena_cp;  /* arena state at handler entry */
+    int64_t string_cp;               /* string log index at handler entry */
 } kk_handler_frame_t;
 
 static kk_handler_frame_t kk_handler_stack[KK_MAX_HANDLER_FRAMES];
@@ -777,6 +782,7 @@ int64_t kk_handler_exec(int64_t tag, int64_t body_closure) {
     frame->tag = tag;
     frame->result = 0;
     frame->arena_cp = kk_arena_checkpoint();
+    frame->string_cp = kk_string_checkpoint();
     /* Extract function pointer from closure field 0 */
     int64_t fptr = kk_field(body_closure, 0);
     if (setjmp(frame->env) == 0) {
@@ -788,6 +794,8 @@ int64_t kk_handler_exec(int64_t tag, int64_t body_closure) {
         /* Abort path: longjmp landed here.
          * Rescue the result value from the arena before rollback. */
         int64_t result = kk_rescue_from_arena(frame->result, frame->arena_cp);
+        /* Roll back arena (constructor cells) and strings (malloc'd). */
+        kk_string_rollback(frame->string_cp, result);
         kk_arena_rollback(frame->arena_cp);
         return result;
     }
@@ -915,12 +923,25 @@ int64_t kk_thunk_force(int64_t thunk) {
 #define KK_STRING_TABLE_SIZE 8192
 static int64_t string_table[KK_STRING_TABLE_SIZE];
 
+/* String registration log — records every registered string pointer in
+ * allocation order. Used by kk_string_rollback to identify which strings
+ * were allocated inside a handler body and should be freed on abort.
+ * The hash table (string_table) provides O(1) lookup; the log provides
+ * O(1) checkpoint/rollback. */
+#define KK_STRING_LOG_SIZE 65536
+static int64_t string_log[KK_STRING_LOG_SIZE];
+static int64_t string_log_len = 0;
+
 static void kk_register_string(int64_t ptr) {
     int64_t idx = (ptr >> 3) & (KK_STRING_TABLE_SIZE - 1);
     for (int64_t i = 0; i < KK_STRING_TABLE_SIZE; i++) {
         int64_t probe = (idx + i) & (KK_STRING_TABLE_SIZE - 1);
         if (string_table[probe] == 0 || string_table[probe] == ptr) {
             string_table[probe] = ptr;
+            /* Append to log (if space). */
+            if (string_log_len < KK_STRING_LOG_SIZE) {
+                string_log[string_log_len++] = ptr;
+            }
             return;
         }
     }
@@ -947,6 +968,49 @@ int64_t kk_is_string(int64_t ptr) {
         if (string_table[probe] == 0)  return 0;
     }
     return 0;
+}
+
+/* String checkpoint/rollback — parallel to arena checkpoint/rollback.
+ *
+ * kk_string_checkpoint() returns the current string log length.
+ * kk_string_rollback() walks all log entries from the checkpoint forward,
+ * freeing each string (unless it is the rescued abort result), then
+ * truncates the log back to the checkpoint.
+ *
+ * We must not call kk_str_drop for these strings because their refcounts
+ * may be inconsistent (Perceus drops were skipped by longjmp). Instead
+ * we forcibly free the kk_string_t and its owned bytes, and unregister
+ * from the hash table. */
+int64_t kk_string_checkpoint(void) {
+    return string_log_len;
+}
+
+static void kk_str_force_free(int64_t s_i);
+
+void kk_string_rollback(int64_t checkpoint, int64_t rescue_ptr) {
+    for (int64_t i = checkpoint; i < string_log_len; i++) {
+        int64_t ptr = string_log[i];
+        if (ptr == 0) continue;          /* already freed normally */
+        if (ptr == rescue_ptr) continue;  /* rescue: abort result string */
+        /* Check still registered (may have been dropped normally before abort). */
+        if (!kk_is_string(ptr)) continue;
+        kk_unregister_string(ptr);
+        kk_str_force_free(ptr);
+    }
+    string_log_len = checkpoint;
+}
+
+/* Forcibly free a kk_string_t and its owned byte buffer, without touching
+ * refcounts or recursing into children (children may also be in the rollback
+ * region and will be freed by their own log entries). */
+static void kk_str_force_free(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    if (s == NULL) return;
+    if (s->kind == KK_STR_LEAF && s->owns_bytes) {
+        free((void*)s->u.bytes);
+    }
+    /* For CONCAT nodes, children are freed by their own log entries. */
+    free(s);
 }
 
 /* ================================================================== */

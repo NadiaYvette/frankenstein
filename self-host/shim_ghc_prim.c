@@ -529,7 +529,12 @@ int64_t ghc_real_fromIntegral_0(void) {
 }
 
 int64_t ghc_enum_fromEnum_1(int64_t n) __asm__("GHC_Internal_Enum_fromEnum$1");
-int64_t ghc_enum_fromEnum_1(int64_t n) { return n; }
+int64_t ghc_enum_fromEnum_1(int64_t n) {
+    /* Unbox Char (C# tag = 30786) to its codepoint */
+    if (kk_is_heap_ptr(n) && kk_tag(n) == 30786)
+        return kk_field(n, 0);
+    return n;
+}
 int64_t ghc_enum_toEnum_1(int64_t n) __asm__("GHC_Internal_Enum_toEnum$1");
 int64_t ghc_enum_toEnum_1(int64_t n) { return n; }
 

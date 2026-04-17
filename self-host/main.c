@@ -105,6 +105,7 @@ int64_t shim_map_member(int64_t key, int64_t map) __asm__("Data_Map_Internal_mem
 /* --- Data.Set query (from shims) --- */
 int64_t shim_set_toAscList(int64_t set) __asm__("Data_Set_Internal_toAscList$1");
 
+
 /* --- Core/EffectOpt.o --- */
 extern int64_t Frankenstein_Core_EffectOpt_emptyStats(void);
 extern int64_t Frankenstein_Core_EffectOpt_eosTailRes(int64_t);
@@ -186,26 +187,25 @@ static int64_t mk_qname(const char *mod, const char *name, int64_t u) {
     return qn;
 }
 
-/* Constructor tags assigned by Frankenstein's assignProgramTags.
-   All constructors from Types.hs + standard library are sorted
-   alphabetically and numbered sequentially. These must match
-   the compiled Emitter.o code's case dispatch.
-   Verified empirically against self-host/obj/MlirEmit_Emitter.mlir */
-#define TAG_EApp    20
-#define TAG_ECase   21
-#define TAG_ECon    22
-#define TAG_ELam    28
-#define TAG_ELet    29
-#define TAG_ELit    30
-#define TAG_EVar    37
-#define TAG_LitChar 49
-#define TAG_LitFloat 50
-#define TAG_LitInt  51
-#define TAG_LitString 52
-#define TAG_PatCon  55
-#define TAG_PatLit  56
-#define TAG_PatVar  57
-#define TAG_PatWild 58
+/* Constructor tags: stable hash-based (djb2 mod 65521).
+   These match the stableConTag function in ConTags.hs and are
+   the same across all independently compiled modules.
+   Computed by: abs(foldl (\acc c -> acc*33 + ord c) 5381 name) mod 65521 */
+#define TAG_EApp      22033
+#define TAG_ECase     62097
+#define TAG_ECon      24176
+#define TAG_ELam      33514
+#define TAG_ELet      33653
+#define TAG_ELit      33785
+#define TAG_EVar      44409
+#define TAG_LitChar   14993
+#define TAG_LitFloat  17737
+#define TAG_LitInt    56839
+#define TAG_LitString 22906
+#define TAG_PatCon     9891
+#define TAG_PatLit    19500
+#define TAG_PatVar    30124
+#define TAG_PatWild   55828
 
 /* Build ELit(LitInt n) expression. */
 static int64_t mk_lit_int(int64_t n) {
@@ -397,7 +397,7 @@ int main(void) {
         kk_retain(forced);
         kk_retain(forced);
         CHECK("emptyStats is a 3-field record",
-              kk_tag(forced) == 0);
+              kk_tag(forced) == 12545);  /* stableConTag "EffectOptStats" (64-bit) */
         int64_t f0 = kk_field(forced, 0);
         int64_t f1 = kk_field(forced, 1);
         int64_t f2 = kk_field(forced, 2);
@@ -613,21 +613,22 @@ int main(void) {
               tagMap != 0);
 
         /* Look up "True" in the tag map */
+        /* Hash-based tags: stableConTag computes deterministic values */
         int64_t trueResult = shim_map_lookup(s("True"), tagMap);
         int64_t trueTag = (kk_tag(trueResult) != 0) ? kk_field(trueResult, 0) : -1;
-        CHECK("assignProgramTags: True -> tag 0", trueTag == 0);
+        CHECK("assignProgramTags: True -> tag 24914", trueTag == 24914);
 
         int64_t falseResult = shim_map_lookup(s("False"), tagMap);
         int64_t falseTag = (kk_tag(falseResult) != 0) ? kk_field(falseResult, 0) : -1;
-        CHECK("assignProgramTags: False -> tag 1", falseTag == 1);
+        CHECK("assignProgramTags: False -> tag 44872", falseTag == 44872);
 
         int64_t justResult = shim_map_lookup(s("Just"), tagMap);
         int64_t justTag = (kk_tag(justResult) != 0) ? kk_field(justResult, 0) : -1;
-        CHECK("assignProgramTags: Just -> tag 1", justTag == 1);
+        CHECK("assignProgramTags: Just -> tag 61886", justTag == 61886);
 
         int64_t nothingResult = shim_map_lookup(s("Nothing"), tagMap);
         int64_t nothingTag = (kk_tag(nothingResult) != 0) ? kk_field(nothingResult, 0) : -1;
-        CHECK("assignProgramTags: Nothing -> tag 0", nothingTag == 0);
+        CHECK("assignProgramTags: Nothing -> tag 53440", nothingTag == 53440);
     }
 
     /* ============================================================== */

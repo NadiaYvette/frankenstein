@@ -218,19 +218,16 @@ int64_t ghc_base_apply_2(int64_t f, int64_t x) { return call1(f, x); }
 #define KK_EITHER_MONAD_MARKER 0xEE17E8LL
 
 /* Either monad bind: if Left, short-circuit; if Right, unwrap and apply f.
- * Different modules assign different tags to Left/Right:
- *   Consumer: Left=45, Right=65
- *   Parse:    Left=68, Right=90
- * We check all known tag values. */
+ * Hash-based tags are stable across all modules:
+ *   Left=50386  (stableConTag "Left")
+ *   Right=11965 (stableConTag "Right") */
 static int is_either_left(int64_t v) {
     if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
-    int64_t tag = kk_tag(v);
-    return tag == 45 || tag == 68;
+    return kk_tag(v) == 50386;  /* stableConTag "Left" */
 }
 static int is_either_right(int64_t v) {
     if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
-    int64_t tag = kk_tag(v);
-    return tag == 65 || tag == 90;
+    return kk_tag(v) == 11965;  /* stableConTag "Right" */
 }
 
 static int64_t either_bind(int64_t m, int64_t f) {
@@ -365,16 +362,10 @@ int64_t ghc_base_pure_1(int64_t a) __asm__("GHC_Internal_Base_pure$1");
 int64_t ghc_base_pure_1(int64_t a) { return make_closure1(&pure_runner, a); }
 
 /* Either monad: pure a = Right a
- * We must pick a Right tag.  Since the result flows back into the same
- * module that called >>=, and the caller's continuation already pattern-
- * matches by tag, we need to use the CALLER's Right tag.  Without
- * per-module dictionaries the best we can do is pick tag 90 (Parse) or 65
- * (Consumer).  Because the Either monad `pure` is most heavily used inside
- * Parse.hs (the do-notation desugaring), we use 90 as default.
- * For Consumer, `pure` isn't used in the Either path — consumeProgram
- * only calls parseOrganIR then case-matches the result.  So 90 is safe. */
-#define EITHER_RIGHT_TAG_DEFAULT 90
-#define EITHER_LEFT_TAG_DEFAULT  68
+ * With hash-based stable tags, Left/Right have the same tag in every module,
+ * so we always use the canonical values. */
+#define EITHER_RIGHT_TAG_DEFAULT 11965  /* stableConTag "Right" */
+#define EITHER_LEFT_TAG_DEFAULT  50386  /* stableConTag "Left"  */
 
 static int64_t either_right(int64_t a) {
     int64_t c = kk_alloc_con(EITHER_RIGHT_TAG_DEFAULT, 1);

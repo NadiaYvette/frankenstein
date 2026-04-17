@@ -1023,10 +1023,13 @@ static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
     while (off < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + off, &bytes_used);
-        /* f is a 2-arg closure: f(acc, char) -> new_acc */
+        /* The compiled step function may have a hidden 'self' parameter
+         * (GHC where-clause binding). The PAP wrapper expects 4 args:
+         * pap(clos, self, acc, char). Pass the closure as both the
+         * PAP's clos and the inner function's self parameter. */
         int64_t fn_ptr = kk_field(kk_thunk_force(f), 0);
-        typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
-        acc = ((fn2_t)fn_ptr)(f, acc, cp);
+        typedef int64_t (*fn3_t)(int64_t, int64_t, int64_t, int64_t);
+        acc = ((fn3_t)(intptr_t)fn_ptr)(f, f, acc, cp);
         off += bytes_used;
     }
     free(buf);

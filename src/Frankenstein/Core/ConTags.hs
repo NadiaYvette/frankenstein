@@ -1,19 +1,12 @@
 -- | Per-program constructor tag assignment.
 --
 -- Assigns a deterministic integer tag to every constructor referenced in
--- a 'Program'. The assignment has two phases:
---
--- 1. For each 'DataDecl' in 'progData', constructors are numbered
---    @0..n-1@ in declaration order within that type. Intra-type case
---    dispatch only needs to distinguish ctors of a single type, so
---    different types may safely share low tag values.
---
--- 2. Constructors that appear in 'ECon' / 'PatCon' nodes but are
---    /not/ declared in any 'DataDecl' (e.g. synthetic ctors from a
---    bridge, or built-in ctors injected directly by the front-end)
---    are assigned fresh sequential tags starting after the largest
---    tag already used. This guarantees a total function from
---    constructor name to tag with no hashing and no collisions.
+-- a 'Program'.  Tags are computed by hashing the bare constructor name
+-- (djb2 variant, mod 65521).  This makes tags /stable across modules/:
+-- every compilation unit that references the same constructor gets the
+-- same tag, which is critical for the self-hosted pipeline where values
+-- constructed in one module (e.g. Consumer) are pattern-matched in
+-- another (e.g. Perceus, Emitter).
 --
 -- The output is a @Map Text Int@ keyed on the bare constructor name
 -- (@nameText . qnameName@), because bridges routinely emit
@@ -21,6 +14,7 @@
 -- story means module qualification is not required for correctness.
 module Frankenstein.Core.ConTags
   ( assignProgramTags
+  , stableConTag
   , collectReferencedCtors
   , conKey
   ) where
@@ -32,6 +26,7 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 
 -- | The key used to look up a constructor in the tag table. Bridges
 -- emit constructors inconsistently with respect to module qualification,
@@ -39,43 +34,23 @@ import Data.Text (Text)
 conKey :: QName -> Text
 conKey qn = nameText (qnameName qn)
 
+-- | Deterministic hash of a constructor name to a stable tag.
+-- Uses a djb2-variant hash mod 65521 (largest prime < 2^16).
+-- Every module that references the same constructor name gets the
+-- same tag, enabling cross-module pattern matching in the self-hosted
+-- pipeline.
+stableConTag :: Text -> Int
+stableConTag = (`mod` 65521) . abs . T.foldl' step 5381
+  where step acc c = acc * 33 + fromEnum c
+
 -- | Walk a 'Program' and assign a deterministic tag to every
 -- constructor name referenced by 'DataDecl's, 'ECon' nodes, or
--- 'PatCon' patterns. Guaranteed total: every ctor name the emitter
--- can encounter via the usual walk is present in the returned map.
+-- 'PatCon' patterns.  Tags are computed by 'stableConTag' (hash-based),
+-- so they are stable across independently compiled modules.
 assignProgramTags :: Program -> Map Text Int
 assignProgramTags prog =
-  let -- Phase 1: declared ctors, numbered 0..n-1 within each DataDecl.
-      declared :: Map Text Int
-      declared = Map.fromList
-        [ (conKey (conName cd), i)
-        | dd <- progData prog
-        , (i, cd) <- zip [0..] (dataCons dd)
-        ]
-
-      -- Phase 2: orphan ctors (referenced but not declared).
-      referenced :: Set Text
-      referenced = collectReferencedCtors prog
-
-      orphans :: [Text]
-      orphans =
-        [ k
-        | k <- Set.toAscList referenced
-        , not (Map.member k declared)
-        ]
-
-      -- Start orphan numbering after the largest declared tag, so that
-      -- orphans never collide with declared ctors even if someone ever
-      -- compares tags across types (they shouldn't, but we're paranoid).
-      startOrphan :: Int
-      startOrphan = case Map.elems declared of
-        [] -> 0
-        xs -> maximum xs + 1
-
-      orphanMap :: Map Text Int
-      orphanMap = Map.fromList (zip orphans [startOrphan ..])
-
-  in declared `Map.union` orphanMap
+  let referenced = collectReferencedCtors prog
+  in Map.fromList [(k, stableConTag k) | k <- Set.toList referenced]
 
 -- | Gather the set of constructor names referenced by a program.
 -- Scans both 'DataDecl's (so declared ctors always appear, even if

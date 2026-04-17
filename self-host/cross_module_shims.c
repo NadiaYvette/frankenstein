@@ -204,6 +204,26 @@ int64_t ghc_isTyVar_0(void) { return mk_closure1(stub_id); }
 
 /* System.Directory — already in shim_system.o */
 
+/* --- ConTags.o: abs and mod inlined from GHC typeclasses --- */
+
+/* abs$0: returns a closure wrapping abs :: Int -> Int */
+static int64_t contags_abs_impl(int64_t x) {
+    return x < 0 ? -x : x;
+}
+int64_t contags_abs_0(void) __asm__("Frankenstein_Core_ConTags_abs$0");
+int64_t contags_abs_0(void) { return mk_closure1(contags_abs_impl); }
+
+/* mod$0: returns a closure wrapping mod :: Int -> Int -> Int
+ * Haskell mod satisfies: result has same sign as divisor */
+static int64_t contags_mod_impl(int64_t x, int64_t y) {
+    if (y == 0) return 0;
+    int64_t r = x % y;
+    if ((r > 0 && y < 0) || (r < 0 && y > 0)) r += y;
+    return r;
+}
+int64_t contags_mod_0(void) __asm__("Frankenstein_Core_ConTags_mod$0");
+int64_t contags_mod_0(void) { return mk_closure2(contags_mod_impl); }
+
 /* False externals removed — the emitter's promoted-fn mechanism
    resolves all 27 where-bound helpers (go, pat_, nub, etc.) to
    their lambda-lifted names within each .o file. */

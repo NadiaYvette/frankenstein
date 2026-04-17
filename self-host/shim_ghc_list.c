@@ -487,13 +487,11 @@ int64_t ghc_traversable_mapM_2(int64_t f, int64_t xs) {
 /* Either Left tags from different modules */
 static int is_either_left(int64_t v) {
     if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
-    int64_t tag = kk_tag(v);
-    return tag == 45 || tag == 68;  /* Consumer=45, Parse=68 */
+    return kk_tag(v) == 50386;  /* stableConTag "Left" */
 }
 static int is_either_right(int64_t v) {
     if (!kk_is_heap_ptr(v) || kk_is_string(v)) return 0;
-    int64_t tag = kk_tag(v);
-    return tag == 65 || tag == 90;  /* Consumer=65, Parse=90 */
+    return kk_tag(v) == 11965;  /* stableConTag "Right" */
 }
 
 static int64_t either_mapM(int64_t f, int64_t xs) {
@@ -515,8 +513,8 @@ static int64_t either_mapM(int64_t f, int64_t xs) {
     }
     int64_t result_list = array_to_list(arr, n);
     free(arr);
-    /* Wrap in Right (use tag 90 — Parse module default) */
-    int64_t right = kk_alloc_con(90, 1);
+    /* Wrap in Right (stableConTag "Right" = 11965) */
+    int64_t right = kk_alloc_con(11965, 1);
     kk_set_field(right, 0, result_list);
     return right;
 }

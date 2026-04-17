@@ -102,10 +102,9 @@ int main(int argc, char** argv) {
     int64_t result = Frankenstein_OrganIR_Consumer_consumeProgram(json_text);
 
     /* result is Either String Program.
-     * Consumer module uses Left=tag 45, Right=tag 65.
-     * We check for Left (error) vs Right (success). */
+     * With hash-based tags: Left=50386, Right=11965 (stable across all modules). */
     int64_t tag = kk_tag(result);
-    if (tag == 45) {
+    if (tag == 50386) {
         /* Left error_msg */
         int64_t err_msg = kk_field(result, 0);
         if (kk_is_string(err_msg)) {

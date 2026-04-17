@@ -34,6 +34,7 @@ import Frankenstein.IdrisBridge.Driver (readIdrisFile)
 import Frankenstein.IdrisBridge.CoreTranslate (translateIdris)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import Frankenstein.OrganIR.Consumer (consumeProgram)
+import Frankenstein.OrganIR.Emitter qualified as OrganEmit
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -105,6 +106,7 @@ data Flags = Flags
   { flagEmitCore :: !Bool
   , flagEmitMlir :: !Bool
   , flagEmitEffectMlir :: !Bool
+  , flagEmitOrgan :: !Bool
   , flagCompile  :: !Bool
   , flagOutput   :: !FilePath
   , flagFromJson :: !Bool
@@ -112,7 +114,7 @@ data Flags = Flags
   } deriving (Show)
 
 defaultFlags :: Flags
-defaultFlags = Flags False False False False "a.out" False TargetNative
+defaultFlags = Flags False False False False False "a.out" False TargetNative
 
 data Command
   = ShowHelp
@@ -163,6 +165,7 @@ parseFlags args = Flags
   { flagEmitCore = "--emit-core" `elem` args
   , flagEmitMlir = "--emit-mlir" `elem` args
   , flagEmitEffectMlir = "--emit-effect-mlir" `elem` args
+  , flagEmitOrgan = "--emit-organ" `elem` args
   , flagCompile  = "--compile" `elem` args
   , flagOutput   = case dropWhile (/= "--output") args of
                      ("--output":o:_) -> o
@@ -450,6 +453,10 @@ handleOutput progRaw flags = do
           case result of
             Left err -> TIO.putStrLn $ "Compilation error: " <> err
             Right path -> TIO.putStrLn $ "Compiled: " <> T.pack path
+      | flagEmitOrgan flags -> do
+          -- Emit OrganIR JSON from the raw (pre-optimization) program.
+          -- This is the interchange format for feeding to other backends.
+          TIO.putStrLn $ OrganEmit.emitProgram progRaw
       | flagEmitEffectMlir flags -> do
           -- Emit MLIR with frankenstein.* dialect ops — skip both the
           -- effect optimizer (which would inline handlers) and the
@@ -510,6 +517,7 @@ printHelp = do
   putStrLn "  --emit-core       Print Frankenstein Core IR"
   putStrLn "  --emit-mlir       Print MLIR output (after evidence lowering)"
   putStrLn "  --emit-effect-mlir Print MLIR with frankenstein.* dialect ops"
+  putStrLn "  --emit-organ      Print OrganIR JSON (interchange format)"
   putStrLn "  --compile         Compile to native executable (or .wasm)"
   putStrLn "  --target wasm32   Target WebAssembly (use with --compile)"
   putStrLn "  -o, --output      Output path (default: a.out)"

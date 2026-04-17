@@ -56,8 +56,10 @@ library
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
         Frankenstein.OrganIR.Consumer
+        Frankenstein.OrganIR.Emitter
         OrganIR.Types
         OrganIR.Parse
+        OrganIR.Json
     build-depends:
         base >= 4.17 && < 5,
         containers,

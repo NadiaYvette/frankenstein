@@ -36,7 +36,7 @@ MODULES=(
   src/Frankenstein/OrganIR/Consumer.hs
 )
 
-MLIR_PASSES="--allow-unregistered-dialect --reconcile-unrealized-casts \
+MLIR_PASSES="--allow-unregistered-dialect \
   --convert-scf-to-cf --convert-arith-to-llvm --convert-cf-to-llvm \
   --convert-func-to-llvm --reconcile-unrealized-casts"
 
@@ -143,27 +143,12 @@ echo "=== Phase 6: Run self-test ==="
 echo ""
 echo "=== Phase 7: Validate factorial MLIR (full pipeline) ==="
 if [ -f self-host/factorial-self.mlir ]; then
-  # Add main wrapper for printf output
-  python3 -c "
-mlir = open('self-host/factorial-self.mlir').read().rstrip()
-main_fn = 'demo_main' if '@demo_main()' in mlir else 'demo__frankenstein_main'
-wrapper = '''
-  func.func @main(%argc: i32, %argv: !llvm.ptr) -> i32 {
-    func.call @kk_args_init(%argc, %argv) : (i32, !llvm.ptr) -> ()
-    %result = func.call @''' + main_fn + '''() : () -> i64
-    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr
-    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32
-    %zero = arith.constant 0 : i32
-    func.return %zero : i32
-  }
-'''
-print(mlir[:-1] + wrapper + '}')
-" > self-host/factorial-with-main.mlir
-
-  MLIR_OPT="mlir-opt --allow-unregistered-dialect --reconcile-unrealized-casts \
+  # The emitter already produces a @main wrapper with printf,
+  # so we use factorial-self.mlir directly (no Python wrapping needed).
+  MLIR_OPT="mlir-opt --allow-unregistered-dialect \
     --convert-scf-to-cf --convert-arith-to-llvm --convert-cf-to-llvm \
     --convert-func-to-llvm --reconcile-unrealized-casts"
-  $MLIR_OPT self-host/factorial-with-main.mlir \
+  $MLIR_OPT self-host/factorial-self.mlir \
     | mlir-translate --mlir-to-llvmir > "$OUT/factorial-self.ll" 2>&1
   clang -c -o "$OUT/factorial-self-ir.o" "$OUT/factorial-self.ll"
   clang -O2 -c -o "$OUT/kk_rt_standalone.o" runtime/kk_runtime.c -I runtime/
@@ -185,3 +170,61 @@ print(mlir[:-1] + wrapper + '}')
 else
   echo "SKIP: factorial-self.mlir not found (factorial test may be disabled)"
 fi
+
+echo ""
+echo "=== Phase 8: End-to-end examples through self-hosted compiler ==="
+# Compile Haskell examples: host compiler --emit-organ | self-hosted compiler → MLIR → native → run
+FRKN_RUN="cabal-3.16.1.0 -v0 run frankenstein -w /usr/lib64/ghc-9.14.1/bin/ghc --"
+MLIR_OPT="mlir-opt --allow-unregistered-dialect \
+  --convert-scf-to-cf --convert-arith-to-llvm --convert-cf-to-llvm \
+  --convert-func-to-llvm --reconcile-unrealized-casts"
+
+declare -A EXPECTED
+EXPECTED[nested]=60
+EXPECTED[maybesum]=42
+EXPECTED[listsum]=15
+EXPECTED[tree]=6
+EXPECTED[alloc_stress]=100100000
+
+E2E_PASS=0
+E2E_FAIL=0
+for example in nested maybesum listsum tree alloc_stress; do
+  echo -n "  $example.hs: "
+  # Host compiler → OrganIR → self-hosted compiler → MLIR
+  if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \
+       | ./self-host/frankenstein-self-compiler - -o "$OUT/$example-self.mlir" 2>/dev/null; then
+    echo "FAIL (self-hosted compiler)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
+  # MLIR → LLVM IR
+  if ! $MLIR_OPT "$OUT/$example-self.mlir" 2>/dev/null \
+       | mlir-translate --mlir-to-llvmir > "$OUT/$example-self.ll" 2>/dev/null; then
+    echo "FAIL (mlir-opt/translate)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
+  # LLVM IR → native binary
+  if ! clang -c -o "$OUT/$example-self-ir.o" "$OUT/$example-self.ll" 2>/dev/null; then
+    echo "FAIL (clang -c)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
+  if ! clang -o "$OUT/$example-self-bin" \
+       "$OUT/$example-self-ir.o" "$OUT/kk_rt_standalone.o" \
+       "$OUT/kk_arena_standalone.o" "$OUT/kk_cycle_standalone.o" -lm 2>/dev/null; then
+    echo "FAIL (link)"
+    E2E_FAIL=$((E2E_FAIL + 1))
+    continue
+  fi
+  # Run and check
+  RESULT=$("$OUT/$example-self-bin" 2>/dev/null)
+  if [ "$RESULT" = "${EXPECTED[$example]}" ]; then
+    echo "PASS ($RESULT)"
+    E2E_PASS=$((E2E_PASS + 1))
+  else
+    echo "FAIL (expected ${EXPECTED[$example]}, got '$RESULT')"
+    E2E_FAIL=$((E2E_FAIL + 1))
+  fi
+done
+echo "=== Phase 8 results: $E2E_PASS passed, $E2E_FAIL failed ==="

@@ -18,6 +18,8 @@
 #include <string.h>
 #include "../runtime/kk_runtime.h"
 
+#define KK_CLOSURE_TAG 0x434C4F53  /* 'CLOS' */
+
 /* Tagged Bool helpers.  Compiled Haskell represents True/False as
  * heap-allocated constructors with stableConTag-derived tags.
  * C shims use plain 0/1.  tobool() bridges both representations. */
@@ -108,6 +110,7 @@ static int64_t make_closure2(void* fptr, int64_t cap1, int64_t cap2) {
 
 static int64_t compose_apply_code(int64_t clos, int64_t x);
 static int64_t compose_partial1_code(int64_t clos, int64_t f);
+static int64_t fmap_state_runner(int64_t clos, int64_t s);
 static int64_t append_2_code(int64_t clos, int64_t b);
 static int64_t append_1_code(int64_t clos, int64_t a);
 static int64_t bind_runner(int64_t clos, int64_t s);
@@ -314,8 +317,25 @@ int64_t ghc_base_flip_1(int64_t f) __asm__("GHC_Internal_Base_flip$1");
 int64_t ghc_base_flip_1(int64_t f) { return make_closure1(&flip_code, f); }
 
 /* fmap / map: list map */
+/* fmap_state_runner: fmap for the State monad.
+   clos.field[1] = f, clos.field[2] = action
+   fmap f action = \s -> let (a, s') = action s in (f a, s') */
+static int64_t fmap_state_runner(int64_t clos, int64_t s) {
+    int64_t f      = kk_field(clos, 1);
+    int64_t action = kk_field(clos, 2);
+    int64_t result = call1(action, s);
+    int64_t a  = kk_fst(result);
+    int64_t s2 = kk_snd(result);
+    return kk_pair(call1(f, a), s2);
+}
+
 static int64_t fmap_apply(int64_t clos, int64_t xs) {
     int64_t f = kk_field(clos, 1);
+    /* Dispatch: if xs is a closure (State monad action), use State fmap;
+       otherwise treat as a list. */
+    if (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CLOSURE_TAG) {
+        return make_closure2(&fmap_state_runner, f, xs);
+    }
     int64_t result = kk_nil();
     int64_t *stack = NULL;
     int64_t count = 0, cap2 = 0;

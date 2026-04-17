@@ -13,6 +13,13 @@
 #include <string.h>
 #include "../runtime/kk_runtime.h"
 
+#define KK_CLOSURE_TAG 0x434C4F53  /* 'CLOS' */
+
+/* State monad fmap runner (defined in shim_ghc_prim.c, used for dispatch) */
+extern int64_t kk_pair(int64_t a, int64_t b);
+extern int64_t kk_fst(int64_t p);
+extern int64_t kk_snd(int64_t p);
+
 typedef int64_t (*fn1_t)(int64_t, int64_t);
 typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
 
@@ -179,7 +186,7 @@ int64_t ghc_list_filter_2(int64_t p, int64_t xs) {
     int64_t *arr; int64_t n = list_to_array(xs, &arr);
     int64_t count = 0;
     for (int64_t i = 0; i < n; i++)
-        if (call1(p, arr[i])) arr[count++] = arr[i];
+        if (tobool(call1(p, arr[i]))) arr[count++] = arr[i];
     int64_t result = array_to_list(arr, count);
     free(arr);
     return result;
@@ -419,7 +426,7 @@ int64_t ghc_foldable_find_2(int64_t p, int64_t xs) __asm__("GHC_Internal_Data_Fo
 int64_t ghc_foldable_find_2(int64_t p, int64_t xs) {
     while (!kk_is_nil(xs)) {
         int64_t h = kk_list_head(xs);
-        if (call1(p, h)) return kk_just(h);
+        if (tobool(call1(p, h))) return kk_just(h);
         xs = kk_list_tail(xs);
     }
     return kk_nothing();
@@ -604,7 +611,7 @@ int64_t ghc_oldlist_partition_2(int64_t p, int64_t xs) {
     no_arr  = malloc((size_t)cap * sizeof(int64_t));
     while (!kk_is_nil(xs)) {
         int64_t h = kk_list_head(xs);
-        if (call1(p, h)) {
+        if (tobool(call1(p, h))) {
             if (yes_n >= cap) { cap *= 2; yes_arr = realloc(yes_arr, (size_t)cap * sizeof(int64_t)); no_arr = realloc(no_arr, (size_t)cap * sizeof(int64_t)); }
             yes_arr[yes_n++] = h;
         } else {
@@ -663,8 +670,23 @@ int64_t ghc_either_fMonad_0(void) __asm__("GHC_Internal_Data_Either_zdfMonadEith
 int64_t ghc_either_fMonad_0(void) { return KK_EITHER_MONAD_MARKER; }
 
 /* <$> (Z-encoded: zlzdzg) = fmap */
-/* List fmap */
+
+/* State monad fmap: fmap f action = \s -> let (a,s') = action s in (f a, s') */
+static int64_t fmap_state_runner2(int64_t clos, int64_t s) {
+    int64_t f      = kk_field(clos, 1);
+    int64_t action = kk_field(clos, 2);
+    int64_t result = call1(action, s);
+    int64_t a  = kk_fst(result);
+    int64_t s2 = kk_snd(result);
+    return kk_pair(call1(f, a), s2);
+}
+
+/* Polymorphic fmap: dispatches on whether xs is a list or a State monad action */
 static int64_t fmap_list(int64_t f, int64_t xs) {
+    /* If xs is a closure (State monad action), use State fmap */
+    if (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CLOSURE_TAG) {
+        return make_closure2(&fmap_state_runner2, f, xs);
+    }
     int64_t *arr; int64_t n = list_to_array(xs, &arr);
     for (int64_t i = 0; i < n; i++) arr[i] = call1(f, arr[i]);
     int64_t result = array_to_list(arr, n);

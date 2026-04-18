@@ -224,6 +224,25 @@ static int64_t contags_mod_impl(int64_t x, int64_t y) {
 int64_t contags_mod_0(void) __asm__("Frankenstein_Core_ConTags_mod$0");
 int64_t contags_mod_0(void) { return mk_closure2(contags_mod_impl); }
 
+/* --- error$0: error as a value (closure wrapping error$1) --- */
+extern int64_t GHC_Internal_Err_error_1(int64_t) __asm__("GHC_Internal_Err_error$1");
+int64_t ghc_err_error_0(void) __asm__("GHC_Internal_Err_error$0");
+int64_t ghc_err_error_0(void) { return mk_closure1(GHC_Internal_Err_error_1); }
+
+/* --- Koka donor library stubs (only used by KokaBridge, not exercised) --- */
+
+int64_t common_newName_1(int64_t s) __asm__("Common_Name_newName$1");
+int64_t common_newName_1(int64_t s) { return s; /* name = string identity */ }
+
+int64_t common_newQualified_2(int64_t m, int64_t n) __asm__("Common_Name_newQualified$2");
+int64_t common_newQualified_2(int64_t m, int64_t n) { (void)m; return n; }
+
+int64_t kind_kindFun_2(int64_t a, int64_t b) __asm__("Kind_Kind_kindFun$2");
+int64_t kind_kindFun_2(int64_t a, int64_t b) { (void)a; return b; }
+
+int64_t type_effectExtend_2(int64_t a, int64_t b) __asm__("Type_Type_effectExtend$2");
+int64_t type_effectExtend_2(int64_t a, int64_t b) { (void)a; return b; }
+
 /* False externals removed — the emitter's promoted-fn mechanism
    resolves all 27 where-bound helpers (go, pat_, nub, etc.) to
    their lambda-lifted names within each .o file. */

@@ -299,8 +299,8 @@ for src in "${MODULES[@]}"; do
     continue
   fi
 
-  # Step 2: Stage 1 self-hosted compiler → MLIR
-  if ! ./self-host/frankenstein-self-compiler "$STAGE2/$flat.organ.json" \
+  # Step 2: Stage 1 self-hosted compiler → MLIR (60s timeout for large modules)
+  if ! timeout 60 ./self-host/frankenstein-self-compiler "$STAGE2/$flat.organ.json" \
        --no-perceus -o "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"; then
     echo "FAIL (stage1 compiler)"
     cat "$STAGE2/$flat.err" | tail -3 | sed 's/^/    /'

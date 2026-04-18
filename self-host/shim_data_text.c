@@ -54,7 +54,7 @@ static char* text_flatten(int64_t s, int64_t *out_len) {
  * The caller must NOT free the result — the string owns the memory.
  * This is O(n) on first call for a rope but O(1) for already-flat leaves. */
 #define KK_STR_SLICE 2
-typedef struct { int64_t rc; int64_t byte_len; int32_t kind; int32_t owns; union { const char* bytes; struct { void* l; void* r; } cat; } u; } kk_str_hdr_t;
+typedef struct { int64_t magic; int64_t rc; int64_t byte_len; int32_t kind; int32_t owns; union { const char* bytes; struct { void* l; void* r; } cat; } u; } kk_str_hdr_t;
 static const char* text_borrow(int64_t s, int64_t *out_len) {
     if (!s) { *out_len = 0; return ""; }
     int64_t flat = kk_str_flatten(s);

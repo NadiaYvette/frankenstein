@@ -19,6 +19,10 @@
 #include "kk_cycle.h"
 #include "kk_arena.h"
 
+/* String magic marker — used by kk_is_string for O(1) identification.
+ * Every kk_string_t has this as its first field. */
+#define KK_STRING_MAGIC ((int64_t)0x4B4B535452494E47LL) /* "KKSTRING" */
+
 /* Forward declarations for string tracking (defined later) */
 static void kk_register_string(int64_t ptr);
 static void kk_unregister_string(int64_t ptr);
@@ -43,8 +47,7 @@ void kk_free(void* ptr) {
  * Small integers and other non-pointer values are skipped. */
 /* Exported version (declared in kk_runtime.h) */
 int64_t kk_is_heap_ptr(int64_t ptr) {
-    /* Must be non-zero, 8-byte aligned, and in a plausible heap range.
-     * Values below 4096 are almost certainly not valid heap pointers. */
+    /* Must be non-zero, 8-byte aligned, and above a reasonable threshold. */
     return ptr != 0 && (ptr & 7) == 0 && (uint64_t)ptr > 0x10000;
 }
 
@@ -55,15 +58,11 @@ static inline int64_t* kk_rc_ptr(int64_t ptr) {
 
 void kk_retain(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
-    /* Strings have a different layout (rc at offset 0, not -8) */
     if (kk_is_string(ptr)) { kk_str_retain(ptr); return; }
-    /* Fast range check: reject pointers outside the arena's address space */
     if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
-    /* Increment only the count bits, preserve color and nfields */
     int64_t count = (*rc & KK_RC_MASK) + 1;
     *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | count;
-    /* Retained objects are live — mark black (preserve nfields) */
     *rc = (*rc & (KK_RC_MASK | KK_NFIELDS_MASK)) | KK_COLOR_BLACK;
 }
 
@@ -76,9 +75,7 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
 
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
-    /* Strings have a different refcount layout */
     if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
-    /* Fast range check: reject pointers outside the arena's address space */
     if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
     int64_t count = *rc & KK_RC_MASK;
@@ -268,6 +265,7 @@ void kk_println_con(int64_t v) {
 
 typedef struct kk_string_s kk_string_t;
 struct kk_string_s {
+    int64_t  magic;       /* KK_STRING_MAGIC — enables O(1) kk_is_string */
     int64_t  rc;          /* refcount (Perceus) */
     int64_t  byte_len;    /* total UTF-8 byte length, cached */
     int32_t  kind;        /* KK_STR_LEAF | KK_STR_CONCAT */
@@ -286,6 +284,7 @@ void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);
 static kk_string_t* kk_str_alloc_leaf(const char* bytes, int64_t byte_len, int owns) {
     kk_string_t* s = (kk_string_t*)malloc(sizeof(kk_string_t));
     if (!s) return NULL;
+    s->magic      = KK_STRING_MAGIC;
     s->rc         = 1;
     s->byte_len   = byte_len;
     s->kind       = KK_STR_LEAF;
@@ -297,6 +296,7 @@ static kk_string_t* kk_str_alloc_leaf(const char* bytes, int64_t byte_len, int o
 static kk_string_t* kk_str_alloc_concat(kk_string_t* l, kk_string_t* r) {
     kk_string_t* s = (kk_string_t*)malloc(sizeof(kk_string_t));
     if (!s) return NULL;
+    s->magic      = KK_STRING_MAGIC;
     s->rc         = 1;
     s->byte_len   = (l ? l->byte_len : 0) + (r ? r->byte_len : 0);
     s->kind       = KK_STR_CONCAT;
@@ -316,6 +316,7 @@ static kk_string_t* kk_str_alloc_concat(kk_string_t* l, kk_string_t* r) {
 static kk_string_t* kk_str_alloc_slice(kk_string_t* parent, const char* bytes, int64_t byte_len) {
     kk_string_t* s = (kk_string_t*)malloc(sizeof(kk_string_t));
     if (!s) return NULL;
+    s->magic      = KK_STRING_MAGIC;
     s->rc         = 1;
     s->byte_len   = byte_len;
     s->kind       = KK_STR_SLICE;
@@ -531,6 +532,7 @@ void kk_str_drop(int64_t s_i) {
     } else if (s->kind == KK_STR_LEAF && s->owns_bytes) {
         free((void*)s->u.bytes);
     }
+    s->magic = 0;  /* prevent dangling pointer from looking like a live string */
     free(s);
 }
 
@@ -1062,25 +1064,37 @@ int64_t kk_thunk_force(int64_t thunk) {
  * The MLIR emitter generates many small strings (SSA names, keywords, etc.)
  * and can easily exceed 65K strings for programs with 20+ definitions.
  * 1M entries × 8 bytes = 8 MB — acceptable for bootstrapping. */
-#define KK_STRING_TABLE_SIZE (1 << 20)  /* 1,048,576 */
+#define KK_STRING_TABLE_SIZE (1 << 22)  /* 4,194,304 */
+#define KK_STRING_TOMBSTONE ((int64_t)1) /* deleted entry sentinel (odd → never a valid ptr) */
 static int64_t string_table[KK_STRING_TABLE_SIZE];
+/* Global string address range — O(1) rejection for non-string pointers. */
+static uintptr_t g_string_lo = (uintptr_t)-1;
+static uintptr_t g_string_hi = 0;
 
 /* String registration log — records every registered string pointer in
  * allocation order. Used by kk_string_rollback to identify which strings
  * were allocated inside a handler body and should be freed on abort.
  * The hash table (string_table) provides O(1) lookup; the log provides
  * O(1) checkpoint/rollback. */
-#define KK_STRING_LOG_SIZE (1 << 20)
+#define KK_STRING_LOG_SIZE (1 << 22)
 static int64_t string_log[KK_STRING_LOG_SIZE];
 static int64_t string_log_len = 0;
 
 static void kk_register_string(int64_t ptr) {
+    /* Update global string address range for O(1) rejection */
+    uintptr_t u = (uintptr_t)ptr;
+    if (u < g_string_lo) g_string_lo = u;
+    if (u + sizeof(void*) > g_string_hi) g_string_hi = u + sizeof(void*);
     int64_t idx = (ptr >> 3) & (KK_STRING_TABLE_SIZE - 1);
+    int64_t first_tombstone = -1;
     for (int64_t i = 0; i < KK_STRING_TABLE_SIZE; i++) {
         int64_t probe = (idx + i) & (KK_STRING_TABLE_SIZE - 1);
-        if (string_table[probe] == 0 || string_table[probe] == ptr) {
-            string_table[probe] = ptr;
-            /* Append to log (if space). */
+        if (string_table[probe] == ptr) return;  /* already registered */
+        if (string_table[probe] == KK_STRING_TOMBSTONE && first_tombstone < 0)
+            first_tombstone = probe;
+        if (string_table[probe] == 0) {
+            int64_t slot = first_tombstone >= 0 ? first_tombstone : probe;
+            string_table[slot] = ptr;
             if (string_log_len < KK_STRING_LOG_SIZE) {
                 string_log[string_log_len++] = ptr;
             }
@@ -1094,7 +1108,7 @@ static void kk_unregister_string(int64_t ptr) {
     for (int64_t i = 0; i < KK_STRING_TABLE_SIZE; i++) {
         int64_t probe = (idx + i) & (KK_STRING_TABLE_SIZE - 1);
         if (string_table[probe] == ptr) {
-            string_table[probe] = 0;
+            string_table[probe] = KK_STRING_TOMBSTONE;  /* preserve probe chain */
             return;
         }
         if (string_table[probe] == 0) return;
@@ -1103,11 +1117,27 @@ static void kk_unregister_string(int64_t ptr) {
 
 int64_t kk_is_string(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return 0;
+    uintptr_t u = (uintptr_t)ptr;
+    /* Fast rejection: if ptr is outside the string address range,
+     * it can only be a string if it's in the arena range (rare case:
+     * some string pointers overlap the arena address space). */
+    int in_string_range = (u >= g_string_lo && u < g_string_hi);
+    if (!in_string_range) {
+        /* Not in string range. Check arena range — if yes, use magic marker. */
+        if (kk_arena_maybe_owns((const void*)(intptr_t)ptr))
+            return *(int64_t*)(intptr_t)ptr == KK_STRING_MAGIC;
+        return 0;
+    }
+    /* In string range. Arena-range pointers can be dereferenced for magic check. */
+    if (kk_arena_maybe_owns((const void*)(intptr_t)ptr))
+        return *(int64_t*)(intptr_t)ptr == KK_STRING_MAGIC;
+    /* String-range, non-arena: use hash table (with tombstones). */
     int64_t idx = (ptr >> 3) & (KK_STRING_TABLE_SIZE - 1);
     for (int64_t i = 0; i < KK_STRING_TABLE_SIZE; i++) {
         int64_t probe = (idx + i) & (KK_STRING_TABLE_SIZE - 1);
         if (string_table[probe] == ptr) return 1;
         if (string_table[probe] == 0)  return 0;
+        /* skip tombstones */
     }
     return 0;
 }
@@ -1151,6 +1181,8 @@ static void kk_str_force_free(int64_t s_i) {
     if (s->kind == KK_STR_LEAF && s->owns_bytes) {
         free((void*)s->u.bytes);
     }
+    /* Clear magic so freed memory isn't mistaken for a live string */
+    s->magic = 0;
     /* For CONCAT nodes, children are freed by their own log entries. */
     free(s);
 }
@@ -1196,6 +1228,14 @@ int64_t kk_compare(int64_t a, int64_t b) {
     /* Both heap objects (con)? Compare by tag, then fields. */
     if (kk_is_heap_ptr(a) && kk_is_heap_ptr(b) &&
         !kk_is_string(a) && !kk_is_string(b)) {
+        /* Validate both pointers are arena-owned before dereferencing.
+         * Set operations on Names can encounter freed fields if Perceus
+         * dropped a Name that's still referenced in the Set.  Fall back
+         * to address comparison for non-arena pointers. */
+        if (!kk_arena_maybe_owns((const void*)(intptr_t)a) ||
+            !kk_arena_maybe_owns((const void*)(intptr_t)b)) {
+            return (a > b) - (a < b);
+        }
         int64_t ta = kk_tag(a), tb = kk_tag(b);
         if (ta != tb) return (ta > tb) - (ta < tb);
         int64_t nfa = kk_nfields(a), nfb = kk_nfields(b);

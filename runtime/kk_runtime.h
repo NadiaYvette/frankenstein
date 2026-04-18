@@ -68,6 +68,7 @@ int64_t kk_str_eq(int64_t a, int64_t b);
 /* String operations */
 int64_t kk_str_concat(int64_t a, int64_t b);   /* O(1) — builds CONCAT node */
 int64_t kk_str_flatten(int64_t s);             /* force into a single LEAF */
+int64_t kk_str_slice(int64_t parent, int64_t byte_offset, int64_t byte_len); /* O(1) substring view */
 int64_t kk_str_show_int(int64_t n);
 
 /* I/O */

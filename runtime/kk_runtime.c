@@ -45,7 +45,7 @@ void kk_free(void* ptr) {
 int64_t kk_is_heap_ptr(int64_t ptr) {
     /* Must be non-zero, 8-byte aligned, and in a plausible heap range.
      * Values below 4096 are almost certainly not valid heap pointers. */
-    return ptr != 0 && (ptr & 7) == 0 && ptr > 4096;
+    return ptr != 0 && (ptr & 7) == 0 && (uint64_t)ptr > 0x10000;
 }
 
 /* Refcount helpers — pointer to refcount is at (ptr - 8) */
@@ -60,11 +60,11 @@ void kk_retain(int64_t ptr) {
     /* Validate arena ownership before touching refcount — same rationale as kk_drop */
     if (!kk_arena_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
-    /* Increment only the count bits, preserve color */
+    /* Increment only the count bits, preserve color and nfields */
     int64_t count = (*rc & KK_RC_MASK) + 1;
-    *rc = (*rc & KK_COLOR_MASK) | count;
-    /* Retained objects are live — mark black */
-    *rc = (*rc & KK_RC_MASK) | KK_COLOR_BLACK;
+    *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | count;
+    /* Retained objects are live — mark black (preserve nfields) */
+    *rc = (*rc & (KK_RC_MASK | KK_NFIELDS_MASK)) | KK_COLOR_BLACK;
 }
 
 int64_t kk_tag(int64_t ptr);  /* forward decl */
@@ -88,8 +88,8 @@ void kk_drop(int64_t ptr) {
     int64_t count = *rc & KK_RC_MASK;
     if (count == 0) return;  /* already freed or corrupt — don't double-free */
     if (count > 1) {
-        /* Shared — just decrement */
-        *rc = (*rc & KK_COLOR_MASK) | (count - 1);
+        /* Shared — just decrement (preserve color and nfields) */
+        *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | (count - 1);
         return;
     }
     /* Sole owner (rc == 1) — drop children, then free.
@@ -196,16 +196,16 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
     int64_t* block = (int64_t*)kk_arena_alloc((size_t)total);
     if (!block) block = (int64_t*)malloc((size_t)total);
     if (!block) return 0;
-    block[0] = KK_COLOR_BLACK | 1;  /* color=black, refcount = 1 */
-    block[1] = tag;                  /* tag */
+    /* Pack nfields (clamped to 255) into the RC word alongside color and refcount */
+    int64_t nf_bits = (nfields > 255 ? 255 : nfields) << KK_NFIELDS_SHIFT;
+    block[0] = KK_COLOR_BLACK | nf_bits | 1;  /* color=black, nfields, refcount=1 */
+    block[1] = tag;                             /* tag */
     /* Zero-init fields */
     for (int64_t i = 0; i < nfields; i++) {
         block[2 + i] = 0;
     }
     /* Return pointer to the tag slot */
     int64_t ptr = (int64_t)&block[1];
-    /* Register field count for cycle collector scanning */
-    kk_register_nfields(ptr, nfields);
     return ptr;
 }
 
@@ -268,6 +268,7 @@ void kk_println_con(int64_t v) {
 
 #define KK_STR_LEAF   0
 #define KK_STR_CONCAT 1
+#define KK_STR_SLICE  2  /* view into a parent string; bytes points into parent's buffer */
 
 typedef struct kk_string_s kk_string_t;
 struct kk_string_s {
@@ -313,6 +314,46 @@ static kk_string_t* kk_str_alloc_concat(kk_string_t* l, kk_string_t* r) {
     return s;
 }
 
+/* Allocate a slice: a view into parent's buffer at a given offset.
+ * O(1) — no copying. Parent is retained (rc++) so its buffer stays alive.
+ * Uses union cat: cat.l = parent, cat.r = (kk_string_t*)bytes_ptr. */
+static kk_string_t* kk_str_alloc_slice(kk_string_t* parent, const char* bytes, int64_t byte_len) {
+    kk_string_t* s = (kk_string_t*)malloc(sizeof(kk_string_t));
+    if (!s) return NULL;
+    s->rc         = 1;
+    s->byte_len   = byte_len;
+    s->kind       = KK_STR_SLICE;
+    s->owns_bytes = 0;
+    s->u.cat.l    = parent;
+    s->u.cat.r    = (kk_string_t*)bytes;  /* reinterpret: bytes pointer stored in cat.r */
+    if (parent) parent->rc++;
+    return s;
+}
+
+/* Get the bytes pointer from a leaf or slice (no flattening needed). */
+static const char* kk_str_bytes(kk_string_t* s) {
+    if (s->kind == KK_STR_SLICE)
+        return (const char*)s->u.cat.r;
+    return s->u.bytes;
+}
+
+/* Public API: create a slice of an existing kk_string.
+ * Flattens the parent first (so we have a contiguous buffer to slice into).
+ * offset/length are in bytes. Returns a new kk_string (registered). */
+int64_t kk_str_slice(int64_t parent_i, int64_t byte_offset, int64_t byte_len) {
+    if (byte_len <= 0) return kk_string_empty();
+    /* Flatten parent to ensure contiguous bytes */
+    int64_t flat = kk_str_flatten(parent_i);
+    kk_string_t* parent = (kk_string_t*)flat;
+    if (!parent || byte_offset >= parent->byte_len) return kk_string_empty();
+    if (byte_offset + byte_len > parent->byte_len)
+        byte_len = parent->byte_len - byte_offset;
+    const char* bytes = kk_str_bytes(parent) + byte_offset;
+    int64_t r = (int64_t)kk_str_alloc_slice(parent, bytes, byte_len);
+    kk_register_string(r);
+    return r;
+}
+
 int64_t kk_string_from_literal(int64_t bytes_ptr, int64_t byte_len) {
     int64_t r = (int64_t)kk_str_alloc_leaf((const char*)bytes_ptr, byte_len, 0);
     kk_register_string(r);
@@ -344,11 +385,10 @@ int64_t kk_str_len(int64_t s_i) {
 /* Walk a rope leaf-by-leaf, counting UTF-8 codepoints (lead bytes). */
 static int64_t kk_str_char_count_rec(kk_string_t* s) {
     if (s == NULL) return 0;
-    if (s->kind == KK_STR_LEAF) {
-        const unsigned char* p = (const unsigned char*)s->u.bytes;
+    if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) {
+        const unsigned char* p = (const unsigned char*)kk_str_bytes(s);
         int64_t count = 0;
         for (int64_t i = 0; i < s->byte_len; i++) {
-            /* Continuation bytes start with 0b10xxxxxx */
             if ((p[i] & 0xC0) != 0x80) count++;
         }
         return count;
@@ -379,8 +419,9 @@ int64_t kk_str_concat(int64_t a_i, int64_t b_i) {
 /* Copy a rope into a contiguous buffer at *out, advancing *out. */
 static void kk_str_copy_into(kk_string_t* s, char** out) {
     if (s == NULL) return;
-    if (s->kind == KK_STR_LEAF) {
-        for (int64_t i = 0; i < s->byte_len; i++) (*out)[i] = s->u.bytes[i];
+    if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) {
+        const char* bytes = kk_str_bytes(s);
+        for (int64_t i = 0; i < s->byte_len; i++) (*out)[i] = bytes[i];
         *out += s->byte_len;
     } else {
         kk_str_copy_into(s->u.cat.l, out);
@@ -391,7 +432,7 @@ static void kk_str_copy_into(kk_string_t* s, char** out) {
 int64_t kk_str_flatten(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return kk_string_empty();
-    if (s->kind == KK_STR_LEAF) return s_i;
+    if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) return s_i;
     int64_t n = s->byte_len;
     char* buf = (char*)malloc((size_t)n + 1);
     if (!buf) return 0;
@@ -406,8 +447,9 @@ int64_t kk_str_flatten(int64_t s_i) {
 void kk_print_str(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return;
-    if (s->kind == KK_STR_LEAF) {
-        if (s->byte_len > 0) fwrite(s->u.bytes, 1, (size_t)s->byte_len, stdout);
+    if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) {
+        const char* bytes = kk_str_bytes(s);
+        if (s->byte_len > 0) fwrite(bytes, 1, (size_t)s->byte_len, stdout);
         return;
     }
     /* Rope: flatten through a temporary buffer (no header allocation). */
@@ -487,6 +529,9 @@ void kk_str_drop(int64_t s_i) {
     if (s->kind == KK_STR_CONCAT) {
         kk_str_drop((int64_t)s->u.cat.l);
         kk_str_drop((int64_t)s->u.cat.r);
+    } else if (s->kind == KK_STR_SLICE) {
+        /* Drop reference to parent string */
+        kk_str_drop((int64_t)s->u.cat.l);
     } else if (s->kind == KK_STR_LEAF && s->owns_bytes) {
         free((void*)s->u.bytes);
     }
@@ -525,9 +570,9 @@ int64_t kk_bytes_eq(int64_t a, int64_t b) {
 /* Random byte access — walks the rope to find the leaf containing index i. */
 static int64_t kk_bytes_index_rec(kk_string_t* s, int64_t i) {
     if (s == NULL) return -1;
-    if (s->kind == KK_STR_LEAF) {
+    if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) {
         if (i < 0 || i >= s->byte_len) return -1;
-        return (int64_t)(unsigned char)s->u.bytes[i];
+        return (int64_t)(unsigned char)kk_str_bytes(s)[i];
     }
     int64_t left_len = (s->u.cat.l ? s->u.cat.l->byte_len : 0);
     if (i < left_len) return kk_bytes_index_rec(s->u.cat.l, i);
@@ -993,6 +1038,7 @@ int64_t kk_thunk_create(int64_t fn_ptr) {
  * cached pair and each drops it independently. */
 int64_t kk_thunk_force(int64_t thunk) {
     if (!kk_is_heap_ptr(thunk)) return thunk;  /* not a thunk, return as-is */
+    if (!kk_arena_owns((const void*)(intptr_t)thunk)) return thunk; /* not our heap */
     int64_t tag = kk_tag(thunk);
     if (tag != KK_THUNK_TAG) return thunk;     /* not a thunk, return as-is */
     int64_t evaluated = kk_field(thunk, 0);
@@ -1016,7 +1062,11 @@ int64_t kk_thunk_force(int64_t thunk) {
 /*  String tracking — distinguish kk_string_t from kk_alloc_con       */
 /* ================================================================== */
 
-#define KK_STRING_TABLE_SIZE 65536
+/* String table must be large enough for ALL strings during program lifetime.
+ * The MLIR emitter generates many small strings (SSA names, keywords, etc.)
+ * and can easily exceed 65K strings for programs with 20+ definitions.
+ * 1M entries × 8 bytes = 8 MB — acceptable for bootstrapping. */
+#define KK_STRING_TABLE_SIZE (1 << 20)  /* 1,048,576 */
 static int64_t string_table[KK_STRING_TABLE_SIZE];
 
 /* String registration log — records every registered string pointer in
@@ -1024,7 +1074,7 @@ static int64_t string_table[KK_STRING_TABLE_SIZE];
  * were allocated inside a handler body and should be freed on abort.
  * The hash table (string_table) provides O(1) lookup; the log provides
  * O(1) checkpoint/rollback. */
-#define KK_STRING_LOG_SIZE 65536
+#define KK_STRING_LOG_SIZE (1 << 20)
 static int64_t string_log[KK_STRING_LOG_SIZE];
 static int64_t string_log_len = 0;
 
@@ -1122,7 +1172,7 @@ static const char* kk_str_flatten_cmp(int64_t s, int64_t *out_len) {
     int64_t flat = kk_str_flatten(s);
     kk_string_t* f = (kk_string_t*)flat;
     *out_len = f->byte_len;
-    return f->u.bytes;
+    return kk_str_bytes(f);
 }
 
 int64_t kk_str_compare(int64_t a, int64_t b) {
@@ -1139,6 +1189,8 @@ int64_t kk_str_compare(int64_t a, int64_t b) {
 /* ================================================================== */
 /*  Generic structural comparison                                      */
 /* ================================================================== */
+
+/* No-op for now — use kk_is_heap_ptr + kk_is_string checks directly */
 
 int64_t kk_compare(int64_t a, int64_t b) {
     if (a == b) return 0;

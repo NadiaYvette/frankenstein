@@ -12,7 +12,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "../runtime/kk_runtime.h"
+
+static double now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
 
 /* Not in kk_runtime.h but defined in kk_runtime.c */
 extern void kk_args_init(int argc, char** argv);
@@ -65,11 +72,14 @@ int main(int argc, char** argv) {
     const char* input_path = NULL;
     const char* output_path = NULL;
     int verbose = 0;
+    int skip_perceus = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             output_path = argv[++i];
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             verbose = 1;
+        } else if (strcmp(argv[i], "--no-perceus") == 0) {
+            skip_perceus = 1;
         } else if (argv[i][0] != '-' || strcmp(argv[i], "-") == 0) {
             input_path = argv[i];
         }
@@ -106,9 +116,14 @@ int main(int argc, char** argv) {
      * Note: Haskell String = [Char] — a cons-list of ints, not a kk_string.
      * We extract chars from the cons-list to build the error message. */
     int64_t tag = kk_tag(result);
+    if (verbose) fprintf(stderr, "consumeProgram returned tag=%ld\n", (long)tag);
     if (tag == 50386) {
         /* Left error_msg — error_msg is [Char] (Haskell String) */
         int64_t err_msg = kk_field(result, 0);
+        if (verbose) fprintf(stderr, "  err_msg ptr=%p heap=%d is_str=%d tag=%ld\n",
+                             (void*)err_msg, kk_is_heap_ptr(err_msg),
+                             kk_is_string(err_msg),
+                             kk_is_heap_ptr(err_msg) ? kk_tag(err_msg) : -1);
         if (kk_is_string(err_msg)) {
             char* cstr = kk_str_dup_cstr(err_msg);
             fprintf(stderr, "OrganIR parse error: %s\n", cstr);
@@ -118,14 +133,33 @@ int main(int argc, char** argv) {
             char buf[4096];
             int pos = 0;
             int64_t cur = err_msg;
-            while (pos < 4095 && kk_is_heap_ptr(cur) && kk_tag(cur) == KK_CONS_TAG) {
+            /* Hash-based tag for ":" (cons) = 46589, for "[]" (nil) = 31636 */
+            fprintf(stderr, "  [debug] starting char extract loop, cur=%p heap=%d tag=%ld\n",
+                    (void*)cur, kk_is_heap_ptr(cur),
+                    kk_is_heap_ptr(cur) ? kk_tag(cur) : -1);
+            while (pos < 4095 && kk_is_heap_ptr(cur) && kk_tag(cur) == 46589) {
                 int64_t ch_box = kk_field(cur, 0);
+                if (pos < 5) {
+                    fprintf(stderr, "  char[%d]: ch_box=%ld (0x%lx) heap=%d",
+                            pos, (long)ch_box, (unsigned long)ch_box,
+                            kk_is_heap_ptr(ch_box));
+                    if (kk_is_heap_ptr(ch_box))
+                        fprintf(stderr, " tag=%ld field0=%ld",
+                                (long)kk_tag(ch_box), (long)kk_field(ch_box, 0));
+                    fprintf(stderr, "\n");
+                }
                 /* Unbox Char: if heap-allocated C# (tag 30786), extract codepoint */
-                int64_t ch = (kk_is_heap_ptr(ch_box) ? kk_field(ch_box, 0) : ch_box);
+                int64_t ch;
+                if (kk_is_heap_ptr(ch_box)) {
+                    ch = kk_field(ch_box, 0);
+                } else {
+                    ch = ch_box;
+                }
                 if (ch >= 32 && ch < 127) buf[pos++] = (char)ch;
                 else { buf[pos++] = '?'; }
                 cur = kk_field(cur, 1);
             }
+            fprintf(stderr, "  [debug] loop ended at pos=%d, cur=%p\n", pos, (void*)cur);
             buf[pos] = '\0';
             fprintf(stderr, "OrganIR parse error: %s\n", buf);
         }
@@ -140,40 +174,81 @@ int main(int argc, char** argv) {
     if (verbose) fprintf(stderr, "Parsed OrganIR successfully\n");
 
     /* Run compiler passes */
+    double t0, t1;
+
     if (verbose) fprintf(stderr, "Running flattenPatterns...\n");
+    t0 = now_sec();
     prog = Frankenstein_Core_FlattenPatterns_flattenPatterns(prog);
+    t1 = now_sec();
+    if (verbose) fprintf(stderr, "  flattenPatterns: %.3fs\n", t1 - t0);
 
     if (verbose) fprintf(stderr, "Running effectOptimize...\n");
+    t0 = now_sec();
     {
-        /* effectOptimize is a CAF (point-free def: fst . effectOptimizeWithStats).
-         * It returns a thunk wrapping a closure (Program -> Program). */
         int64_t thunk = Frankenstein_Core_EffectOpt_effectOptimize();
         int64_t closure = kk_thunk_force(thunk);
         int64_t fp = kk_field(closure, 0);
         typedef int64_t (*fn2_t)(int64_t, int64_t);
         prog = ((fn2_t)(intptr_t)fp)(closure, prog);
     }
+    t1 = now_sec();
+    if (verbose) fprintf(stderr, "  effectOptimize: %.3fs\n", t1 - t0);
 
-    /* Evidence pass: resolve EHandle/EPerform into plain function calls.
-     * Collect all effect declarations from the program, then run the
-     * evidence-passing translation using the global registry (mirrors
-     * what the host compiler does in app/Main.hs). */
     if (verbose) fprintf(stderr, "Running evidencePass...\n");
+    t0 = now_sec();
     {
         int64_t globalEffects = Frankenstein_Core_Evidence_collectGlobalEffects(prog);
         prog = Frankenstein_Core_Evidence_evidencePassGlobal(globalEffects, prog);
     }
+    t1 = now_sec();
+    if (verbose) fprintf(stderr, "  evidencePass: %.3fs\n", t1 - t0);
 
-    if (verbose) fprintf(stderr, "Running insertPerceus...\n");
-    prog = Frankenstein_Core_Perceus_insertPerceus(prog);
+    if (skip_perceus) {
+        if (verbose) fprintf(stderr, "Skipping insertPerceus (--no-perceus)\n");
+    } else {
+        if (verbose) fprintf(stderr, "Running insertPerceus...\n");
+        t0 = now_sec();
+        prog = Frankenstein_Core_Perceus_insertPerceus(prog);
+        t1 = now_sec();
+        if (verbose) fprintf(stderr, "  insertPerceus: %.3fs\n", t1 - t0);
+    }
+
+    /* Debug: inspect prog before emitting */
+    if (verbose) {
+        fprintf(stderr, "  prog tag=%ld nfields=%ld\n",
+                (long)kk_tag(prog), (long)kk_nfields(prog));
+        for (int64_t i = 0; i < kk_nfields(prog) && i < 6; i++) {
+            int64_t f = kk_field(prog, i);
+            fprintf(stderr, "  prog.field[%ld] = %p heap=%d",
+                    (long)i, (void*)f, kk_is_heap_ptr(f));
+            if (kk_is_heap_ptr(f))
+                fprintf(stderr, " tag=%ld nf=%ld", (long)kk_tag(f), (long)kk_nfields(f));
+            fprintf(stderr, "\n");
+        }
+    }
 
     if (verbose) fprintf(stderr, "Running emitProgramText...\n");
+    t0 = now_sec();
     int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
+    t1 = now_sec();
+    if (verbose) fprintf(stderr, "  emitProgramText: %.3fs\n", t1 - t0);
 
     if (!kk_is_string(mlir)) {
-        fprintf(stderr, "Error: emitProgramText did not return a string (ptr=%p heap=%d tag=%ld)\n",
+        fprintf(stderr, "Error: emitProgramText did not return a string (ptr=%p heap=%d tag=%ld nfields=%ld)\n",
                 (void*)mlir, kk_is_heap_ptr(mlir) ? 1 : 0,
-                kk_is_heap_ptr(mlir) ? kk_tag(mlir) : -1);
+                kk_is_heap_ptr(mlir) ? kk_tag(mlir) : -1,
+                kk_is_heap_ptr(mlir) ? kk_nfields(mlir) : -1);
+        if (kk_is_heap_ptr(mlir)) {
+            int64_t nf = kk_nfields(mlir);
+            for (int64_t i = 0; i < nf && i < 5; i++) {
+                int64_t f = kk_field(mlir, i);
+                fprintf(stderr, "  field[%ld] = %ld (0x%lx) heap=%d",
+                        (long)i, (long)f, (unsigned long)f, kk_is_heap_ptr(f));
+                if (kk_is_heap_ptr(f))
+                    fprintf(stderr, " tag=%ld is_str=%d", (long)kk_tag(f), kk_is_string(f));
+                fprintf(stderr, "\n");
+            }
+        }
         return 1;
     }
 

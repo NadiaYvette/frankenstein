@@ -29,9 +29,32 @@ static int64_t call1(int64_t clos, int64_t a) {
     clos = kk_thunk_force(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw1_t)(int64_t);
-        return ((raw1_t)(intptr_t)clos)(a);
+        raw1_t fn = (raw1_t)(intptr_t)clos;
+        if (__builtin_expect(!fn, 0)) {
+            fprintf(stderr, "FATAL: call1 null closure! a=%p (0x%lx)\n",
+                    (void*)a, (unsigned long)a);
+            exit(99);
+        }
+        return fn(a);
     }
-    return ((fn1_t)(intptr_t)kk_field(clos, 0))(clos, a);
+    int64_t fp = kk_field(clos, 0);
+    if (fp == 0) {
+        fprintf(stderr, "FATAL: call1 null fp! clos=%p tag=%ld nf=%ld a=%p\n",
+                (void*)clos, (long)kk_tag(clos), (long)kk_nfields(clos), (void*)a);
+        for (int64_t i = 0; i < kk_nfields(clos) && i < 8; i++) {
+            int64_t fi = kk_field(clos, i);
+            fprintf(stderr, "  field[%ld] = %ld (0x%lx) heap=%d",
+                    (long)i, (long)fi, (unsigned long)fi, kk_is_heap_ptr(fi));
+            if (kk_is_heap_ptr(fi) && kk_is_string(fi)) {
+                char* s = kk_str_dup_cstr(fi);
+                fprintf(stderr, " str=\"%.40s\"", s);
+                free(s);
+            }
+            fprintf(stderr, "\n");
+        }
+        exit(99);
+    }
+    return ((fn1_t)(intptr_t)fp)(clos, a);
 }
 static int64_t call2(int64_t clos, int64_t a, int64_t b) {
     kk_retain(a);
@@ -53,12 +76,15 @@ static int64_t make_closure0(void* fp) {
 static int64_t make_closure1(void* fp, int64_t c1) {
     int64_t c = kk_alloc_con(CLOS_TAG, 2);
     kk_set_field(c, 0, (int64_t)(intptr_t)fp);
+    kk_retain(c1);
     kk_set_field(c, 1, c1);
     return c;
 }
 static int64_t make_closure2(void* fp, int64_t c1, int64_t c2) {
     int64_t c = kk_alloc_con(CLOS_TAG, 3);
     kk_set_field(c, 0, (int64_t)(intptr_t)fp);
+    kk_retain(c1);
+    kk_retain(c2);
     kk_set_field(c, 1, c1);
     kk_set_field(c, 2, c2);
     return c;

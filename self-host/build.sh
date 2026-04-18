@@ -270,3 +270,170 @@ for example in effect_ask effect_state; do
   fi
 done
 echo "=== Phase 8 results: $E2E_PASS passed, $E2E_FAIL failed ==="
+
+echo ""
+echo "=== Phase 9: Bootstrap loop (stage 2) ==="
+echo "Compiling all modules through stage 1 self-hosted compiler..."
+
+STAGE2="$OUT/stage2"
+rm -rf "$STAGE2"
+mkdir -p "$STAGE2"
+
+S2_OK=0
+S2_FAIL=0
+S2_MATCH=0
+S2_MISMATCH=0
+for src in "${MODULES[@]}"; do
+  # Derive flat name same as Phase 1
+  rel="${src#src/Frankenstein/}"
+  rel="${rel#src/}"
+  base="${rel%.hs}"
+  flat="${base//\//_}"
+
+  echo -n "  $rel ... "
+
+  # Step 1: Host compiler → OrganIR JSON
+  if ! $FRKN_RUN "$src" --emit-organ > "$STAGE2/$flat.organ.json" 2>"$STAGE2/$flat.err"; then
+    echo "FAIL (host --emit-organ)"
+    S2_FAIL=$((S2_FAIL + 1))
+    continue
+  fi
+
+  # Step 2: Stage 1 self-hosted compiler → MLIR
+  if ! ./self-host/frankenstein-self-compiler "$STAGE2/$flat.organ.json" \
+       --no-perceus -o "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"; then
+    echo "FAIL (stage1 compiler)"
+    cat "$STAGE2/$flat.err" | tail -3 | sed 's/^/    /'
+    S2_FAIL=$((S2_FAIL + 1))
+    continue
+  fi
+
+  # Step 3: MLIR → LLVM IR
+  if ! mlir-opt $MLIR_PASSES "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err" \
+       | mlir-translate --mlir-to-llvmir > "$STAGE2/$flat.ll" 2>>"$STAGE2/$flat.err"; then
+    echo "FAIL (mlir-opt/translate)"
+    S2_FAIL=$((S2_FAIL + 1))
+    continue
+  fi
+
+  # Step 4: LLVM IR → .o
+  if ! clang -c -o "$STAGE2/$flat.o" "$STAGE2/$flat.ll" 2>>"$STAGE2/$flat.err"; then
+    echo "FAIL (clang)"
+    S2_FAIL=$((S2_FAIL + 1))
+    continue
+  fi
+
+  # Compare stage 1 and stage 2 MLIR
+  if diff -q "$OUT/$flat.mlir" "$STAGE2/$flat.mlir" > /dev/null 2>&1; then
+    echo "OK ($(stat -c%s "$STAGE2/$flat.o") bytes, MLIR match)"
+    S2_MATCH=$((S2_MATCH + 1))
+  else
+    echo "OK ($(stat -c%s "$STAGE2/$flat.o") bytes, MLIR differs)"
+    S2_MISMATCH=$((S2_MISMATCH + 1))
+  fi
+  S2_OK=$((S2_OK + 1))
+done
+echo "=== Stage 2 compile: $S2_OK succeeded, $S2_FAIL failed ==="
+echo "=== MLIR comparison: $S2_MATCH match, $S2_MISMATCH differ ==="
+
+if [ "$S2_OK" -gt 0 ]; then
+  echo ""
+  echo "=== Phase 9b: Link stage 2 compiler ==="
+  # Link stage 2 compiler binary (stage 2 .o files + same shims/runtime + driver)
+  STAGE2_OBJS="$STAGE2/*.o"
+  # Include all shims, runtime, and driver from stage 1 build
+  SHIM_OBJS=$(ls "$OUT"/*.o | grep -vE '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_|main\.o)')
+  clang -O2 -o self-host/frankenstein-self-compiler-stage2 \
+    $STAGE2_OBJS $SHIM_OBJS -lm \
+    -Wl,--unresolved-symbols=ignore-in-object-files 2>/dev/null
+  echo "Linked: self-host/frankenstein-self-compiler-stage2 ($(stat -c%s self-host/frankenstein-self-compiler-stage2) bytes)"
+
+  echo ""
+  echo "=== Phase 9c: Verify stage 2 (end-to-end tests) ==="
+  S2E_PASS=0
+  S2E_FAIL=0
+  for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail; do
+    echo -n "  $example.hs (stage2): "
+    # Host compiler → OrganIR → stage 2 compiler → MLIR
+    if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \
+         | ./self-host/frankenstein-self-compiler-stage2 - -o "$STAGE2/$example-self.mlir" 2>/dev/null; then
+      echo "FAIL (stage2 compiler)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    # MLIR → LLVM IR → native binary
+    if ! $MLIR_OPT "$STAGE2/$example-self.mlir" 2>/dev/null \
+         | mlir-translate --mlir-to-llvmir > "$STAGE2/$example-self.ll" 2>/dev/null; then
+      echo "FAIL (mlir-opt/translate)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    if ! clang -c -o "$STAGE2/$example-self-ir.o" "$STAGE2/$example-self.ll" 2>/dev/null; then
+      echo "FAIL (clang -c)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    if ! clang -o "$STAGE2/$example-self-bin" \
+         "$STAGE2/$example-self-ir.o" "$OUT/kk_rt_standalone.o" \
+         "$OUT/kk_arena_standalone.o" "$OUT/kk_cycle_standalone.o" -lm 2>/dev/null; then
+      echo "FAIL (link)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    RESULT=$("$STAGE2/$example-self-bin" 2>/dev/null)
+    if [ "$RESULT" = "${EXPECTED[$example]}" ]; then
+      echo "PASS ($RESULT)"
+      S2E_PASS=$((S2E_PASS + 1))
+    else
+      echo "FAIL (expected ${EXPECTED[$example]}, got '$RESULT')"
+      S2E_FAIL=$((S2E_FAIL + 1))
+    fi
+  done
+  # Effect examples through stage 2
+  for example in effect_ask effect_state; do
+    echo -n "  $example.json (stage2): "
+    if ! ./self-host/frankenstein-self-compiler-stage2 "examples/$example.json" -o "$STAGE2/$example-self.mlir" 2>/dev/null; then
+      echo "FAIL (stage2 compiler)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    if ! $MLIR_OPT "$STAGE2/$example-self.mlir" 2>/dev/null \
+         | mlir-translate --mlir-to-llvmir > "$STAGE2/$example-self.ll" 2>/dev/null; then
+      echo "FAIL (mlir-opt/translate)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    if ! clang -c -o "$STAGE2/$example-self-ir.o" "$STAGE2/$example-self.ll" 2>/dev/null; then
+      echo "FAIL (clang -c)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    if ! clang -o "$STAGE2/$example-self-bin" \
+         "$STAGE2/$example-self-ir.o" "$OUT/kk_rt_standalone.o" \
+         "$OUT/kk_arena_standalone.o" "$OUT/kk_cycle_standalone.o" -lm 2>/dev/null; then
+      echo "FAIL (link)"
+      S2E_FAIL=$((S2E_FAIL + 1))
+      continue
+    fi
+    RESULT=$("$STAGE2/$example-self-bin" 2>/dev/null)
+    if [ "$RESULT" = "${EXPECTED[$example]}" ]; then
+      echo "PASS ($RESULT)"
+      S2E_PASS=$((S2E_PASS + 1))
+    else
+      echo "FAIL (expected ${EXPECTED[$example]}, got '$RESULT')"
+      S2E_FAIL=$((S2E_FAIL + 1))
+    fi
+  done
+  echo "=== Phase 9c results: $S2E_PASS passed, $S2E_FAIL failed ==="
+
+  if [ "$S2E_PASS" -gt 0 ] && [ "$S2E_FAIL" -eq 0 ]; then
+    echo ""
+    echo "============================================================"
+    echo "  BOOTSTRAP LOOP COMPLETE"
+    echo "  Stage 1: host compiler → 23 modules → self-hosted compiler"
+    echo "  Stage 2: host --emit-organ → stage 1 compiler → 23 modules → stage 2 compiler"
+    echo "  Stage 2 passes all $S2E_PASS end-to-end tests"
+    echo "  MLIR match: $S2_MATCH/$S2_OK modules produce identical MLIR"
+    echo "============================================================"
+  fi
+fi

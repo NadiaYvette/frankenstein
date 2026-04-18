@@ -61,7 +61,75 @@ static int64_t map_val(int64_t m)   { return kk_field(m, 2); }
 static int64_t map_left(int64_t m)  { return kk_field(m, 3); }
 static int64_t map_right(int64_t m) { return kk_field(m, 4); }
 
-/* Simple unbalanced BST insert (sufficient for self-hosting demo).
+/* Weight-balanced tree balancing (matches GHC's Data.Map).
+ * delta = 3, ratio = 2. */
+#define WB_DELTA 3
+#define WB_RATIO 2
+
+/* Single and double rotations.  All "borrowed" fields from existing nodes
+ * must be retained before the old node can be dropped. */
+
+/* balanceL: left subtree might be too heavy after an insert/delete on the left */
+static int64_t map_balanceL(int64_t k, int64_t v, int64_t l, int64_t r) {
+    int64_t rs = map_size(r);
+    int64_t ls = map_size(l);
+    if (ls + rs <= 1)
+        return map_bin(ls + rs + 1, k, v, l, r);
+    if (ls > WB_DELTA * rs + 1) {
+        /* l is too heavy — rotate right */
+        int64_t ll = map_left(l);  kk_retain(ll);
+        int64_t lr = map_right(l); kk_retain(lr);
+        int64_t lk = map_key(l);   kk_retain(lk);
+        int64_t lv = map_val(l);   kk_retain(lv);
+        if (map_size(lr) < WB_RATIO * map_size(ll)) {
+            /* single right rotation */
+            int64_t newr = map_bin(map_size(lr) + rs + 1, k, v, lr, r);
+            return map_bin(map_size(ll) + map_size(newr) + 1, lk, lv, ll, newr);
+        } else {
+            /* double right rotation (rotate l left, then rotate right) */
+            int64_t lrl = map_left(lr);  kk_retain(lrl);
+            int64_t lrr = map_right(lr); kk_retain(lrr);
+            int64_t lrk = map_key(lr);   kk_retain(lrk);
+            int64_t lrv = map_val(lr);   kk_retain(lrv);
+            int64_t newl = map_bin(map_size(ll) + map_size(lrl) + 1, lk, lv, ll, lrl);
+            int64_t newr = map_bin(rs + map_size(lrr) + 1, k, v, lrr, r);
+            return map_bin(map_size(newl) + map_size(newr) + 1, lrk, lrv, newl, newr);
+        }
+    }
+    return map_bin(ls + rs + 1, k, v, l, r);
+}
+
+/* balanceR: right subtree might be too heavy */
+static int64_t map_balanceR(int64_t k, int64_t v, int64_t l, int64_t r) {
+    int64_t ls = map_size(l);
+    int64_t rs = map_size(r);
+    if (ls + rs <= 1)
+        return map_bin(ls + rs + 1, k, v, l, r);
+    if (rs > WB_DELTA * ls + 1) {
+        /* r is too heavy — rotate left */
+        int64_t rl = map_left(r);  kk_retain(rl);
+        int64_t rr = map_right(r); kk_retain(rr);
+        int64_t rk = map_key(r);   kk_retain(rk);
+        int64_t rv = map_val(r);   kk_retain(rv);
+        if (map_size(rl) < WB_RATIO * map_size(rr)) {
+            /* single left rotation */
+            int64_t newl = map_bin(ls + map_size(rl) + 1, k, v, l, rl);
+            return map_bin(map_size(newl) + map_size(rr) + 1, rk, rv, newl, rr);
+        } else {
+            /* double left rotation (rotate r right, then rotate left) */
+            int64_t rll = map_left(rl);  kk_retain(rll);
+            int64_t rlr = map_right(rl); kk_retain(rlr);
+            int64_t rlk = map_key(rl);   kk_retain(rlk);
+            int64_t rlv = map_val(rl);   kk_retain(rlv);
+            int64_t newl = map_bin(ls + map_size(rll) + 1, k, v, l, rll);
+            int64_t newr = map_bin(map_size(rlr) + map_size(rr) + 1, rk, rv, rlr, rr);
+            return map_bin(map_size(newl) + map_size(newr) + 1, rlk, rlv, newl, newr);
+        }
+    }
+    return map_bin(ls + rs + 1, k, v, l, r);
+}
+
+/* Balanced BST insert using weight-balanced tree rotations.
  *
  * When creating a new node that shares fields from the old node `m`, we
  * must retain those fields.  kk_drop now recursively drops children, so
@@ -76,15 +144,13 @@ static int64_t map_insert(int64_t k, int64_t v, int64_t m) {
         int64_t ok = map_key(m);   kk_retain(ok);
         int64_t ov = map_val(m);   kk_retain(ov);
         int64_t or_ = map_right(m); kk_retain(or_);
-        return map_bin(map_size(new_left) + map_size(or_) + 1,
-                       ok, ov, new_left, or_);
+        return map_balanceL(ok, ov, new_left, or_);
     } else if (cmp > 0) {
         int64_t new_right = map_insert(k, v, map_right(m));
         int64_t ok = map_key(m);   kk_retain(ok);
         int64_t ov = map_val(m);   kk_retain(ov);
         int64_t ol = map_left(m);  kk_retain(ol);
-        return map_bin(map_size(ol) + map_size(new_right) + 1,
-                       ok, ov, ol, new_right);
+        return map_balanceR(ok, ov, ol, new_right);
     } else {
         /* Key exists: update value — share old subtrees */
         int64_t ol = map_left(m);  kk_retain(ol);
@@ -288,13 +354,25 @@ int64_t map_member_2(int64_t k, int64_t m) {
     return map_member(k, m);
 }
 
-/* Data_Map_Internal_findWithDefault$2(default, key) — partial */
+/* Data_Map_Internal_findWithDefault$2(default, key) — partial application.
+ * Returns a closure that captures (def, key) and, when applied to a map,
+ * calls findWithDefault$3(def, key, map). */
+#define CLOS_TAG 0x434C4F53
+static int64_t fwd_closure_code(int64_t clos, int64_t m) {
+    int64_t def = kk_field(clos, 1);
+    int64_t k   = kk_field(clos, 2);
+    return map_find_with_default(def, k, m);
+}
 int64_t map_fwd_2(int64_t def, int64_t k)
     __asm__("Data_Map_Internal_findWithDefault$2");
 int64_t map_fwd_2(int64_t def, int64_t k) {
-    (void)def; (void)k;
-    /* Partial application not commonly needed — return 0 as stub */
-    return 0;
+    int64_t c = kk_alloc_con(CLOS_TAG, 3);
+    kk_set_field(c, 0, (int64_t)(intptr_t)&fwd_closure_code);
+    kk_retain(def);
+    kk_set_field(c, 1, def);
+    kk_retain(k);
+    kk_set_field(c, 2, k);
+    return c;
 }
 
 /* Data_Map_Internal_findWithDefault$3(default, key, map) */

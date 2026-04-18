@@ -70,6 +70,18 @@ static int64_t call1(int64_t clos, int64_t a) {
         return ((raw1_t)(intptr_t)clos)(a);
     }
     int64_t fp = kk_field(clos, 0);
+    if (fp == 0) {
+        fprintf(stderr, "FATAL: call1 null fp! clos=%p tag=%ld nf=%ld a=%p\n",
+                (void*)clos, (long)kk_tag(clos), (long)kk_nfields(clos), (void*)a);
+        /* Try to find what the closure contains */
+        int64_t nf = kk_nfields(clos);
+        for (int64_t i = 0; i < nf && i < 5; i++) {
+            int64_t fi = kk_field(clos, i);
+            fprintf(stderr, "  field[%ld] = %ld (0x%lx) heap=%d\n",
+                    (long)i, (long)fi, (unsigned long)fi, kk_is_heap_ptr(fi));
+        }
+        exit(99);
+    }
     return ((fn1_t)(intptr_t)fp)(clos, a);
 }
 
@@ -96,6 +108,7 @@ static int64_t make_closure0(void* fptr) {
 static int64_t make_closure1(void* fptr, int64_t cap1) {
     int64_t c = kk_alloc_con(CLOS_TAG, 2);
     kk_set_field(c, 0, (int64_t)(intptr_t)fptr);
+    kk_retain(cap1);
     kk_set_field(c, 1, cap1);
     return c;
 }
@@ -103,6 +116,8 @@ static int64_t make_closure1(void* fptr, int64_t cap1) {
 static int64_t make_closure2(void* fptr, int64_t cap1, int64_t cap2) {
     int64_t c = kk_alloc_con(CLOS_TAG, 3);
     kk_set_field(c, 0, (int64_t)(intptr_t)fptr);
+    kk_retain(cap1);
+    kk_retain(cap2);
     kk_set_field(c, 1, cap1);
     kk_set_field(c, 2, cap2);
     return c;

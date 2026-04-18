@@ -29,9 +29,16 @@
 
 #include <stdint.h>
 
-/* Color encoding in high byte of refcount */
+/* RC word layout (64 bits):
+ *   bits 63-56: color      (8 bits)
+ *   bits 55-48: nfields    (8 bits, max 255 — clamped)
+ *   bits 47-0:  refcount   (48 bits)
+ * nfields is packed into the RC word to avoid the O(n) linear-probe
+ * side table that was a bottleneck at high allocation counts. */
 #define KK_COLOR_MASK     0xFF00000000000000LL
-#define KK_RC_MASK        0x00FFFFFFFFFFFFFFLL
+#define KK_NFIELDS_MASK   0x00FF000000000000LL
+#define KK_NFIELDS_SHIFT  48
+#define KK_RC_MASK        0x0000FFFFFFFFFFFFLL
 #define KK_COLOR_BLACK    0x0000000000000000LL
 #define KK_COLOR_PURPLE   0x0100000000000000LL
 #define KK_COLOR_GRAY     0x0200000000000000LL

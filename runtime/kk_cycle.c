@@ -36,21 +36,21 @@ static inline int64_t kk_get_color(int64_t ptr) {
 
 static inline void kk_set_color(int64_t ptr, int64_t color) {
     int64_t* rc = kk_rc_ptr(ptr);
-    *rc = (*rc & KK_RC_MASK) | color;
+    *rc = (*rc & (KK_RC_MASK | KK_NFIELDS_MASK)) | color;
 }
 
 static inline void kk_rc_decrement(int64_t ptr) {
     int64_t* rc = kk_rc_ptr(ptr);
     int64_t count = *rc & KK_RC_MASK;
     if (count > 0) count--;
-    *rc = (*rc & KK_COLOR_MASK) | count;
+    *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | count;
 }
 
 static inline void kk_rc_increment(int64_t ptr) {
     int64_t* rc = kk_rc_ptr(ptr);
     int64_t count = *rc & KK_RC_MASK;
     count++;
-    *rc = (*rc & KK_COLOR_MASK) | count;
+    *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | count;
 }
 
 /* ---- Roots buffer ---- */
@@ -103,54 +103,26 @@ int kk_can_be_cyclic(int64_t tag) {
  * UPDATE: We store nfields in a side table populated by kk_alloc_con_tracked.
  */
 
-/* Side table: ptr -> nfields (simple linear probe hash table).
- * Size 4096 is intentionally small — when full, kk_nfields returns 0
- * for unregistered objects, which means kk_drop won't traverse their
- * children. This is correct because the self-hosted Perceus selectors
- * drop individual fields rather than calling kk_drop on the parent. */
-/* With kk_drop disabled (bootstrapping mode), entries are never removed,
- * so this table must be large enough for ALL allocations during the
- * program's lifetime. JSON parsing alone can easily produce 100K+ objects.
- * 1M entries × 16 bytes = 16 MB — acceptable for bootstrapping. */
-#define KK_NFIELDS_TABLE_SIZE (1 << 20)  /* 1,048,576 */
-static struct { int64_t ptr; int64_t nfields; } nfields_table[KK_NFIELDS_TABLE_SIZE];
+/* nfields is now packed into the RC word (bits 55-48) by kk_alloc_con.
+ * These functions read/write the RC word directly — O(1) instead of
+ * the old O(n) linear-probe hash table. */
 
 void kk_register_nfields(int64_t ptr, int64_t nfields) {
-    int64_t idx = (ptr >> 3) & (KK_NFIELDS_TABLE_SIZE - 1);
-    for (int64_t i = 0; i < KK_NFIELDS_TABLE_SIZE; i++) {
-        int64_t probe = (idx + i) & (KK_NFIELDS_TABLE_SIZE - 1);
-        if (nfields_table[probe].ptr == 0 || nfields_table[probe].ptr == ptr) {
-            nfields_table[probe].ptr = ptr;
-            nfields_table[probe].nfields = nfields;
-            return;
-        }
-    }
-    /* Table full — nfields will default to 0 for this object */
+    /* Write nfields into the RC word's nfields bits */
+    int64_t* rc = (int64_t*)(ptr - 8);
+    int64_t nf = (nfields > 255 ? 255 : nfields);
+    *rc = (*rc & ~KK_NFIELDS_MASK) | (nf << KK_NFIELDS_SHIFT);
 }
 
 void kk_unregister_nfields(int64_t ptr) {
-    int64_t idx = (ptr >> 3) & (KK_NFIELDS_TABLE_SIZE - 1);
-    for (int64_t i = 0; i < KK_NFIELDS_TABLE_SIZE; i++) {
-        int64_t probe = (idx + i) & (KK_NFIELDS_TABLE_SIZE - 1);
-        if (nfields_table[probe].ptr == ptr) {
-            nfields_table[probe].ptr = 0;
-            nfields_table[probe].nfields = 0;
-            return;
-        }
-        if (nfields_table[probe].ptr == 0) return;
-    }
+    /* Clear nfields bits in RC word */
+    int64_t* rc = (int64_t*)(ptr - 8);
+    *rc = *rc & ~KK_NFIELDS_MASK;
 }
 
 int64_t kk_nfields(int64_t ptr) {
-    int64_t idx = (ptr >> 3) & (KK_NFIELDS_TABLE_SIZE - 1);
-    for (int64_t i = 0; i < KK_NFIELDS_TABLE_SIZE; i++) {
-        int64_t probe = (idx + i) & (KK_NFIELDS_TABLE_SIZE - 1);
-        if (nfields_table[probe].ptr == ptr) {
-            return nfields_table[probe].nfields;
-        }
-        if (nfields_table[probe].ptr == 0) return 0;
-    }
-    return 0;
+    int64_t* rc = (int64_t*)(ptr - 8);
+    return (*rc & KK_NFIELDS_MASK) >> KK_NFIELDS_SHIFT;
 }
 
 /* Iterate over the children (fields that are heap pointers) of an object.

@@ -33,6 +33,9 @@
 #include <stdio.h>
 #include "../runtime/kk_runtime.h"
 
+/* O(1) string slicing — returns a view into parent's buffer */
+extern int64_t kk_str_slice(int64_t parent, int64_t byte_offset, int64_t byte_len);
+
 /* ------------------------------------------------------------------ */
 /*  Internal helpers                                                    */
 /* ------------------------------------------------------------------ */
@@ -44,6 +47,27 @@ static char* text_flatten(int64_t s, int64_t *out_len) {
     if (!cstr) { *out_len = 0; return NULL; }
     *out_len = kk_str_len(s);
     return cstr;
+}
+
+/* Borrow: flatten the kk_string rope in-place (via kk_str_flatten) and
+ * return a pointer to the leaf's internal bytes WITHOUT copying.
+ * The caller must NOT free the result — the string owns the memory.
+ * This is O(n) on first call for a rope but O(1) for already-flat leaves. */
+#define KK_STR_SLICE 2
+typedef struct { int64_t rc; int64_t byte_len; int32_t kind; int32_t owns; union { const char* bytes; struct { void* l; void* r; } cat; } u; } kk_str_hdr_t;
+static const char* text_borrow(int64_t s, int64_t *out_len) {
+    if (!s) { *out_len = 0; return ""; }
+    int64_t flat = kk_str_flatten(s);
+    kk_str_hdr_t* h = (kk_str_hdr_t*)flat;
+    *out_len = h->byte_len;
+    /* Slices store bytes pointer in cat.r, not u.bytes */
+    if (h->kind == KK_STR_SLICE) return (const char*)h->u.cat.r;
+    return h->u.bytes;
+}
+
+/* Build a kk_string slice from a flat parent at a byte offset. O(1). */
+static int64_t text_slice(int64_t flat_parent, int64_t byte_offset, int64_t byte_len) {
+    return kk_str_slice(flat_parent, byte_offset, byte_len);
 }
 
 /* Build a kk_string from a C buffer of byte_len bytes (copies buf). */
@@ -154,23 +178,21 @@ static int64_t text_length(int64_t s) {
 }
 
 static int64_t text_take(int64_t n, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_string_empty();
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_string_empty();
     int64_t byte_off = utf8_advance(buf, len, n);
-    int64_t r = text_from_buf(buf, byte_off);
-    free(buf);
-    return r;
+    return text_slice(flat, 0, byte_off);
 }
 
 static int64_t text_drop(int64_t n, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_string_empty();
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_string_empty();
     int64_t byte_off = utf8_advance(buf, len, n);
-    int64_t r = text_from_buf(buf + byte_off, len - byte_off);
-    free(buf);
-    return r;
+    return text_slice(flat, byte_off, len - byte_off);
 }
 
 static int64_t text_drop_end(int64_t n, int64_t s) {
@@ -190,26 +212,25 @@ static int64_t text_init(int64_t s) {
 
 static int64_t text_last(int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return 0; }
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return 0;
     /* Walk backwards to find last codepoint start */
     int64_t i = len - 1;
     while (i > 0 && ((unsigned char)buf[i] & 0xC0) == 0x80) i--;
     int64_t bytes_used;
     int64_t cp = utf8_decode(buf + i, &bytes_used);
-    free(buf);
     return cp;
 }
 
 /* uncons: Text -> Maybe (Char, Text) */
 static int64_t text_uncons(int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return kk_nothing(); }
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_nothing();
     int64_t bytes_used;
     int64_t cp = utf8_decode(buf, &bytes_used);
-    int64_t rest = text_from_buf(buf + bytes_used, len - bytes_used);
-    free(buf);
+    int64_t rest = text_slice(flat, bytes_used, len - bytes_used);
     return kk_just(kk_pair(box_char(cp), rest));
 }
 
@@ -238,69 +259,60 @@ static int64_t text_intercalate(int64_t sep, int64_t list) {
 
 static int64_t text_is_prefix_of(int64_t pfx, int64_t s) {
     int64_t plen, slen;
-    char* pb = text_flatten(pfx, &plen);
-    char* sb = text_flatten(s, &slen);
+    const char* pb = text_borrow(pfx, &plen);
+    const char* sb = text_borrow(s, &slen);
     int r = (plen <= slen && memcmp(pb, sb, (size_t)plen) == 0) ? 1 : 0;
-    free(pb); free(sb);
     return r;
 }
 
 static int64_t text_is_suffix_of(int64_t sfx, int64_t s) {
     int64_t flen, slen;
-    char* fb = text_flatten(sfx, &flen);
-    char* sb = text_flatten(s, &slen);
+    const char* fb = text_borrow(sfx, &flen);
+    const char* sb = text_borrow(s, &slen);
     int r = (flen <= slen && memcmp(sb + slen - flen, fb, (size_t)flen) == 0) ? 1 : 0;
-    free(fb); free(sb);
     return r;
 }
 
 static int64_t text_is_infix_of(int64_t needle, int64_t haystack) {
     int64_t nlen, hlen;
-    char* nb = text_flatten(needle, &nlen);
-    char* hb = text_flatten(haystack, &hlen);
+    const char* nb = text_borrow(needle, &nlen);
+    const char* hb = text_borrow(haystack, &hlen);
     int r = memmem_offset(hb, hlen, nb, nlen) >= 0 ? 1 : 0;
-    free(nb); free(hb);
     return r;
 }
 
 /* stripPrefix: Text -> Text -> Maybe Text */
 static int64_t text_strip_prefix(int64_t pfx, int64_t s) {
     int64_t plen, slen;
-    char* pb = text_flatten(pfx, &plen);
-    char* sb = text_flatten(s, &slen);
-    int64_t result;
+    const char* pb = text_borrow(pfx, &plen);
+    const char* sb = text_borrow(s, &slen);
     if (plen <= slen && memcmp(pb, sb, (size_t)plen) == 0) {
-        result = kk_just(text_from_buf(sb + plen, slen - plen));
-    } else {
-        result = kk_nothing();
+        return kk_just(text_from_buf(sb + plen, slen - plen));
     }
-    free(pb); free(sb);
-    return result;
+    return kk_nothing();
 }
 
 static int64_t text_strip_start(int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_string_empty();
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_string_empty();
     int64_t i = 0;
     while (i < len && ((unsigned char)buf[i] == ' ' || (unsigned char)buf[i] == '\t'
                        || (unsigned char)buf[i] == '\n' || (unsigned char)buf[i] == '\r'))
         i++;
     int64_t r = text_from_buf(buf + i, len - i);
-    free(buf);
     return r;
 }
 
 static int64_t text_strip_end(int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_string_empty();
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_string_empty();
     int64_t i = len;
     while (i > 0 && ((unsigned char)buf[i-1] == ' ' || (unsigned char)buf[i-1] == '\t'
                       || (unsigned char)buf[i-1] == '\n' || (unsigned char)buf[i-1] == '\r'))
         i--;
     int64_t r = text_from_buf(buf, i);
-    free(buf);
     return r;
 }
 
@@ -311,11 +323,10 @@ static int64_t text_strip(int64_t s) {
 /* splitOn: Text -> Text -> [Text] */
 static int64_t text_split_on(int64_t delim, int64_t s) {
     int64_t dlen, slen;
-    char* db = text_flatten(delim, &dlen);
-    char* sb = text_flatten(s, &slen);
-    if (!db || !sb || dlen == 0) {
+    const char* db = text_borrow(delim, &dlen);
+    const char* sb = text_borrow(s, &slen);
+    if (dlen == 0) {
         /* Empty delimiter: return singleton list */
-        free(db); free(sb);
         return kk_cons(s, kk_nil());
     }
     /* Collect pieces in reverse, then reverse */
@@ -337,7 +348,6 @@ static int64_t text_split_on(int64_t delim, int64_t s) {
             piece_count++;
         }
     }
-    free(db); free(sb);
     /* Reverse the list */
     int64_t result = kk_nil();
     while (!kk_is_nil(pieces)) {
@@ -350,8 +360,8 @@ static int64_t text_split_on(int64_t delim, int64_t s) {
 /* breakOn: Text -> Text -> (Text, Text) */
 static int64_t text_break_on(int64_t needle, int64_t s) {
     int64_t nlen, slen;
-    char* nb = text_flatten(needle, &nlen);
-    char* sb = text_flatten(s, &slen);
+    const char* nb = text_borrow(needle, &nlen);
+    const char* sb = text_borrow(s, &slen);
     int64_t pos = memmem_offset(sb, slen, nb, nlen);
     int64_t result;
     if (pos < 0) {
@@ -359,15 +369,14 @@ static int64_t text_break_on(int64_t needle, int64_t s) {
     } else {
         result = kk_pair(text_from_buf(sb, pos), text_from_buf(sb + pos, slen - pos));
     }
-    free(nb); free(sb);
     return result;
 }
 
 /* breakOnEnd: Text -> Text -> (Text, Text) */
 static int64_t text_break_on_end(int64_t needle, int64_t s) {
     int64_t nlen, slen;
-    char* nb = text_flatten(needle, &nlen);
-    char* sb = text_flatten(s, &slen);
+    const char* nb = text_borrow(needle, &nlen);
+    const char* sb = text_borrow(s, &slen);
     /* Find last occurrence */
     int64_t last_pos = -1;
     if (nlen > 0) {
@@ -382,15 +391,14 @@ static int64_t text_break_on_end(int64_t needle, int64_t s) {
         int64_t split_at = last_pos + nlen;
         result = kk_pair(text_from_buf(sb, split_at), text_from_buf(sb + split_at, slen - split_at));
     }
-    free(nb); free(sb);
     return result;
 }
 
 /* lines: Text -> [Text] */
 static int64_t text_lines(int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return kk_nil(); }
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_nil();
     int64_t pieces = kk_nil();
     int64_t start = 0;
     for (int64_t i = 0; i <= len; i++) {
@@ -401,7 +409,6 @@ static int64_t text_lines(int64_t s) {
             start = i + 1;
         }
     }
-    free(buf);
     /* Reverse */
     int64_t result = kk_nil();
     while (!kk_is_nil(pieces)) {
@@ -437,11 +444,11 @@ static int64_t text_unlines(int64_t list) {
 /* map: (Char -> Char) -> Text -> Text */
 static int64_t text_map(int64_t f, int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return kk_string_empty(); }
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_string_empty();
     /* Worst case: each input byte becomes 4 output bytes */
     char* out = (char*)malloc((size_t)len * 4 + 1);
-    if (!out) { free(buf); return kk_string_empty(); }
+    if (!out) return kk_string_empty();
     int64_t opos = 0;
     int64_t i = 0;
     while (i < len) {
@@ -452,47 +459,44 @@ static int64_t text_map(int64_t f, int64_t s) {
         opos += utf8_encode(unbox_char(new_cp), out + opos);
     }
     int64_t r = text_from_buf(out, opos);
-    free(buf); free(out);
+    free(out);
     return r;
 }
 
 /* all: (Char -> Bool) -> Text -> Bool */
 static int64_t text_all(int64_t f, int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return 1;
+    const char* buf = text_borrow(s, &len);
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (!call_closure_1(f, box_char(cp))) { free(buf); return 0; }
+        if (!call_closure_1(f, box_char(cp))) return 0;
     }
-    free(buf);
     return 1;
 }
 
 /* any: (Char -> Bool) -> Text -> Bool */
 static int64_t text_any(int64_t f, int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return 0;
+    const char* buf = text_borrow(s, &len);
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (call_closure_1(f, box_char(cp))) { free(buf); return 1; }
+        if (call_closure_1(f, box_char(cp))) return 1;
     }
-    free(buf);
     return 0;
 }
 
 /* takeWhile: (Char -> Bool) -> Text -> Text */
 static int64_t text_take_while(int64_t f, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_string_empty();
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_string_empty();
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
@@ -500,16 +504,15 @@ static int64_t text_take_while(int64_t f, int64_t s) {
         if (!call_closure_1(f, box_char(cp))) break;
         i += bytes_used;
     }
-    int64_t r = text_from_buf(buf, i);
-    free(buf);
-    return r;
+    return text_slice(flat, 0, i);
 }
 
 /* dropWhile: (Char -> Bool) -> Text -> Text */
 static int64_t text_drop_while(int64_t f, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_string_empty();
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_string_empty();
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
@@ -517,20 +520,17 @@ static int64_t text_drop_while(int64_t f, int64_t s) {
         if (!call_closure_1(f, box_char(cp))) break;
         i += bytes_used;
     }
-    int64_t r = text_from_buf(buf + i, len - i);
-    free(buf);
-    return r;
+    return text_slice(flat, i, len - i);
 }
 
 /* dropWhileEnd: (Char -> Bool) -> Text -> Text */
 static int64_t text_drop_while_end(int64_t f, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_string_empty();
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_string_empty();
     int64_t end = len;
-    /* Walk backwards, char by char */
     while (end > 0) {
-        /* Find start of last codepoint */
         int64_t cp_start = end - 1;
         while (cp_start > 0 && ((unsigned char)buf[cp_start] & 0xC0) == 0x80)
             cp_start--;
@@ -539,16 +539,15 @@ static int64_t text_drop_while_end(int64_t f, int64_t s) {
         if (!call_closure_1(f, box_char(cp))) break;
         end = cp_start;
     }
-    int64_t r = text_from_buf(buf, end);
-    free(buf);
-    return r;
+    return text_slice(flat, 0, end);
 }
 
 /* span: (Char -> Bool) -> Text -> (Text, Text) */
 static int64_t text_span(int64_t f, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_pair(kk_string_empty(), kk_string_empty());
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_pair(kk_string_empty(), kk_string_empty());
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
@@ -556,8 +555,7 @@ static int64_t text_span(int64_t f, int64_t s) {
         if (!call_closure_1(f, box_char(cp))) break;
         i += bytes_used;
     }
-    int64_t r = kk_pair(text_from_buf(buf, i), text_from_buf(buf + i, len - i));
-    free(buf);
+    int64_t r = kk_pair(text_slice(flat, 0, i), text_slice(flat, i, len - i));
     return r;
 }
 
@@ -605,12 +603,12 @@ static int64_t text_pack(int64_t list) {
 /* unpack: Text -> [Char]  (string to list of codepoints) */
 static int64_t text_unpack(int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return kk_nil(); }
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_nil();
     /* Build list backwards from end */
     /* First, collect codepoints into temp array */
     int64_t* cps = (int64_t*)malloc((size_t)len * sizeof(int64_t));
-    if (!cps) { free(buf); return kk_nil(); }
+    if (!cps) return kk_nil();
     int64_t n = 0;
     int64_t i = 0;
     while (i < len) {
@@ -618,7 +616,6 @@ static int64_t text_unpack(int64_t s) {
         cps[n++] = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
     }
-    free(buf);
     int64_t result = kk_nil();
     for (int64_t j = n - 1; j >= 0; j--) {
         result = kk_cons(box_char(cps[j]), result);
@@ -780,8 +777,8 @@ int64_t text_concat_1(int64_t list) { return text_concat(list); }
 /* concatMap :: (Char -> Text) -> Text -> Text */
 static int64_t text_concatMap(int64_t f, int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return kk_string_empty(); }
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_string_empty();
     int64_t result = kk_string_empty();
     int64_t i = 0;
     while (i < len) {
@@ -792,7 +789,6 @@ static int64_t text_concatMap(int64_t f, int64_t s) {
         int64_t piece = call_closure_1(f, box_char(cp));
         result = kk_str_concat(result, piece);
     }
-    free(buf);
     return result;
 }
 
@@ -979,23 +975,21 @@ int64_t bs_unpack_1(int64_t b) {
 
 static int64_t text_head(int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return box_char(0); }
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return box_char(0);
     int64_t bytes_used;
     int64_t cp = utf8_decode(buf, &bytes_used);
-    free(buf);
     return box_char(cp);
 }
 
 static int64_t text_tail(int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf || len == 0) { free(buf); return kk_string_empty(); }
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_string_empty();
     int64_t bytes_used;
     utf8_decode(buf, &bytes_used);
-    int64_t r = text_from_buf(buf + bytes_used, len - bytes_used);
-    free(buf);
-    return r;
+    return text_slice(flat, bytes_used, len - bytes_used);
 }
 
 int64_t text_head_1(int64_t s) __asm__("Data_Text_head$1");
@@ -1009,25 +1003,25 @@ int64_t text_tail_1(int64_t s) { return text_tail(s); }
 /* T.break pred text: split at first char where pred is true.
  * Returns (before, after) as a Haskell tuple. */
 static int64_t text_break_pred(int64_t pred, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_pair(kk_string_empty(), kk_string_empty());
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_pair(kk_string_empty(), kk_string_empty());
     int64_t off = 0;
     while (off < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + off, &bytes_used);
         int64_t r = call_closure_1(pred, box_char(cp));
         if (r) {
-            int64_t before = text_from_buf(buf, off);
-            int64_t after  = text_from_buf(buf + off, len - off);
-            free(buf);
+            int64_t before = text_slice(flat, 0, off);
+            int64_t after  = text_slice(flat, off, len - off);
             return kk_pair(before, after);
         }
         off += bytes_used;
     }
-    int64_t whole = text_from_buf(buf, len);
-    free(buf);
-    return kk_pair(whole, kk_string_empty());
+    /* No match — return (whole, empty). Retain the original string. */
+    kk_str_retain(flat);
+    return kk_pair(flat, kk_string_empty());
 }
 
 int64_t text_break_2(int64_t pred, int64_t s) __asm__("Data_Text_break$2");
@@ -1036,13 +1030,13 @@ int64_t text_break_2(int64_t pred, int64_t s) { return text_break_pred(pred, s);
 /* --- splitAt --- */
 
 static int64_t text_split_at(int64_t n, int64_t s) {
+    int64_t flat = kk_str_flatten(s);
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return kk_pair(kk_string_empty(), kk_string_empty());
+    const char* buf = text_borrow(flat, &len);
+    if (len == 0) return kk_pair(kk_string_empty(), kk_string_empty());
     int64_t byte_off = utf8_advance(buf, len, n);
-    int64_t before = text_from_buf(buf, byte_off);
-    int64_t after  = text_from_buf(buf + byte_off, len - byte_off);
-    free(buf);
+    int64_t before = text_slice(flat, 0, byte_off);
+    int64_t after  = text_slice(flat, byte_off, len - byte_off);
     return kk_pair(before, after);
 }
 
@@ -1054,8 +1048,8 @@ int64_t text_splitAt_2(int64_t n, int64_t s) { return text_split_at(n, s); }
 /* T.foldl' f z text: strict left fold over codepoints */
 static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
     int64_t len;
-    char* buf = text_flatten(s, &len);
-    if (!buf) return z;
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return z;
     int64_t acc = z;
     int64_t off = 0;
     while (off < len) {
@@ -1070,7 +1064,7 @@ static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
         acc = ((fn3_t)(intptr_t)fn_ptr)(f, f, acc, box_char(cp));
         off += bytes_used;
     }
-    free(buf);
+    /* buf is borrowed — do NOT free */
     return acc;
 }
 

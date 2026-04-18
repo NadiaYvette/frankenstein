@@ -61,7 +61,61 @@ static int64_t set_elem(int64_t s)  { return kk_field(s, 1); }
 static int64_t set_left(int64_t s)  { return kk_field(s, 2); }
 static int64_t set_right(int64_t s) { return kk_field(s, 3); }
 
-/* Retain shared fields from old node when creating new nodes. */
+/* Weight-balanced tree balancing (matches GHC's Data.Set).
+ * delta = 3, ratio = 2. */
+#define SET_WB_DELTA 3
+#define SET_WB_RATIO 2
+
+static int64_t set_balanceL(int64_t e, int64_t l, int64_t r) {
+    int64_t rs = set_size(r);
+    int64_t ls = set_size(l);
+    if (ls + rs <= 1)
+        return set_bin(ls + rs + 1, e, l, r);
+    if (ls > SET_WB_DELTA * rs + 1) {
+        int64_t ll = set_left(l);  kk_retain(ll);
+        int64_t lr = set_right(l); kk_retain(lr);
+        int64_t le = set_elem(l);  kk_retain(le);
+        if (set_size(lr) < SET_WB_RATIO * set_size(ll)) {
+            int64_t newr = set_bin(set_size(lr) + rs + 1, e, lr, r);
+            return set_bin(set_size(ll) + set_size(newr) + 1, le, ll, newr);
+        } else {
+            int64_t lrl = set_left(lr);  kk_retain(lrl);
+            int64_t lrr = set_right(lr); kk_retain(lrr);
+            int64_t lre = set_elem(lr);  kk_retain(lre);
+            int64_t newl = set_bin(set_size(ll) + set_size(lrl) + 1, le, ll, lrl);
+            int64_t newr = set_bin(rs + set_size(lrr) + 1, e, lrr, r);
+            return set_bin(set_size(newl) + set_size(newr) + 1, lre, newl, newr);
+        }
+    }
+    return set_bin(ls + rs + 1, e, l, r);
+}
+
+static int64_t set_balanceR(int64_t e, int64_t l, int64_t r) {
+    int64_t ls = set_size(l);
+    int64_t rs = set_size(r);
+    if (ls + rs <= 1)
+        return set_bin(ls + rs + 1, e, l, r);
+    if (rs > SET_WB_DELTA * ls + 1) {
+        int64_t rl = set_left(r);  kk_retain(rl);
+        int64_t rr = set_right(r); kk_retain(rr);
+        int64_t re = set_elem(r);  kk_retain(re);
+        if (set_size(rl) < SET_WB_RATIO * set_size(rr)) {
+            int64_t newl = set_bin(ls + set_size(rl) + 1, e, l, rl);
+            return set_bin(set_size(newl) + set_size(rr) + 1, re, newl, rr);
+        } else {
+            int64_t rll = set_left(rl);  kk_retain(rll);
+            int64_t rlr = set_right(rl); kk_retain(rlr);
+            int64_t rle = set_elem(rl);  kk_retain(rle);
+            int64_t newl = set_bin(ls + set_size(rll) + 1, e, l, rll);
+            int64_t newr = set_bin(set_size(rlr) + set_size(rr) + 1, re, rlr, rr);
+            return set_bin(set_size(newl) + set_size(newr) + 1, rle, newl, newr);
+        }
+    }
+    return set_bin(ls + rs + 1, e, l, r);
+}
+
+/* Balanced BST insert using weight-balanced tree rotations.
+ * Retain shared fields from old node when creating new nodes. */
 static int64_t set_insert(int64_t x, int64_t s) {
     if (set_is_tip(s))
         return set_bin(1, x, set_tip(), set_tip());
@@ -70,12 +124,12 @@ static int64_t set_insert(int64_t x, int64_t s) {
         int64_t nl = set_insert(x, set_left(s));
         int64_t oe = set_elem(s);  kk_retain(oe);
         int64_t or_ = set_right(s); kk_retain(or_);
-        return set_bin(set_size(nl) + set_size(or_) + 1, oe, nl, or_);
+        return set_balanceL(oe, nl, or_);
     } else if (cmp > 0) {
         int64_t nr = set_insert(x, set_right(s));
         int64_t oe = set_elem(s);  kk_retain(oe);
         int64_t ol = set_left(s);  kk_retain(ol);
-        return set_bin(set_size(ol) + set_size(nr) + 1, oe, ol, nr);
+        return set_balanceR(oe, ol, nr);
     }
     kk_retain(s);
     return s; /* already present */

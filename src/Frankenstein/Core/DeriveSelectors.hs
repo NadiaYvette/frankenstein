@@ -58,9 +58,13 @@ hasRecordFields :: ConDecl -> Bool
 hasRecordFields con = any (not . isPositionalName . fst) (conFields con)
 
 isPositionalName :: Name -> Bool
-isPositionalName n = case T.stripPrefix "field_" (nameText n) of
-  Just rest -> T.all (\c -> c >= '0' && c <= '9') rest && not (T.null rest)
-  Nothing   -> False
+isPositionalName n =
+  let t = nameText n
+  in  checkPrefix "field_" t || checkPrefix "_" t
+  where
+    checkPrefix pfx t = case T.stripPrefix pfx t of
+      Just rest -> T.all (\c -> c >= '0' && c <= '9') rest && not (T.null rest)
+      Nothing   -> False
 
 -- | Build a single selector function for field @fieldIdx@ of @con@ in
 -- record type @dd@. Skipped if @existing@ already contains the field name.

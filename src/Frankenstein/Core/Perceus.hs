@@ -16,6 +16,7 @@ module Frankenstein.Core.Perceus
   , analyzeUsage
   , freeVars
   , UsageInfo(..)
+  , isUnboxedType
   ) where
 
 import Frankenstein.Core.Types
@@ -25,6 +26,28 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
+
+-- | Check if a type is known to be unboxed (non-heap-allocated).
+-- Values of these types are plain machine integers, not heap pointers,
+-- so retain/drop calls on them are no-ops at runtime. Eliding them
+-- at compile time avoids the function call overhead.
+isUnboxedType :: Type -> Bool
+isUnboxedType (TCon tc) = isUnboxedTyCon (tcName tc)
+isUnboxedType (TApp (TCon tc) _) = isUnboxedTyCon (tcName tc)
+isUnboxedType _ = False
+
+isUnboxedTyCon :: QName -> Bool
+isUnboxedTyCon (QName modT (Name nameT _)) =
+  -- std.int / std.unit / std.bool (used by most bridges)
+  (modT == "std" && nameT `elem` ["int", "unit", "bool", "char", "float"])
+  -- GHC primitive types: Int#, Word#, Char#, Double#, Float#
+  || (modT == "GHC.Prim" || modT == "GHC.Internal.Prim")
+     && nameT `elem` ["Int#", "Word#", "Char#", "Double#", "Float#", "Int64#", "Word64#"]
+  -- GHC boxed wrappers that we unbox: Int, Char, Bool, Word
+  || (modT == "GHC.Types" || modT == "GHC.Internal.Base"
+      || modT == "GHC.Internal.Int" || modT == "GHC.Internal.Word"
+      || modT == "GHC.Internal.Data.Bool")
+     && nameT `elem` ["Int", "Char", "Bool", "Word", "Int64", "Word64"]
 
 -- | Usage count for a variable
 data UsageInfo = UsageInfo
@@ -81,19 +104,21 @@ perceusExpr scope expr = case expr of
         -- Analyze which params are used in body
         bodyFree = freeVars body
         usage = analyzeUsage body
-        unusedParams = [ n | (n, _) <- params
+        -- Skip retain/drop for params with unboxed types (plain integers, not heap ptrs)
+        unusedParams = [ n | (n, t) <- params
                        , not (Set.member n bodyFree)
-                       , Map.findWithDefault Many n scope' /= Linear ]
+                       , Map.findWithDefault Many n scope' /= Linear
+                       , not (isUnboxedType t) ]
         body' = perceusExpr scope' body
         -- Drop unused affine/many params
         droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
                             body' unusedParams
         -- Insert retains for Many-multiplicity params used more than once
         retainedBody = foldr
-          (\(n, _) e ->
+          (\(n, t) e ->
             let m = Map.findWithDefault Many n scope'
                 count = Map.findWithDefault 0 n usage
-            in if m == Many && count > 1
+            in if m == Many && count > 1 && not (isUnboxedType t)
                then wrapRetains n count e
                else e)
           droppedBody params
@@ -101,29 +126,31 @@ perceusExpr scope expr = case expr of
 
   -- Let: insert drops for unused bindings, retains for multi-use bindings
   ELet bgs body ->
-    let -- Collect all bound names with their multiplicities
-        boundNames = [ (bindName b, bindMultiplicity b)
-                     | bg <- bgs, b <- bg ]
+    let -- Collect all bound names with their multiplicities and types
+        boundInfo = [ (bindName b, bindMultiplicity b, bindType b)
+                    | bg <- bgs, b <- bg ]
+        boundNames = [ (n, m) | (n, m, _) <- boundInfo ]
         scope' = foldl (\s (n, m) -> Map.insert n m s) scope boundNames
         bodyFree = freeVars body
         usage = analyzeUsage body
         -- Transform binding expressions
         bgs' = map (map (perceusBindGroup scope')) bgs
         body' = perceusExpr scope' body
-        -- Find bindings unused in body that need dropping
-        toDrop = [ n | (n, m) <- boundNames
+        -- Find bindings unused in body that need dropping (skip unboxed types)
+        toDrop = [ n | (n, m, t) <- boundInfo
                  , not (Set.member n bodyFree)
-                 , m /= Linear ]  -- linear values must be used exactly once (error if not)
+                 , m /= Linear
+                 , not (isUnboxedType t) ]
         droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
                             body' toDrop
-        -- Insert retains for Many-multiplicity vars used more than once
+        -- Insert retains for Many-multiplicity vars used more than once (skip unboxed)
         retainedBody = foldr
-          (\(n, m) e ->
+          (\(n, m, t) e ->
             let count = Map.findWithDefault 0 n usage
-            in if m == Many && count > 1
+            in if m == Many && count > 1 && not (isUnboxedType t)
                then wrapRetains n count e
                else e)
-          droppedBody boundNames
+          droppedBody boundInfo
     in ELet bgs' retainedBody
 
   -- Case: Koka-style ownership.  When the scrutinee is a variable we can
@@ -190,12 +217,15 @@ perceusBranch scope mScrutVar br =
       body' = perceusExpr scope' body
 
       -- Used pattern variables (need retaining before scrutinee drop)
-      usedPats = [ n | (n, _) <- patVars
-                 , Set.member n bodyFree ]
+      -- Skip retain for unboxed types — they're plain integers, not heap ptrs
+      usedPats = [ n | (n, t) <- patVars
+                 , Set.member n bodyFree
+                 , not (isUnboxedType t) ]
       -- Unused pattern variables (for fallback when no scrutinee var)
-      unusedPats = [ n | (n, _) <- patVars
+      unusedPats = [ n | (n, t) <- patVars
                    , not (Set.member n bodyFree)
-                   , Map.findWithDefault Many n scope' /= Linear ]
+                   , Map.findWithDefault Many n scope' /= Linear
+                   , not (isUnboxedType t) ]
   in case mScrutVar of
     Just sv | not (null patVars) ->
       -- Koka-style: retain used fields FIRST, then drop the scrutinee.

@@ -185,11 +185,15 @@ EXPECTED[maybesum]=42
 EXPECTED[listsum]=15
 EXPECTED[tree]=6
 EXPECTED[alloc_stress]=100100000
+EXPECTED[closure]=42
+EXPECTED[mutual_rec]=5
+EXPECTED[multi_adt]=317
 EXPECTED[effect_ask]=84
+EXPECTED[effect_state]=100
 
 E2E_PASS=0
 E2E_FAIL=0
-for example in nested maybesum listsum tree alloc_stress; do
+for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt; do
   echo -n "  $example.hs: "
   # Host compiler → OrganIR → self-hosted compiler → MLIR
   if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \
@@ -229,7 +233,7 @@ for example in nested maybesum listsum tree alloc_stress; do
   fi
 done
 # Effect-using OrganIR JSON examples (test effectOptimize + evidencePass)
-for example in effect_ask; do
+for example in effect_ask effect_state; do
   echo -n "  $example.json: "
   if ! ./self-host/frankenstein-self-compiler "examples/$example.json" -o "$OUT/$example-self.mlir" 2>/dev/null; then
     echo "FAIL (self-hosted compiler)"

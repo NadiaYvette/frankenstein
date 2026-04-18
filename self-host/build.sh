@@ -189,12 +189,13 @@ EXPECTED[closure]=42
 EXPECTED[mutual_rec]=5
 EXPECTED[multi_adt]=317
 EXPECTED[higher_order]=12
+EXPECTED[exhaust_tail]=36
 EXPECTED[effect_ask]=84
 EXPECTED[effect_state]=100
 
 E2E_PASS=0
 E2E_FAIL=0
-for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order; do
+for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail; do
   echo -n "  $example.hs: "
   # Host compiler → OrganIR → self-hosted compiler → MLIR
   if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \

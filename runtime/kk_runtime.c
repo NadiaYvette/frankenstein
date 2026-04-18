@@ -57,8 +57,8 @@ void kk_retain(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
     /* Strings have a different layout (rc at offset 0, not -8) */
     if (kk_is_string(ptr)) { kk_str_retain(ptr); return; }
-    /* Validate arena ownership before touching refcount — same rationale as kk_drop */
-    if (!kk_arena_owns((const void*)(intptr_t)ptr)) return;
+    /* Fast range check: reject pointers outside the arena's address space */
+    if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
     /* Increment only the count bits, preserve color and nfields */
     int64_t count = (*rc & KK_RC_MASK) + 1;
@@ -78,12 +78,8 @@ void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
     /* Strings have a different refcount layout */
     if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
-    /* Validate that the pointer is actually arena-owned.  Compiled code
-     * may pass code pointers, tagged values, or stale integers that
-     * happen to look heap-like to kk_is_heap_ptr.  Reading *(ptr-8) for
-     * such values would segfault.  kk_arena_owns walks the slab list
-     * but the list is short (one node per ~1 MiB of allocations). */
-    if (!kk_arena_owns((const void*)(intptr_t)ptr)) return;
+    /* Fast range check: reject pointers outside the arena's address space */
+    if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
     int64_t count = *rc & KK_RC_MASK;
     if (count == 0) return;  /* already freed or corrupt — don't double-free */

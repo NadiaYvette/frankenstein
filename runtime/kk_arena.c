@@ -36,6 +36,8 @@ static kk_slab* g_head = NULL;          /* newest slab (allocation cursor) */
 static int      g_disabled = -1;        /* lazily resolved from env */
 static int64_t  g_total_alloc_bytes = 0;
 static int64_t  g_total_slab_bytes  = 0;
+static uintptr_t g_arena_lo = (uintptr_t)-1;  /* lowest arena byte */
+static uintptr_t g_arena_hi = 0;              /* one past highest arena byte */
 
 static int arena_enabled(void) {
     if (g_disabled == -1) {
@@ -58,6 +60,11 @@ static kk_slab* new_slab(size_t payload_cap) {
     s->used = 0;
     g_head  = s;
     g_total_slab_bytes += (int64_t)payload_cap;
+    /* Update global address range for fast kk_arena_owns */
+    uintptr_t lo = (uintptr_t)s->data;
+    uintptr_t hi = lo + payload_cap;
+    if (lo < g_arena_lo) g_arena_lo = lo;
+    if (hi > g_arena_hi) g_arena_hi = hi;
     return s;
 }
 
@@ -88,12 +95,22 @@ void* kk_arena_alloc(size_t size) {
 int kk_arena_owns(const void* ptr) {
     if (ptr == NULL) return 0;
     uintptr_t u = (uintptr_t)ptr;
+    /* Fast path: if ptr is outside the global [lo, hi) range, it can't
+     * be arena-owned. This avoids walking the slab list for the vast
+     * majority of non-arena pointers (code ptrs, string ptrs, etc.). */
+    if (u < g_arena_lo || u >= g_arena_hi) return 0;
     for (kk_slab* s = g_head; s != NULL; s = s->next) {
         uintptr_t lo = (uintptr_t)s->data;
         uintptr_t hi = lo + s->cap;
         if (u >= lo && u < hi) return 1;
     }
     return 0;
+}
+
+int kk_arena_maybe_owns(const void* ptr) {
+    if (ptr == NULL) return 0;
+    uintptr_t u = (uintptr_t)ptr;
+    return u >= g_arena_lo && u < g_arena_hi;
 }
 
 void kk_arena_free(void* ptr) {

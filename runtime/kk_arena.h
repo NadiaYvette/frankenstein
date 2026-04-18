@@ -32,6 +32,11 @@ void* kk_arena_alloc(size_t size);
 /* True iff `ptr` lies within any slab the arena has handed out. */
 int kk_arena_owns(const void* ptr);
 
+/* Fast O(1) check: true iff `ptr` is within the arena's global address range.
+ * May return true for non-arena pointers that happen to be in the range
+ * (rare: only if a malloc'd string buffer shares the same address space). */
+int kk_arena_maybe_owns(const void* ptr);
+
 /* Free helper: no-op when `ptr` is arena-owned, free(ptr) otherwise.
  * Safe to call with NULL. */
 void kk_arena_free(void* ptr);

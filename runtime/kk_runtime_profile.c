@@ -130,3 +130,15 @@ int64_t kk_thunk_force(int64_t thunk) {
     kk_set_field(thunk, 1, r);
     return r;
 }
+
+/* --- Stubs for functions added after the profile runtime was created --- */
+
+static int kk_argc_g = 0;
+static char** kk_argv_g = NULL;
+void kk_args_init(int argc, char** argv) { kk_argc_g = argc; kk_argv_g = argv; }
+int64_t kk_args_count(void) { return kk_argc_g; }
+int64_t kk_args_get(int64_t i) { return 0; }
+int64_t kk_args_progname(void) { return 0; }
+void kk_exit(int64_t code) { exit((int)code); }
+int64_t kk_structural_eq(int64_t a, int64_t b) { return a == b ? 1 : 0; }
+void kk_println_con(int64_t x) { fprintf(stderr, "<con %ld>\n", x); }

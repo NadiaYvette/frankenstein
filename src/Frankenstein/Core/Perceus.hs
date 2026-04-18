@@ -44,7 +44,8 @@ isUnboxedTyCon (QName modT (Name nameT _)) =
   || (modT == "GHC.Prim" || modT == "GHC.Internal.Prim")
      && nameT `elem` ["Int#", "Word#", "Char#", "Double#", "Float#", "Int64#", "Word64#"]
   -- GHC boxed wrappers that we unbox: Int, Char, Bool, Word
-  || (modT == "GHC.Types" || modT == "GHC.Internal.Base"
+  || (modT == "GHC.Types" || modT == "GHC.Internal.Types"
+      || modT == "GHC.Internal.Base"
       || modT == "GHC.Internal.Int" || modT == "GHC.Internal.Word"
       || modT == "GHC.Internal.Data.Bool")
      && nameT `elem` ["Int", "Char", "Bool", "Word", "Int64", "Word64"]

@@ -117,7 +117,9 @@ for bench_name in fib tak ack; do
     if [ -f "$ll_file" ]; then
         clang -O2 "$ll_file" \
             "$FRANK_RT/kk_runtime_profile.c" \
+            "$FRANK_RT/kk_arena.c" \
             "$FRANK_RT/kk_cycle.c" \
+            -I "$FRANK_RT" \
             -o "$prof_bin" -lm 2>/dev/null
 
         echo "  $bench_name:"

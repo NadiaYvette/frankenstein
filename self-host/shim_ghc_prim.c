@@ -471,10 +471,15 @@ int64_t ghc_classes_ip_1(int64_t x) __asm__("GHC_Internal_Classes_ip$1");
 int64_t ghc_classes_ip_1(int64_t x) { return x; }
 
 static int64_t max_apply(int64_t clos, int64_t b) { return kk_field(clos,1) > b ? kk_field(clos,1) : b; }
-static int64_t max_code(int64_t clos, int64_t a) { (void)clos; return make_closure1(&max_apply, a); }
+/* max_flat: 3-arg calling convention (clos, a, b) → max(a,b).
+ * Used by map_union_with which calls ((fn2_t)field[0])(closure, v1, v2).
+ * The old curried max_code(clos, a) returned a partial application closure,
+ * causing map_union_with to store heap pointers as "combined" values instead
+ * of integers — producing huge usage counts that made wrapRetains loop. */
+static int64_t max_flat(int64_t clos, int64_t a, int64_t b) { (void)clos; return a > b ? a : b; }
 
 int64_t ghc_classes_max_0(void) __asm__("GHC_Internal_Classes_max$0");
-int64_t ghc_classes_max_0(void) { return make_closure0(&max_code); }
+int64_t ghc_classes_max_0(void) { return make_closure0(&max_flat); }
 int64_t ghc_classes_max_2(int64_t a, int64_t b) __asm__("GHC_Internal_Classes_max$2");
 int64_t ghc_classes_max_2(int64_t a, int64_t b) { return a > b ? a : b; }
 

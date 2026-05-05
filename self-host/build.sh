@@ -303,7 +303,7 @@ for src in "${MODULES[@]}"; do
   if ! timeout 120 ./self-host/frankenstein-self-compiler "$STAGE2/$flat.organ.json" \
        --no-perceus -o "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"; then
     echo "FAIL (stage1 compiler)"
-    cat "$STAGE2/$flat.err" | tail -3 | sed 's/^/    /'
+    [ -f "$STAGE2/$flat.err" ] && tail -3 "$STAGE2/$flat.err" | sed 's/^/    /'
     S2_FAIL=$((S2_FAIL + 1))
     continue
   fi

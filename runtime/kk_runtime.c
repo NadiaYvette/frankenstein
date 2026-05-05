@@ -1024,6 +1024,19 @@ int64_t kk_thunk_create(int64_t fn_ptr) {
     return thunk;
 }
 
+/* Create a pre-forced thunk wrapping an already-computed result.
+ * Used when eager evaluation was necessary (e.g., the thunk body
+ * captured variables from an enclosing scope).  kk_thunk_force
+ * will see evaluated_flag=1 and return the cached result directly. */
+int64_t kk_thunk_create_forced(int64_t result) {
+    int64_t thunk = kk_alloc_con(KK_THUNK_TAG, 2);
+    if (thunk == 0) return result;     /* fallback: return raw value */
+    kk_retain(result);                 /* thunk cache holds a reference */
+    kk_set_field(thunk, 0, 1);        /* evaluated_flag = 1 */
+    kk_set_field(thunk, 1, result);   /* cached result */
+    return thunk;
+}
+
 /* Force a thunk: if unevaluated, call the function and cache the result.
  *
  * Retain semantics: every call to kk_thunk_force returns a reference that

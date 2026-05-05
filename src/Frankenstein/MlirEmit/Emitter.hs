@@ -465,6 +465,7 @@ emitProgramText prog =
     , ""
     , "  // Thunk runtime declarations (lazy evaluation)"
     , "  func.func private @kk_thunk_create(i64) -> i64"
+    , "  func.func private @kk_thunk_create_forced(i64) -> i64"
     , "  func.func private @kk_thunk_force(i64) -> i64"
     , ""
     , "  // Evidence vector runtime declarations (algebraic effects)"
@@ -1628,53 +1629,25 @@ emitExpr (EReuse ref alloc) = do
 -- The lifted body is a regular func.func. We use func.constant + index_cast to
 -- get a function pointer as i64, avoiding llvm.mlir.addressof incompatibility.
 emitExpr (EDelay e) = do
-  -- Lambda-lift e to a zero-arg function.
-  -- If the body has free variables that would have to be captured,
-  -- we'd need a closure-carrying thunk (distinct runtime ABI); for now,
-  -- fall back to eager evaluation by inlining the body into the caller.
-  -- This is semantically incorrect only for programs that rely on
-  -- laziness for termination — GHC's demand analyzer removes most such
-  -- thunks before we see them.
-  let bodyFree = freeVarsExpr e
-  currentAliases <- gets esAliases
-  topFns <- gets esTopFns
-  modPfx <- gets esModulePrefix
-  let qualName n = let san = sanitizeName (nameText n)
-                   in if T.any (== '/') (nameText n) then san else modPfx <> san
-      isCaptured n = let s = nameToSsa n
-                     in Map.member s currentAliases
-                        && not (Set.member (qualName n) topFns)
-      hasCaptures = any isCaptured (Set.toList bodyFree)
-  if hasCaptures
-    then do
-      -- Inline the body; wrap the result in a fake "already-forced" thunk
-      -- so EForce downstream still works. The simplest shim: emit the body
-      -- directly and return its value. EForce will call kk_thunk_force on
-      -- a plain i64, which is incorrect runtime-wise but at least parses.
-      (eOps, eName) <- emitExpr e
-      pure ( ("// degraded thunk (had captures): inlined body" : eOps)
-           , eName)
-    else do
-      modPfx <- gets esModulePrefix
-      liftedName <- freshName (modPfx <> "thunk_body")
-      let mlirRetTy = "i64"
-      (bodyOps, bodyResult) <- emitExpr e
-      let fnText = T.unlines $
-            [ "  func.func @" <> liftedName <> "() -> " <> mlirRetTy <> " {" ] ++
-            map ("    " <>) bodyOps ++
-            [ "    func.return %" <> bodyResult <> " : " <> mlirRetTy
-            , "  }" ]
-      addLiftedFn fnText
-      addrName <- freshName "v"
-      ptrName <- freshName "v"
-      fptrName <- freshName "v"
-      resultName <- freshName "v"
-      pure ([ "// delay (thunk) -> @" <> liftedName
-            , "%" <> addrName <> " = func.constant @" <> liftedName <> " : () -> i64"
-            , "%" <> ptrName <> " = builtin.unrealized_conversion_cast %" <> addrName <> " : () -> i64 to !llvm.ptr"
-            , "%" <> fptrName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
-            , "%" <> resultName <> " = func.call @kk_thunk_create(%" <> fptrName <> ") : (i64) -> i64"
-            ], resultName)
+  -- EDelay wraps a lazy thunk.  Ideally we'd lambda-lift the body to a
+  -- zero-arg function and defer evaluation via kk_thunk_create/force.
+  -- However, the body often captures variables from the enclosing scope,
+  -- and in the self-hosted compiler, capture classification can be subtly
+  -- wrong (the compiled isCaptured function may disagree with the host).
+  -- A zero-arg lift with missing captures produces invalid MLIR (out-of-
+  -- scope SSA references).
+  --
+  -- Safe strategy: always evaluate eagerly and wrap the result in a
+  -- pre-forced thunk (kk_thunk_create_forced).  kk_thunk_force sees the
+  -- evaluated flag and returns the cached result directly, so downstream
+  -- EForce works correctly.  This loses true laziness, but GHC's demand
+  -- analyzer already removes most thunks, and the remaining ones in the
+  -- compiler pipeline don't rely on laziness for termination.
+  (eOps, eName) <- emitExpr e
+  resultName <- freshName "v"
+  pure ( ("// delay (thunk): eagerly evaluated, wrapped as pre-forced" : eOps) ++
+         [ "%" <> resultName <> " = func.call @kk_thunk_create_forced(%" <> eName <> ") : (i64) -> i64" ]
+       , resultName)
 
 emitExpr (EForce e) = do
   (eOps, eName) <- emitExpr e
@@ -2053,10 +2026,18 @@ precomputeCaptures modPfx recBinds = do
   priorCaps <- gets esPromotedCaptures
   let qualName n = let san = sanitizeName (nameText n)
                    in if T.any (== '/') (nameText n) then san else modPfx <> san
+      -- Collect all parameter SSA names across all binds in this group.
+      -- A free var in one bind that matches a sibling's parameter means
+      -- the bind was originally nested and needs to capture that param.
+      allGroupParamSsas = Set.unions
+        [ Set.fromList (map (nameToSsa . fst) ps)
+        | bnd <- recBinds
+        , let ELam ps _body = unwrapLambda (bindExpr bnd) ]
       isInScope' n = let s = nameToSsa n
                      in Map.member s currentAliases
                         || Set.member (qualName n) topFns
                         || Map.member s promoted
+                        || Set.member s allGroupParamSsas
       -- For each bind, compute direct captures (free vars that are in scope
       -- but NOT top-level fns and NOT other promoted fns).
       bindInfo = [ (qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd),
@@ -2091,7 +2072,8 @@ precomputeCaptures modPfx recBinds = do
                           -- (they'd cause "region entry argument already in use").
                           extras = filter (\k -> not (Set.member k directSet)
                                               && not (Set.member k paramSsas)
-                                              && Map.member k currentAliases) extraKeys
+                                              && (Map.member k currentAliases
+                                                  || Set.member k allGroupParamSsas)) extraKeys
                           allKeys = directKeys ++ Set.toList (Set.fromList extras)
                       in Map.insert qualN allKeys acc) caps bindInfo
         in if caps' == caps then caps else iterate' caps'
@@ -2444,7 +2426,7 @@ externalRuntimeFns :: Set Text
 externalRuntimeFns = Set.fromList
   [ "kk_drop", "kk_retain", "kk_release", "kk_reuse", "kk_is_unique"
   , "kk_alloc_con", "kk_set_field", "kk_field", "kk_tag", "kk_structural_eq"
-  , "kk_thunk_create", "kk_thunk_force"
+  , "kk_thunk_create", "kk_thunk_create_forced", "kk_thunk_force"
   , "kk_evv_create", "kk_evv_set", "kk_evv_get", "kk_unhandled_effect"
   , "kk_handler_exec", "kk_handler_abort"
   , "printf", "puts", "exit", "exitWith", "malloc", "free"
@@ -2464,7 +2446,7 @@ externalRuntimeArity = Map.fromList
   [ ("kk_drop", 1), ("kk_retain", 1), ("kk_release", 1)
   , ("kk_reuse", 2), ("kk_is_unique", 1)
   , ("kk_alloc_con", 2), ("kk_set_field", 3), ("kk_field", 2), ("kk_tag", 1), ("kk_structural_eq", 2)
-  , ("kk_thunk_create", 1), ("kk_thunk_force", 1)
+  , ("kk_thunk_create", 1), ("kk_thunk_create_forced", 1), ("kk_thunk_force", 1)
   , ("kk_evv_create", 1), ("kk_evv_set", 3), ("kk_evv_get", 2)
   , ("kk_unhandled_effect", 0)
   , ("kk_handler_exec", 2), ("kk_handler_abort", 2)

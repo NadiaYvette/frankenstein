@@ -115,7 +115,7 @@ int kk_arena_maybe_owns(const void* ptr) {
 
 void kk_arena_free(void* ptr) {
     if (ptr == NULL) return;
-    if (kk_arena_owns(ptr)) return;   /* arena cells outlive individual frees */
+    if (kk_arena_maybe_owns(ptr)) return;  /* O(1) range check — arena cells outlive individual frees */
     free(ptr);
 }
 

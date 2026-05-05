@@ -65,6 +65,7 @@ defaultEmitConfig = EmitConfig
 data EmitState = EmitState
   { esCounter       :: !Int
   , esLiftedFns     :: ![Text]  -- accumulated lifted lambda functions
+  , esLiftedNames   :: !(Set Text)  -- names of already-emitted lifted fns (dedup)
   , esTypeEnv       :: !(Map Text Text)  -- SSA name -> MLIR type
   , esStringLits    :: ![(Text, Text)]   -- global name -> string content
   , esAliases       :: !(Map Text Text)  -- name alias: let x = y → x maps to y
@@ -90,6 +91,15 @@ freshName prefix = do
 
 addLiftedFn :: Text -> Emit ()
 addLiftedFn fn = modify (\s -> s { esLiftedFns = fn : esLiftedFns s })
+
+-- | Add a lifted function only if a function with the given name hasn't been emitted yet.
+addLiftedFnOnce :: Text -> Text -> Emit ()
+addLiftedFnOnce name fn = do
+  already <- gets esLiftedNames
+  if Set.member name already
+    then pure ()
+    else modify (\s -> s { esLiftedFns = fn : esLiftedFns s
+                         , esLiftedNames = Set.insert name (esLiftedNames s) })
 
 -- | Module-qualify a sanitized top-level function name using esModulePrefix.
 -- E.g. with prefix "Frankenstein_Core_Perceus_", "anyType" -> "Frankenstein_Core_Perceus_anyType"
@@ -278,7 +288,7 @@ emitProgramText prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      initState = EmitState 0 [] Map.empty [] Map.empty False
+      initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
@@ -504,7 +514,7 @@ emitProgramWithEffects prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      initState = EmitState 0 [] Map.empty [] Map.empty True
+      initState = EmitState 0 [] Set.empty Map.empty [] Map.empty True
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
                          Set.empty
@@ -605,7 +615,7 @@ emitProgramWasm prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      initState = EmitState 0 [] Map.empty [] Map.empty False
+      initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False
                          qualifiedTopNames
                          (buildTopFnArity modPrefix renamedDefs)
                          Set.empty
@@ -2119,8 +2129,8 @@ emitBindAsTopFn modPfx bnd = do
                                           (esAliases s) (capAliases ++ paramAliases) })
       bodyText <- emitBody body mlirRetTy
       modify (\s -> s { esAliases = savedA })
-      -- Emit as a lifted function (appended to esLiftedFns).
-      addLiftedFn $ T.unlines
+      -- Emit as a lifted function (deduplicated by name).
+      addLiftedFnOnce qualN $ T.unlines
         [ "  func.func @" <> qualN <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {"
         , bodyText
         , "  }"

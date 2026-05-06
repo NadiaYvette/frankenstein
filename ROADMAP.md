@@ -664,7 +664,7 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
 
 ---
 
-## Current State (2026-04-16, self-hosted real compilation)
+## Current State (2026-05-06, stdlib types through Perceus RC)
 
 ### What's Built and Working
 - **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
@@ -709,6 +709,19 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   tests (pairs, triples, self-ref, mixed), 8 new K tests for RC on heap objects
 - **Runtime**: Perceus RC with cycle collection, recursive child dropping, nfields
   side table, color encoding in refcount word
+- **Phase 3e: Standard library types** ✓: Disabled GHC RULES pragmas (`-fno-enable-rewrite-rules`)
+  so standard constructors (`:`, `[]`, `Just`, `Nothing`, `True`, `False`, `(,)`) survive -O1
+  intact instead of being fused into `build`/`foldr`. Added `collectReferencedTyCons` to walk
+  Core expressions and extract stdlib TyCons via `dataConTyCon`, merging with `mg_tcs` so
+  DataDecls appear in progData. Five new end-to-end examples:
+  - `stdlib_list.hs`: `sumList [1..5] = 15` — standard `[Int]` with pattern matching
+  - `stdlib_maybe.hs`: `fromMaybe + Just/Nothing = 141` — standard `Maybe Int`
+  - `stdlib_bool.hs`: guards, `otherwise`, `negate = 7` — standard `Bool`
+  - `stdlib_tuple.hs`: `swap + addPair = 13` — standard `(Int, Int)`
+  - `prelude_hof.hs`: `myMap/myFilter/myFoldr on [Int] = 22` — HOFs on stdlib lists with Perceus RC
+  All 16 examples (12 original + 5 new) compile and run correctly.
+  **Remaining gap**: Prelude `map`/`filter`/`foldr` remain as unresolved external calls at -O1
+  without rules — GHC doesn't inline them. Needs either multi-module compilation or C runtime shims.
 - **Phase 3d: Benchmark suite** ✓: 3 benchmarks (fib/tak/ack) × 4 compilers (Frankenstein/GHC/Rust/Koka),
   automated `bench/run.sh` script. Frankenstein: 18.6 KB binary (1400x smaller than GHC), lowest memory
   (1.5 MB), 6x slower than GHC on fib(42) due to no-op retain overhead on unboxed values.
@@ -726,6 +739,8 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   4-language polyglot → 69/1/144
 
 ### Recent Commits
+- Phase 3e: stdlib types — disable RULES, collect referenced TyCons, 5 new stdlib examples (list/maybe/bool/tuple/hof), all 16 examples pass
+- Fix MlirEmit_Emitter stage2 compilation — split emitExpr, flatten deep nesting, 10-part split-compile, 23/23 modules compile, 12/12 e2e tests pass
 - Self-hosted binary — 19/20 modules compile through own pipeline, link into 800 KB binary, 17/17 self-tests pass. Lambda/thunk module-prefix fix in emitter. `self-host/build.sh` + `self-host/main.c`.
 - Cross-module effect dispatch — global effect registry enables Module A to perform effects handled by Module B. Pipeline reorder: `evidencePassGlobal` with combined registry runs before linker name-mangling. 97 cabal tests, 5/5 polyglot E2E.
 - `ae4f4ee` — Phase 2: K as living specification, 116 krun tests, noPatterns function, Mercury semidet/choice krun tests

@@ -861,15 +861,187 @@ emitExpr (EApp (ECon qn) args) = do
          ]) (zip [(0::Int)..] argNames)
   pure (allOps ++ allocOps ++ concat setOps, ptrName)
 
+-- All EApp (EVar fn) patterns: intrinsics + general function call
+emitExpr (EApp (EVar fn) args) = emitAppVar fn args
+-- Application of a non-var, non-con expression (e.g. the result of a
+-- closure allocation or a let-bound closure value). The function value
+-- here is always an i64 heap pointer to a closure, so we fetch the
+-- code pointer via kk_field just like the var-indirect path above, and
+-- thread the closure itself as the leading argument.
+-- Strip ETypeApp wrapper from callee so it can match the EApp (EVar fn) path
+emitExpr (EApp (ETypeApp fn _) args) = emitExpr (EApp fn args)
+-- Strip ETypeLam wrapper from callee (type abstraction applied to args)
+emitExpr (EApp (ETypeLam _ fn) args) = emitExpr (EApp fn args)
+
+emitExpr (EApp fn args) = do
+  (fnOps, fnName) <- emitExpr fn
+  argResults <- mapM emitExpr args
+  let allArgOps = concatMap fst argResults
+      argNames = map snd argResults
+      nArgs = length argNames
+      argTys = replicate nArgs "i64"
+  idxZeroName <- freshName "v"
+  fptrIntName <- freshName "v"
+  fptrPtrName <- freshName "v"
+  resultName  <- freshName "v"
+  let closArgList  = T.intercalate ", " (("%" <> fnName) : ["%" <> n | n <- argNames])
+      closArgTypes = T.intercalate ", " ("i64" : argTys)
+      extractOps =
+        [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
+        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> fnName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+        , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
+        , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+          <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
+        ]
+  pure (fnOps ++ allArgOps ++ extractOps, resultName)
+
+emitExpr (ECase scrut branches) = emitCaseDispatch scrut branches
+
+emitExpr (ELet binds body) = emitLetBindings binds body
+
+emitExpr (ELam params body) = emitLambdaLift params body
+
+-- Perceus operations — emit real runtime calls
+emitExpr (EDrop e) = do
+  (eOps, eName) <- emitExpr e
+  voidName <- freshName "v"
+  pure (eOps ++
+        [ "func.call @kk_drop(%" <> eName <> ") : (i64) -> ()"
+        , "%" <> voidName <> " = arith.constant 0 : i64  // drop result"
+        ], voidName)
+
+emitExpr (ERetain e) = do
+  (eOps, eName) <- emitExpr e
+  pure (eOps ++
+        [ "func.call @kk_retain(%" <> eName <> ") : (i64) -> ()"
+        ], eName)
+
+emitExpr (ERelease e) = do
+  (eOps, eName) <- emitExpr e
+  pure (eOps ++
+        [ "func.call @kk_release(%" <> eName <> ") : (i64) -> ()"
+        ], eName)
+
+emitExpr (EReuse ref alloc) = do
+  (refOps, refName) <- emitExpr ref
+  (allocOps, _allocName) <- emitExpr alloc
+  resultName <- freshName "v"
+  pure (refOps ++ allocOps ++
+        [ "%" <> resultName <> " = func.call @kk_reuse(%" <> refName <> ") : (i64) -> i64"
+        ], resultName)
+
+-- Laziness (thunks) — lambda-lift the delayed expression and call kk_thunk_create
+-- The lifted body is a regular func.func. We use func.constant + index_cast to
+-- get a function pointer as i64, avoiding llvm.mlir.addressof incompatibility.
+emitExpr (EDelay e) = do
+  -- EDelay wraps a lazy thunk.  Ideally we'd lambda-lift the body to a
+  -- zero-arg function and defer evaluation via kk_thunk_create/force.
+  -- However, the body often captures variables from the enclosing scope,
+  -- and in the self-hosted compiler, capture classification can be subtly
+  -- wrong (the compiled isCaptured function may disagree with the host).
+  -- A zero-arg lift with missing captures produces invalid MLIR (out-of-
+  -- scope SSA references).
+  --
+  -- Safe strategy: always evaluate eagerly and wrap the result in a
+  -- pre-forced thunk (kk_thunk_create_forced).  kk_thunk_force sees the
+  -- evaluated flag and returns the cached result directly, so downstream
+  -- EForce works correctly.  This loses true laziness, but GHC's demand
+  -- analyzer already removes most thunks, and the remaining ones in the
+  -- compiler pipeline don't rely on laziness for termination.
+  (eOps, eName) <- emitExpr e
+  resultName <- freshName "v"
+  pure ( ("// delay (thunk): eagerly evaluated, wrapped as pre-forced" : eOps) ++
+         [ "%" <> resultName <> " = func.call @kk_thunk_create_forced(%" <> eName <> ") : (i64) -> i64" ]
+       , resultName)
+
+emitExpr (EForce e) = do
+  (eOps, eName) <- emitExpr e
+  resultName <- freshName "v"
+  pure (eOps ++
+        [ "%" <> resultName <> " = func.call @kk_thunk_force(%" <> eName <> ") : (i64) -> i64"
+        ], resultName)
+
+-- Type application / abstraction: pass through to inner expr
+emitExpr (ETypeApp e _) = emitExpr e
+emitExpr (ETypeLam _ e) = emitExpr e
+
+-- Function reference: get a function pointer as i64
+-- Uses func.constant to get a reference to a func.func-defined function,
+-- then converts to i64 via an intermediate unrealized_conversion_cast.
+emitExpr (EFunRef qn) = do
+  let fname = sanitizeName (nameText (qnameName qn))
+      qualName = if T.null (qnameModule qn) then fname
+                 else sanitizeName (qnameModule qn) <> "_" <> fname
+  refName <- freshName "v"
+  fptrName <- freshName "v"
+  -- func.constant produces a value of function type (() -> i64)
+  -- We cast it to !llvm.ptr then to i64 to pass as a regular argument.
+  ptrName <- freshName "v"
+  pure ([ "// funref @" <> qualName
+        , "%" <> refName <> " = func.constant @" <> qualName <> " : () -> i64"
+        , "%" <> ptrName <> " = builtin.unrealized_conversion_cast %" <> refName <> " : () -> i64 to !llvm.ptr"
+        , "%" <> fptrName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
+        ], fptrName)
+
+-- Effect operations: the evidence pass desugars EPerform/EHandle to plain
+-- ELet/EApp before the emitter sees them. In dialect mode (--emit-effect-mlir)
+-- we emit frankenstein.* ops; in lowered mode, residual nodes are a bug.
+
+emitExpr (EPerform qn args) = do
+  effectMode <- gets esEffectDialect
+  if effectMode
+    then do
+      -- Effect dialect mode: emit frankenstein.perform
+      argResults <- mapM emitExpr args
+      let allOps = concatMap fst argResults
+          argNames = map snd argResults
+          effName = qnameModule qn
+          opName' = nameText (qnameName qn)
+      resultName <- freshName "v"
+      let dialectOp = "%" <> resultName <> " = "
+            <> renderOp (FrankPerform effName opName' argNames)
+      pure (allOps ++ [dialectOp], resultName)
+    else
+      error $ "emitter bug: residual EPerform after evidence pass: "
+           ++ show (qnameModule qn) ++ "/" ++ show (nameText (qnameName qn))
+
+emitExpr (EHandle effRow handler body) = do
+  effectMode <- gets esEffectDialect
+  if effectMode
+    then do
+      -- Effect dialect mode: emit frankenstein.handle
+      let effName = effectRowNameEmit effRow
+      (handlerOps, handlerName) <- emitExpr handler
+      -- Emit body with effect dialect (performs become frankenstein.perform)
+      (bodyOps, bodyName) <- emitExpr body
+      resultName <- freshName "v"
+      let dialectOps =
+            [ "// frankenstein.handle @" <> effName
+            , renderOp (FrankHandle effName handlerName bodyName)
+            , "%" <> resultName <> " = arith.constant 0 : i64  // handle result placeholder"
+            ]
+      -- The body result is the handle result
+      pure (handlerOps ++ bodyOps ++ dialectOps, bodyName)
+    else
+      error $ "emitter bug: residual EHandle after evidence pass: "
+           ++ show (effectRowNameEmit effRow)
+
+-- Catch-all removed: all Expr constructors are handled above
+
+
+-- | Emit function application where the function is a variable.
+-- Handles intrinsic dispatch (arithmetic, comparisons, string ops, IO)
+-- and general function calls (top-level, closure-indirect, promoted).
+emitAppVar :: Name -> [Expr] -> Emit ([Text], Text)
 -- Float binary ops
-emitExpr (EApp (EVar fn) [a, b])
+emitAppVar fn [a, b]
   | nameText fn == "+f" || nameText fn == "addf" = emitBinOp "arith.addf" "f64" a b
   | nameText fn == "-f" || nameText fn == "subf" = emitBinOp "arith.subf" "f64" a b
   | nameText fn == "*f" || nameText fn == "mulf" = emitBinOp "arith.mulf" "f64" a b
   | nameText fn == "/f" || nameText fn == "divf" = emitBinOp "arith.divf" "f64" a b
 
 -- Float comparisons
-emitExpr (EApp (EVar fn) [a, b])
+emitAppVar fn [a, b]
   | nameText fn == "==f" || nameText fn == "eqf" = emitFloatCmpOp "oeq" a b
   | nameText fn == "/=f" || nameText fn == "nef" = emitFloatCmpOp "one" a b
   | nameText fn == "<f"  || nameText fn == "ltf" = emitFloatCmpOp "olt" a b
@@ -878,7 +1050,7 @@ emitExpr (EApp (EVar fn) [a, b])
   | nameText fn == ">=f" || nameText fn == "gef" = emitFloatCmpOp "oge" a b
 
 -- Integer binary ops (including GHC primops with # suffix)
-emitExpr (EApp (EVar fn) [a, b])
+emitAppVar fn [a, b]
   | n `elem` ["+", "add", "+#", "$fNumInt_$c+"] = emitBinOp "arith.addi" "i64" a b
   | n `elem` ["-", "sub", "-#", "$fNumInt_$c-"] = emitBinOp "arith.subi" "i64" a b
   | n `elem` ["*", "mul", "*#", "$fNumInt_$c*"] = emitBinOp "arith.muli" "i64" a b
@@ -896,7 +1068,7 @@ emitExpr (EApp (EVar fn) [a, b])
   where n = nameText fn
 
 -- Unary integer operations
-emitExpr (EApp (EVar fn) [arg])
+emitAppVar fn [arg]
   | nameText fn `elem` ["negate", "negateInt#", "$fNumInt_$cnegate"] = do
       (argOps, argName) <- emitExpr arg
       zeroName <- freshName "v"
@@ -922,7 +1094,7 @@ emitExpr (EApp (EVar fn) [arg])
 -- These light up the linalg/memref dialects in the lowering pipeline.
 -- The pattern is always: allocate a dynamic memref, fill it via scf.for
 -- (iota or iota²), reduce it via linalg.generic, load the scalar.
-emitExpr (EApp (EVar fn) [nArg])
+emitAppVar fn [nArg]
   | nameText fn `elem` ["sum_iota", "dot_iota"] = do
       let isSquare = nameText fn == "dot_iota"
       (nOps, nName) <- emitExpr nArg
@@ -974,7 +1146,7 @@ emitExpr (EApp (EVar fn) [nArg])
 -- Haskell print/putStrLn: emit as printf call
 -- GHC desugars print to dictionary-passing, but after stripping dicts
 -- we get a bare call to print with one argument.
-emitExpr (EApp (EVar fn) [arg])
+emitAppVar fn [arg]
   | nameText fn == "print" = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
@@ -988,7 +1160,7 @@ emitExpr (EApp (EVar fn) [arg])
 -- First-class string intrinsics: lower to runtime helpers. Bridges emit
 -- these as plain EVar references; the function names below are the
 -- canonical intrinsic surface that all frontends share.
-emitExpr (EApp (EVar fn) [arg])
+emitAppVar fn [arg]
   | nameText fn `elem` ["println_str", "putStrLn", "print_str"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
@@ -1061,7 +1233,7 @@ emitExpr (EApp (EVar fn) [arg])
 
 -- Zero-arg intrinsics (e.g. stdin read_line, args_count)
 -- List constructors: Koka Nil/Cons mapped to runtime calls
-emitExpr (EApp (EVar fn) [h, t])
+emitAppVar fn [h, t]
   | nameText fn == "kk_cons" = do
       (hOps, hName) <- emitExpr h
       (tOps, tName) <- emitExpr t
@@ -1070,13 +1242,13 @@ emitExpr (EApp (EVar fn) [h, t])
         [ "%" <> resultName <> " = func.call @kk_cons(%" <> hName <> ", %" <> tName <> ") : (i64, i64) -> i64"
         ], resultName)
 
-emitExpr (EApp (EVar fn) [])
+emitAppVar fn []
   | nameText fn == "kk_nil" = do
       resultName <- freshName "v"
       pure ( [ "%" <> resultName <> " = func.call @kk_nil() : () -> i64" ]
            , resultName)
 
-emitExpr (EApp (EVar fn) [])
+emitAppVar fn []
   | nameText fn `elem` ["read_line", "getLine"] = do
       resultName <- freshName "v"
       pure ( [ "%" <> resultName <> " = func.call @kk_read_line() : () -> i64" ]
@@ -1091,7 +1263,7 @@ emitExpr (EApp (EVar fn) [])
            , resultName)
 
 -- Single-arg command-line / exit intrinsics
-emitExpr (EApp (EVar fn) [arg])
+emitAppVar fn [arg]
   | nameText fn `elem` ["args_get", "getArg"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
@@ -1106,7 +1278,7 @@ emitExpr (EApp (EVar fn) [arg])
         , "%" <> resultName <> " = arith.constant 0 : i64  // unreachable (exit)"
         ], resultName)
 
-emitExpr (EApp (EVar fn) [a, b])
+emitAppVar fn [a, b]
   | nameText fn `elem` ["str_concat", "++s", "concat_str", "bytes_concat"] = do
       (aOps, aName) <- emitExpr a
       (bOps, bName) <- emitExpr b
@@ -1146,7 +1318,7 @@ emitExpr (EApp (EVar fn) [a, b])
         ], resultName)
 
 -- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)
-emitExpr (EApp (EVar fn) [evvArg, idxArg])
+emitAppVar fn [evvArg, idxArg]
   | nameText fn == "evv_select" = do
       (evvOps, evvName) <- emitExpr evvArg
       (idxOps, idxName) <- emitExpr idxArg
@@ -1154,7 +1326,7 @@ emitExpr (EApp (EVar fn) [evvArg, idxArg])
       let callOp = "%" <> resultName <> " = func.call @kk_evv_get(%" <> evvName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
       pure (evvOps ++ idxOps ++ [callOp], resultName)
 
-emitExpr (EApp (EVar fn) args) = do
+emitAppVar fn args = do
   -- General function call. If fn names a top-level function, emit a direct
   -- func.call; otherwise treat it as a local closure value (heap-allocated
   -- via kk_alloc_con) and dispatch indirectly through field 0 (fptr).
@@ -1305,39 +1477,9 @@ emitExpr (EApp (EVar fn) args) = do
                            <> "(" <> argList <> ") : (" <> argTypeList <> ") -> i64"
               pure (allOps ++ [callOp], resultName)
 
--- Application of a non-var, non-con expression (e.g. the result of a
--- closure allocation or a let-bound closure value). The function value
--- here is always an i64 heap pointer to a closure, so we fetch the
--- code pointer via kk_field just like the var-indirect path above, and
--- thread the closure itself as the leading argument.
--- Strip ETypeApp wrapper from callee so it can match the EApp (EVar fn) path
-emitExpr (EApp (ETypeApp fn _) args) = emitExpr (EApp fn args)
--- Strip ETypeLam wrapper from callee (type abstraction applied to args)
-emitExpr (EApp (ETypeLam _ fn) args) = emitExpr (EApp fn args)
-
-emitExpr (EApp fn args) = do
-  (fnOps, fnName) <- emitExpr fn
-  argResults <- mapM emitExpr args
-  let allArgOps = concatMap fst argResults
-      argNames = map snd argResults
-      nArgs = length argNames
-      argTys = replicate nArgs "i64"
-  idxZeroName <- freshName "v"
-  fptrIntName <- freshName "v"
-  fptrPtrName <- freshName "v"
-  resultName  <- freshName "v"
-  let closArgList  = T.intercalate ", " (("%" <> fnName) : ["%" <> n | n <- argNames])
-      closArgTypes = T.intercalate ", " ("i64" : argTys)
-      extractOps =
-        [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
-        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> fnName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
-        , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-        , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
-          <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
-        ]
-  pure (fnOps ++ allArgOps ++ extractOps, resultName)
-
-emitExpr (ECase scrut branches) = do
+-- | Emit case expression dispatch.
+emitCaseDispatch :: Expr -> [Branch] -> Emit ([Text], Text)
+emitCaseDispatch scrut branches = do
   -- Pattern matching
   (scrutOps, scrutName) <- emitExpr scrut
   -- Pre-register any PatVar bindings: a PatVar in a branch means
@@ -1407,7 +1549,9 @@ emitExpr (ECase scrut branches) = do
       pure (scrutOps ++ ["// unhandled case with " <> T.pack (show (length branches)) <> " branches"
                          , "%" <> name <> " = arith.constant 0 : i64"], name)
 
-emitExpr (ELet [binds] body) = do
+-- | Emit let bindings with scope save/restore.
+emitLetBindings :: [BindGroup] -> Expr -> Emit ([Text], Text)
+emitLetBindings [binds] body = do
   -- Save aliases so let-bindings don't leak out of this scope
   -- (e.g. into sibling scf.if branches).
   savedA <- gets esAliases
@@ -1444,7 +1588,7 @@ emitExpr (ELet [binds] body) = do
                   , esPromotedCaptures = savedCaptures })
   pure (recOps ++ plainOps ++ bodyOps, bodyName)
 
-emitExpr (ELet (bg:bgs) body) = do
+emitLetBindings (bg:bgs) body = do
   savedA <- gets esAliases
   savedTopFns <- gets esTopFns
   savedArity  <- gets esTopFnArity
@@ -1462,15 +1606,17 @@ emitExpr (ELet (bg:bgs) body) = do
   precomputeCaptures modPfx recBinds
   recOps <- concat <$> mapM (emitBindAsTopFn modPfx) recBinds
   plainOps <- concat <$> mapM emitBind plainBinds
-  (restOps, restName) <- emitExpr (ELet bgs body)
+  (restOps, restName) <- emitLetBindings bgs body
   modify (\s -> s { esAliases = savedA, esTopFns = savedTopFns
                   , esTopFnArity = savedArity, esPromotedFns = savedPromoted
                   , esPromotedCaptures = savedCaptures })
   pure (recOps ++ plainOps ++ restOps, restName)
 
-emitExpr (ELet [] body) = emitExpr body
+emitLetBindings [] body = emitExpr body
 
-emitExpr (ELam params body) = do
+-- | Emit lambda lifting with heap-allocated closures.
+emitLambdaLift :: [(Name, Type)] -> Expr -> Emit ([Text], Text)
+emitLambdaLift params body = do
   -- Lambda lifting with heap-allocated closures.
   --
   -- Closure ABI (all values are i64):
@@ -1596,132 +1742,6 @@ emitExpr (ELam params body) = do
          ]) (zip [(1::Int)..] allCapturedNames)
   pure (allocOps ++ concat capSetOps, ptrName)
 
--- Perceus operations — emit real runtime calls
-emitExpr (EDrop e) = do
-  (eOps, eName) <- emitExpr e
-  voidName <- freshName "v"
-  pure (eOps ++
-        [ "func.call @kk_drop(%" <> eName <> ") : (i64) -> ()"
-        , "%" <> voidName <> " = arith.constant 0 : i64  // drop result"
-        ], voidName)
-
-emitExpr (ERetain e) = do
-  (eOps, eName) <- emitExpr e
-  pure (eOps ++
-        [ "func.call @kk_retain(%" <> eName <> ") : (i64) -> ()"
-        ], eName)
-
-emitExpr (ERelease e) = do
-  (eOps, eName) <- emitExpr e
-  pure (eOps ++
-        [ "func.call @kk_release(%" <> eName <> ") : (i64) -> ()"
-        ], eName)
-
-emitExpr (EReuse ref alloc) = do
-  (refOps, refName) <- emitExpr ref
-  (allocOps, _allocName) <- emitExpr alloc
-  resultName <- freshName "v"
-  pure (refOps ++ allocOps ++
-        [ "%" <> resultName <> " = func.call @kk_reuse(%" <> refName <> ") : (i64) -> i64"
-        ], resultName)
-
--- Laziness (thunks) — lambda-lift the delayed expression and call kk_thunk_create
--- The lifted body is a regular func.func. We use func.constant + index_cast to
--- get a function pointer as i64, avoiding llvm.mlir.addressof incompatibility.
-emitExpr (EDelay e) = do
-  -- EDelay wraps a lazy thunk.  Ideally we'd lambda-lift the body to a
-  -- zero-arg function and defer evaluation via kk_thunk_create/force.
-  -- However, the body often captures variables from the enclosing scope,
-  -- and in the self-hosted compiler, capture classification can be subtly
-  -- wrong (the compiled isCaptured function may disagree with the host).
-  -- A zero-arg lift with missing captures produces invalid MLIR (out-of-
-  -- scope SSA references).
-  --
-  -- Safe strategy: always evaluate eagerly and wrap the result in a
-  -- pre-forced thunk (kk_thunk_create_forced).  kk_thunk_force sees the
-  -- evaluated flag and returns the cached result directly, so downstream
-  -- EForce works correctly.  This loses true laziness, but GHC's demand
-  -- analyzer already removes most thunks, and the remaining ones in the
-  -- compiler pipeline don't rely on laziness for termination.
-  (eOps, eName) <- emitExpr e
-  resultName <- freshName "v"
-  pure ( ("// delay (thunk): eagerly evaluated, wrapped as pre-forced" : eOps) ++
-         [ "%" <> resultName <> " = func.call @kk_thunk_create_forced(%" <> eName <> ") : (i64) -> i64" ]
-       , resultName)
-
-emitExpr (EForce e) = do
-  (eOps, eName) <- emitExpr e
-  resultName <- freshName "v"
-  pure (eOps ++
-        [ "%" <> resultName <> " = func.call @kk_thunk_force(%" <> eName <> ") : (i64) -> i64"
-        ], resultName)
-
--- Type application / abstraction: pass through to inner expr
-emitExpr (ETypeApp e _) = emitExpr e
-emitExpr (ETypeLam _ e) = emitExpr e
-
--- Function reference: get a function pointer as i64
--- Uses func.constant to get a reference to a func.func-defined function,
--- then converts to i64 via an intermediate unrealized_conversion_cast.
-emitExpr (EFunRef qn) = do
-  let fname = sanitizeName (nameText (qnameName qn))
-      qualName = if T.null (qnameModule qn) then fname
-                 else sanitizeName (qnameModule qn) <> "_" <> fname
-  refName <- freshName "v"
-  fptrName <- freshName "v"
-  -- func.constant produces a value of function type (() -> i64)
-  -- We cast it to !llvm.ptr then to i64 to pass as a regular argument.
-  ptrName <- freshName "v"
-  pure ([ "// funref @" <> qualName
-        , "%" <> refName <> " = func.constant @" <> qualName <> " : () -> i64"
-        , "%" <> ptrName <> " = builtin.unrealized_conversion_cast %" <> refName <> " : () -> i64 to !llvm.ptr"
-        , "%" <> fptrName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
-        ], fptrName)
-
--- Effect operations: the evidence pass desugars EPerform/EHandle to plain
--- ELet/EApp before the emitter sees them. In dialect mode (--emit-effect-mlir)
--- we emit frankenstein.* ops; in lowered mode, residual nodes are a bug.
-
-emitExpr (EPerform qn args) = do
-  effectMode <- gets esEffectDialect
-  if effectMode
-    then do
-      -- Effect dialect mode: emit frankenstein.perform
-      argResults <- mapM emitExpr args
-      let allOps = concatMap fst argResults
-          argNames = map snd argResults
-          effName = qnameModule qn
-          opName' = nameText (qnameName qn)
-      resultName <- freshName "v"
-      let dialectOp = "%" <> resultName <> " = "
-            <> renderOp (FrankPerform effName opName' argNames)
-      pure (allOps ++ [dialectOp], resultName)
-    else
-      error $ "emitter bug: residual EPerform after evidence pass: "
-           ++ show (qnameModule qn) ++ "/" ++ show (nameText (qnameName qn))
-
-emitExpr (EHandle effRow handler body) = do
-  effectMode <- gets esEffectDialect
-  if effectMode
-    then do
-      -- Effect dialect mode: emit frankenstein.handle
-      let effName = effectRowNameEmit effRow
-      (handlerOps, handlerName) <- emitExpr handler
-      -- Emit body with effect dialect (performs become frankenstein.perform)
-      (bodyOps, bodyName) <- emitExpr body
-      resultName <- freshName "v"
-      let dialectOps =
-            [ "// frankenstein.handle @" <> effName
-            , renderOp (FrankHandle effName handlerName bodyName)
-            , "%" <> resultName <> " = arith.constant 0 : i64  // handle result placeholder"
-            ]
-      -- The body result is the handle result
-      pure (handlerOps ++ bodyOps ++ dialectOps, bodyName)
-    else
-      error $ "emitter bug: residual EHandle after evidence pass: "
-           ++ show (effectRowNameEmit effRow)
-
--- Catch-all removed: all Expr constructors are handled above
 
 -- Helpers
 
@@ -2484,6 +2504,16 @@ escapeMLIRString t = T.concat (map escByte (BS.unpack (TE.encodeUtf8 t)))
       | b >= 0x20 && b < 0x7F = T.singleton (toEnum (fromIntegral b))
       | otherwise = T.pack ('\\' : printf "%02X" b)
 
+-- | Run a shell command, returning Left on failure.
+-- Flattened helper avoids deeply nested case expressions that cause
+-- exponential blowup in the self-hosted emitter.
+runCmd :: String -> [String] -> String -> Text -> IO (Either Text String)
+runCmd cmd args input label = do
+  (ec, out, err) <- readProcessWithExitCode cmd args input
+  case ec of
+    ExitFailure _ -> pure $ Left $ label <> " failed: " <> T.pack err
+    ExitSuccess   -> pure $ Right out
+
 -- | Full compilation pipeline
 compileToExecutable :: EmitConfig -> Program -> IO (Either Text FilePath)
 compileToExecutable config prog = do
@@ -2492,75 +2522,66 @@ compileToExecutable config prog = do
       optPath = ecOutputPath config ++ ".opt.mlir"
       llPath = ecOutputPath config ++ ".ll"
 
-  -- Write MLIR
   TIO.writeFile mlirPath mlirText
 
-  -- mlir-opt: lower to LLVM dialect
-  -- linalg/memref passes are no-ops when no array ops are present, so they
-  -- are safe to always include. They light up the Futhark array path.
-  (ec1, out1, err1) <- readProcessWithExitCode (ecMlirOptPath config)
+  r1 <- runCmd (ecMlirOptPath config)
     ["--convert-linalg-to-loops",
      "--expand-strided-metadata",
      "--finalize-memref-to-llvm",
      "--convert-scf-to-cf", "--convert-func-to-llvm", "--convert-arith-to-llvm",
-     "--convert-cf-to-llvm", "--reconcile-unrealized-casts", mlirPath] ""
-  case ec1 of
-    ExitFailure _ -> pure $ Left $ "mlir-opt failed: " <> T.pack err1
-    ExitSuccess -> do
+     "--convert-cf-to-llvm", "--reconcile-unrealized-casts", mlirPath] "" "mlir-opt"
+  case r1 of
+    Left e -> pure (Left e)
+    Right out1 -> do
       writeFile optPath out1
-
-      -- mlir-translate: MLIR → LLVM IR
-      (ec2, out2, err2) <- readProcessWithExitCode (ecMlirTranslatePath config)
-        ["--mlir-to-llvmir", optPath] ""
-      case ec2 of
-        ExitFailure _ -> pure $ Left $ "mlir-translate failed: " <> T.pack err2
-        ExitSuccess -> do
+      r2 <- runCmd (ecMlirTranslatePath config) ["--mlir-to-llvmir", optPath] "" "mlir-translate"
+      case r2 of
+        Left e -> pure (Left e)
+        Right out2 -> do
           writeFile llPath out2
+          compileToExecutableLink config llPath
 
-          -- clang: LLVM IR + runtime → executable
-          -- We must compile the runtime C file separately, then link,
-          -- because -x ir would apply to all inputs.
-          case ecKokaRuntimePath config of
-            Just rtPath -> do
-              -- Derive cycle collector path from runtime path
-              let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
-                  cyclePath = rtDir ++ "kk_cycle.c"
-                  arenaPath = rtDir ++ "kk_arena.c"
-                  rtObjPath = ecOutputPath config ++ ".rt.o"
-                  cycleObjPath = ecOutputPath config ++ ".cycle.o"
-                  arenaObjPath = ecOutputPath config ++ ".arena.o"
-                  optFlag = "-O" ++ show (ecOptLevel config)
-                  includeFlag = "-I" ++ rtDir
-              -- Compile runtime C files to .o
-              (ec3a, _, err3a) <- readProcessWithExitCode (ecClangPath config)
-                ["-c", rtPath, "-o", rtObjPath, includeFlag, optFlag] ""
-              case ec3a of
-                ExitFailure _ -> pure $ Left $ "clang (runtime) failed: " <> T.pack err3a
-                ExitSuccess -> do
-                  (ec3c, _, err3c) <- readProcessWithExitCode (ecClangPath config)
-                    ["-c", cyclePath, "-o", cycleObjPath, includeFlag, optFlag] ""
-                  case ec3c of
-                    ExitFailure _ -> pure $ Left $ "clang (cycle) failed: " <> T.pack err3c
-                    ExitSuccess -> do
-                      (ec3d, _, err3d) <- readProcessWithExitCode (ecClangPath config)
-                        ["-c", arenaPath, "-o", arenaObjPath, includeFlag, optFlag] ""
-                      case ec3d of
-                        ExitFailure _ -> pure $ Left $ "clang (arena) failed: " <> T.pack err3d
-                        ExitSuccess -> do
-                          -- Link LLVM IR + runtime .o + cycle .o + arena .o → executable
-                          (ec3b, _, err3b) <- readProcessWithExitCode (ecClangPath config)
-                            ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath,
-                             "-o", ecOutputPath config, optFlag] ""
-                          case ec3b of
-                            ExitFailure _ -> pure $ Left $ "clang (link) failed: " <> T.pack err3b
-                            ExitSuccess -> pure $ Right $ ecOutputPath config
-            Nothing -> do
-              (ec3, _, err3) <- readProcessWithExitCode (ecClangPath config)
-                [llPath, "-x", "ir", "-o", ecOutputPath config,
-                 "-O" ++ show (ecOptLevel config)] ""
-              case ec3 of
-                ExitFailure _ -> pure $ Left $ "clang failed: " <> T.pack err3
-                ExitSuccess -> pure $ Right $ ecOutputPath config
+-- | Link step of compileToExecutable, separated to keep nesting shallow.
+compileToExecutableLink :: EmitConfig -> FilePath -> IO (Either Text FilePath)
+compileToExecutableLink config llPath =
+  case ecKokaRuntimePath config of
+    Nothing -> do
+      r <- runCmd (ecClangPath config)
+        [llPath, "-x", "ir", "-o", ecOutputPath config,
+         "-O" ++ show (ecOptLevel config)] "" "clang"
+      case r of
+        Left e  -> pure (Left e)
+        Right _ -> pure (Right (ecOutputPath config))
+    Just rtPath -> do
+      let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
+          cyclePath = rtDir ++ "kk_cycle.c"
+          arenaPath = rtDir ++ "kk_arena.c"
+          rtObjPath = ecOutputPath config ++ ".rt.o"
+          cycleObjPath = ecOutputPath config ++ ".cycle.o"
+          arenaObjPath = ecOutputPath config ++ ".arena.o"
+          optFlag = "-O" ++ show (ecOptLevel config)
+          includeFlag = "-I" ++ rtDir
+      r1 <- runCmd (ecClangPath config)
+        ["-c", rtPath, "-o", rtObjPath, includeFlag, optFlag] "" "clang (runtime)"
+      case r1 of
+        Left e -> pure (Left e)
+        Right _ -> do
+          r2 <- runCmd (ecClangPath config)
+            ["-c", cyclePath, "-o", cycleObjPath, includeFlag, optFlag] "" "clang (cycle)"
+          case r2 of
+            Left e -> pure (Left e)
+            Right _ -> do
+              r3 <- runCmd (ecClangPath config)
+                ["-c", arenaPath, "-o", arenaObjPath, includeFlag, optFlag] "" "clang (arena)"
+              case r3 of
+                Left e -> pure (Left e)
+                Right _ -> do
+                  r4 <- runCmd (ecClangPath config)
+                    ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath,
+                     "-o", ecOutputPath config, optFlag] "" "clang (link)"
+                  case r4 of
+                    Left e  -> pure (Left e)
+                    Right _ -> pure (Right (ecOutputPath config))
 
 -- | Compile to WebAssembly (.wasm)
 -- Pipeline: MLIR → mlir-opt → mlir-translate → llc (wasm32) → wasm-ld
@@ -2572,64 +2593,54 @@ compileToWasm config prog = do
       optPath = outBase ++ ".opt.mlir"
       llPath = outBase ++ ".ll"
       wasmObjPath = outBase ++ ".wasm.o"
-      wasmRtObjPath = outBase ++ ".wasm.rt.o"
-      wasmPath = if ".wasm" `isSuffixOf` outBase then outBase else outBase ++ ".wasm"
+      wasmPath = if drop (length outBase - 5) outBase == ".wasm" then outBase else outBase ++ ".wasm"
 
-  -- Write MLIR (no printf, no fmt_int)
   TIO.writeFile mlirPath mlirText
 
-  -- mlir-opt: lower to LLVM dialect
-  (ec1, out1, err1) <- readProcessWithExitCode (ecMlirOptPath config)
+  r1 <- runCmd (ecMlirOptPath config)
     ["--convert-scf-to-cf", "--convert-func-to-llvm", "--convert-arith-to-llvm",
-     "--convert-cf-to-llvm", "--reconcile-unrealized-casts", mlirPath] ""
-  case ec1 of
-    ExitFailure _ -> pure $ Left $ "mlir-opt failed: " <> T.pack err1
-    ExitSuccess -> do
+     "--convert-cf-to-llvm", "--reconcile-unrealized-casts", mlirPath] "" "mlir-opt"
+  case r1 of
+    Left e -> pure (Left e)
+    Right out1 -> do
       writeFile optPath out1
-
-      -- mlir-translate: MLIR → LLVM IR
-      (ec2, out2, err2) <- readProcessWithExitCode (ecMlirTranslatePath config)
-        ["--mlir-to-llvmir", optPath] ""
-      case ec2 of
-        ExitFailure _ -> pure $ Left $ "mlir-translate failed: " <> T.pack err2
-        ExitSuccess -> do
+      r2 <- runCmd (ecMlirTranslatePath config) ["--mlir-to-llvmir", optPath] "" "mlir-translate"
+      case r2 of
+        Left e -> pure (Left e)
+        Right out2 -> do
           writeFile llPath out2
-
-          -- llc: LLVM IR → wasm32 object
-          (ec3, _, err3) <- readProcessWithExitCode "llc"
+          r3 <- runCmd "llc"
             ["-mtriple=wasm32-unknown-unknown", "-filetype=obj", "-O2",
-             llPath, "-o", wasmObjPath] ""
-          case ec3 of
-            ExitFailure _ -> pure $ Left $ "llc (wasm32) failed: " <> T.pack err3
-            ExitSuccess -> do
-              -- Compile wasm runtime
-              case ecKokaRuntimePath config of
-                Just rtPath -> do
-                  let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
-                      wasmRtSrc = rtDir ++ "kk_runtime_wasm.c"
-                  (ec4, _, err4) <- readProcessWithExitCode (ecClangPath config)
-                    ["--target=wasm32-unknown-unknown", "-O2", "-nostdlib",
-                     "-c", wasmRtSrc, "-o", wasmRtObjPath] ""
-                  case ec4 of
-                    ExitFailure _ -> pure $ Left $ "clang (wasm runtime) failed: " <> T.pack err4
-                    ExitSuccess -> do
-                      -- wasm-ld: link program + runtime → .wasm
-                      (ec5, _, err5) <- readProcessWithExitCode "wasm-ld"
-                        ["--no-entry", "--export=_frankenstein_main",
-                         "--allow-undefined",
-                         wasmObjPath, wasmRtObjPath,
-                         "-o", wasmPath] ""
-                      case ec5 of
-                        ExitFailure _ -> pure $ Left $ "wasm-ld failed: " <> T.pack err5
-                        ExitSuccess -> pure $ Right wasmPath
-                Nothing -> do
-                  -- No runtime — link program only with undefined symbols allowed
-                  (ec5, _, err5) <- readProcessWithExitCode "wasm-ld"
-                    ["--no-entry", "--export=_frankenstein_main",
-                     "--allow-undefined",
-                     wasmObjPath, "-o", wasmPath] ""
-                  case ec5 of
-                    ExitFailure _ -> pure $ Left $ "wasm-ld failed: " <> T.pack err5
-                    ExitSuccess -> pure $ Right wasmPath
-  where
-    isSuffixOf suf s = drop (length s - length suf) s == suf
+             llPath, "-o", wasmObjPath] "" "llc (wasm32)"
+          case r3 of
+            Left e -> pure (Left e)
+            Right _ -> compileToWasmLink config outBase wasmObjPath wasmPath
+
+-- | Link step of compileToWasm, separated to keep nesting shallow.
+compileToWasmLink :: EmitConfig -> FilePath -> FilePath -> FilePath -> IO (Either Text FilePath)
+compileToWasmLink config outBase wasmObjPath wasmPath =
+  case ecKokaRuntimePath config of
+    Nothing -> do
+      r <- runCmd "wasm-ld"
+        ["--no-entry", "--export=_frankenstein_main",
+         "--allow-undefined", wasmObjPath, "-o", wasmPath] "" "wasm-ld"
+      case r of
+        Left e  -> pure (Left e)
+        Right _ -> pure (Right wasmPath)
+    Just rtPath -> do
+      let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
+          wasmRtSrc = rtDir ++ "kk_runtime_wasm.c"
+          wasmRtObjPath = outBase ++ ".wasm.rt.o"
+      r1 <- runCmd (ecClangPath config)
+        ["--target=wasm32-unknown-unknown", "-O2", "-nostdlib",
+         "-c", wasmRtSrc, "-o", wasmRtObjPath] "" "clang (wasm runtime)"
+      case r1 of
+        Left e -> pure (Left e)
+        Right _ -> do
+          r2 <- runCmd "wasm-ld"
+            ["--no-entry", "--export=_frankenstein_main",
+             "--allow-undefined", wasmObjPath, wasmRtObjPath,
+             "-o", wasmPath] "" "wasm-ld"
+          case r2 of
+            Left e  -> pure (Left e)
+            Right _ -> pure (Right wasmPath)

@@ -30,7 +30,7 @@ import GHC.Core
   )
 import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
 import GHC.Core.TyCon
-  ( TyCon, tyConName, isAlgTyCon, tyConTyVars, tyConDataCons
+  ( TyCon, tyConName, isAlgTyCon, tyConTyVars, tyConDataCons, tyConUnique
   )
 import GHC.Types.Var
   ( Var, varName, varType, isTyVar
@@ -41,7 +41,7 @@ import GHC.Types.Unique (getKey)
 import GHC.Types.Literal (Literal(..))
 import GHC.Types.Id (idDemandInfo, isDataConId_maybe, isDeadBinder)
 import GHC.Types.Demand (isStrictDmd, isAbsDmd)
-import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys, dataConFieldLabels)
+import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys, dataConFieldLabels, dataConTyCon)
 import GHC.Unit.Module (moduleNameString, moduleName)
 import GHC.Data.FastString (unpackFS)
 import GHC.Types.FieldLabel (flLabel)
@@ -54,6 +54,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Word as W
 
 -------------------------------------------------------------------------------
 -- Public API
@@ -64,7 +65,11 @@ import qualified Data.Set as Set
 translateProgram :: Text -> CoreProgram -> [TyCon] -> Either Text F.Program
 translateProgram modName binds tyCons =
   let defs = filter (not . isDictDef) (concatMap translateTopBind binds)
-      dataDecls = translateTyCons tyCons
+      -- Merge locally-defined TyCons with those referenced in expressions
+      -- (e.g. [], Bool, Maybe from the standard library)
+      referencedTyCons = collectReferencedTyCons binds
+      allTyCons = dedupTyCons (tyCons ++ referencedTyCons)
+      dataDecls = translateTyCons allTyCons
   in Right $ F.Program
     { F.progName    = F.QName modName (F.Name modName 0)
     , F.progDefs    = defs
@@ -596,6 +601,49 @@ isCheapValue e@(App _ _) =
     isTypeArg (Type _) = True
     isTypeArg _        = False
 isCheapValue _           = False
+
+-------------------------------------------------------------------------------
+-- Collecting referenced TyCons from Core
+-------------------------------------------------------------------------------
+
+-- | Walk a CoreProgram and collect all TyCons referenced via DataCon usage.
+-- This finds stdlib TyCons ([], Bool, Maybe, etc.) that are used in the
+-- program but not present in mg_tcs (which only contains locally-defined
+-- TyCons).
+collectReferencedTyCons :: CoreProgram -> [TyCon]
+collectReferencedTyCons = dedupTyCons . concatMap collectFromBind
+  where
+    collectFromBind (NonRec _ e) = collectFromExpr e
+    collectFromBind (Rec pairs) = concatMap (collectFromExpr . snd) pairs
+
+    collectFromExpr (Var v)
+      | Just dc <- isDataConId_maybe v = [dataConTyCon dc]
+      | otherwise = []
+    collectFromExpr (Lit _) = []
+    collectFromExpr (App f a) = collectFromExpr f ++ collectFromExpr a
+    collectFromExpr (Lam _ e) = collectFromExpr e
+    collectFromExpr (Let b e) = collectFromBind b ++ collectFromExpr e
+    collectFromExpr (Case s _ _ alts) =
+      collectFromExpr s ++ concatMap collectFromAlt alts
+    collectFromExpr (Cast e _) = collectFromExpr e
+    collectFromExpr (Tick _ e) = collectFromExpr e
+    collectFromExpr (Type _) = []
+    collectFromExpr (Coercion _) = []
+
+    collectFromAlt (Alt (DataAlt dc) _ rhs) =
+      dataConTyCon dc : collectFromExpr rhs
+    collectFromAlt (Alt _ _ rhs) = collectFromExpr rhs
+
+-- | Deduplicate TyCons by Unique.
+dedupTyCons :: [TyCon] -> [TyCon]
+dedupTyCons = go Set.empty
+  where
+    go :: Set W.Word64 -> [TyCon] -> [TyCon]
+    go _ [] = []
+    go seen (tc:tcs)
+      | Set.member k seen = go seen tcs
+      | otherwise = tc : go (Set.insert k seen) tcs
+      where k = getKey (tyConUnique tc)
 
 -------------------------------------------------------------------------------
 -- TyCon -> DataDecl translation

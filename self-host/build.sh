@@ -192,10 +192,15 @@ EXPECTED[higher_order]=12
 EXPECTED[exhaust_tail]=36
 EXPECTED[effect_ask]=84
 EXPECTED[effect_state]=100
+EXPECTED[stdlib_list]=15
+EXPECTED[stdlib_maybe]=141
+EXPECTED[stdlib_bool]=7
+EXPECTED[stdlib_tuple]=13
+EXPECTED[prelude_hof]=22
 
 E2E_PASS=0
 E2E_FAIL=0
-for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail; do
+for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail stdlib_list stdlib_maybe stdlib_bool stdlib_tuple prelude_hof; do
   echo -n "  $example.hs: "
   # Host compiler → OrganIR → self-hosted compiler → MLIR
   if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \
@@ -442,7 +447,7 @@ if [ "$S2_OK" -gt 0 ]; then
   echo "=== Phase 9c: Verify stage 2 (end-to-end tests) ==="
   S2E_PASS=0
   S2E_FAIL=0
-  for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail; do
+  for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail stdlib_list stdlib_maybe stdlib_bool stdlib_tuple prelude_hof; do
     echo -n "  $example.hs (stage2): "
     # Host compiler → OrganIR → stage 2 compiler → MLIR
     if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \

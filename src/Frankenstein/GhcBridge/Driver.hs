@@ -13,7 +13,8 @@ module Frankenstein.GhcBridge.Driver
 
 import GHC
 import GHC.Core (CoreProgram)
-import GHC.Driver.Session (updOptLevel, xopt_set)
+import GHC.Driver.Session (updOptLevel, xopt_set, gopt_unset)
+import GHC.Driver.Flags (GeneralFlag(Opt_EnableRewriteRules))
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import qualified GHC.Driver.Session as DynFlags
 import qualified GHC.LanguageExtensions.Type as LangExt
@@ -93,7 +94,10 @@ runGhcCompile libdir inputPath = do
           }
         -- Match frankenstein.cabal `default-extensions` + common extensions
         -- that our own source files depend on.
-        dflags2 = foldr (flip xopt_set) dflags1
+        -- Disable RULES pragmas so standard list/Maybe constructors
+        -- survive intact instead of being fused into build/foldr.
+        dflags1' = gopt_unset dflags1 Opt_EnableRewriteRules
+        dflags2 = foldr (flip xopt_set) dflags1'
           [ LangExt.OverloadedStrings
           , LangExt.LambdaCase
           , LangExt.BangPatterns

@@ -1161,8 +1161,11 @@ emitExpr (ETypeLam _ e) = emitExpr e
 -- then converts to i64 via an intermediate unrealized_conversion_cast.
 emitExpr (EFunRef qn) = do
   let fname = sanitizeName (nameText (qnameName qn))
-      qualName = if T.null (qnameModule qn) then fname
-                 else sanitizeName (qnameModule qn) <> "_" <> fname
+      rawQualName = if T.null (qnameModule qn) then fname
+                    else sanitizeName (qnameModule qn) <> "_" <> fname
+  pfx <- gets esModulePrefix
+  let qualName = if T.isPrefixOf pfx rawQualName then rawQualName
+                 else pfx <> rawQualName
   refName <- freshName "v"
   fptrName <- freshName "v"
   -- func.constant produces a value of function type (() -> i64)

@@ -729,9 +729,11 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   - `stdlib_bool.hs`: guards, `otherwise`, `negate = 7` — standard `Bool`
   - `stdlib_tuple.hs`: `swap + addPair = 13` — standard `(Int, Int)`
   - `prelude_hof.hs`: `myMap/myFilter/myFoldr on [Int] = 22` — HOFs on stdlib lists with Perceus RC
-  All 16 examples (12 original + 5 new) compile and run correctly.
-  **Remaining gap**: Prelude `map`/`filter`/`foldr` remain as unresolved external calls at -O1
-  without rules — GHC doesn't inline them. Needs either multi-module compilation or C runtime shims.
+  - `prelude_inline.hs`: real Prelude `map`/`filter`/`sum` = 24 — GHC inlines at `-O1` with
+    `-fexpose-all-unfoldings -fspecialise-aggressively -fcross-module-specialise`
+  - `prelude_comprehensive.hs`: real Prelude `map`/`filter`/`sum`/`take`/`zipWith`/`foldl` = 235
+  All 21 examples compile and run correctly. Prelude HOFs are fully inlined by GHC's
+  aggressive specialization flags — no C shims needed.
 - **Phase 3d: Benchmark suite** ✓: 3 benchmarks (fib/tak/ack) × 4 compilers (Frankenstein/GHC/Rust/Koka),
   automated `bench/run.sh` script. Frankenstein: 18.6 KB binary (1400x smaller than GHC), lowest memory
   (1.5 MB), 6x slower than GHC on fib(42) due to no-op retain overhead on unboxed values.
@@ -748,12 +750,19 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   Full pipeline validation: factorial(10) → MLIR → mlir-opt → clang → 3628800.
   `kk_drop` is fully functional — all 19 stage 1 and 13 stage 2 examples pass
   (alloc_stress fixed via retain-on-force in `kk_thunk_force`).
-- **Test suite**: 97 cabal tests (incl. cross-module effect test), 5 polyglot E2E, 3 Wasm validation tests,
+- **Cross-language coverage**: 9 polyglot E2E tests in `test-polyglot.sh`:
+  - 3-lang (Haskell+Rust+Koka) → 69
+  - 4-lang semidet success/failure (Haskell+Rust+Mercury+Koka) → 69/1
+  - Cross-lang multi-module (Haskell×2+Koka) → 75
+  - Haskell stdlib cross-lang (map/filter/sum from Koka) → 220
+  - 7-lang all bridges (Haskell+Rust+Mercury+Python+Go+Futhark+Koka) → 147
+  - 7-lang multi-module (Haskell×2+Rust+Mercury+Python+Go+Futhark+Koka) → 175
+- **Test suite**: 97 cabal tests (incl. cross-module effect test), 9 polyglot E2E, 3 Wasm validation tests,
   K test oracle, 118 krun tests, 10 cycle collector C tests, 19 self-host Phase 8 examples
-- **End-to-end**: `--demo --compile` → 3628800, `--demo --compile --target wasm32` → 3628800 in Node.js,
-  4-language polyglot → 69/1/144, cross-language demo (Koka↔Haskell×2) → 75
+- **End-to-end**: `--demo --compile` → 3628800, `--demo --compile --target wasm32` → 3628800 in Node.js
 
 ### Recent Commits
+- Expanded cross-language multi-module coverage — 7-language demo (Haskell+Rust+Mercury+Python+Go+Futhark+Koka → 147), 7-language multi-module demo (Haskell×2 + 5 languages → 175), Haskell stdlib cross-language (map/filter/sum called from Koka → 220). Polyglot test suite expanded to 9 tests. Confirmed Prelude HOFs (map/filter/foldr/sum/take/zipWith/foldl) are fully inlined by GHC at -O1 with aggressive specialization flags.
 - Multi-module GHC bridge + cross-language demo + cycle collector wiring — `compileToCoreMulti` chases imports through GHC module graph, `resolveName` handles `Module/name` cross-module references, `CycleAnalysis` results wired into MLIR emitter via `esCyclicDefs`/`emitCycleCandidate`, cross-language demo (2 Haskell + 1 Koka → 75), cross_module added to Phase 8 (19 examples pass stage 1, 13 pass stage 2).
 - Phase 3f: String support + builtins as first-class values + stage 2 segfault fix — Three fixes: (1) `builtinWrapperSpec` in Emitter.hs generates wrapper closures for `+`, `-`, `*`, `/`, `mod`, `==`, `<`, etc. when used as first-class values (HOF arguments); (2) Address primops `indexCharOffAddr#`/`plusAddr#` for post-simplifier `unpackCString#` byte-walking loops, with `LitString` dual semantics (cons-list in Core IR, raw `Addr#` pointer in emitter); (3) `fix-intra-module-calls.py` generates 86 MLIR wrapper functions for split-compiled `MlirEmit_Emitter` — the split compilation broke `esTopFns` population causing cross-part function calls to resolve to null. All 18 host-compiled examples pass. Stage 2 compiler no longer segfaults — all 12 examples pass through stage 2 (alloc_stress fixed via retain-on-force in kk_thunk_force).
 - Phase 3e: stdlib types — disable RULES, collect referenced TyCons, 5 new stdlib examples (list/maybe/bool/tuple/hof), all 16 examples pass

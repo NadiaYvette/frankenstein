@@ -152,6 +152,62 @@ run_test "4-lang-choice-multi" "144" \
     "$SCRIPT_DIR/four-lang-choice.kk"
 
 # -------------------------------------------------------
+# Test 6: Cross-language Haskell multi-module (2 .hs + 1 .kk)
+# -------------------------------------------------------
+echo ""
+echo "--- Cross-language multi-module (Haskell×2 + Koka) ---"
+
+run_test "cross-lang-haskell-multi" "75" \
+    "$SCRIPT_DIR/CrossModuleMain.hs" \
+    "$SCRIPT_DIR/cross-lang.kk"
+
+# -------------------------------------------------------
+# Test 7: Haskell stdlib (map/filter/sum) called from Koka
+# -------------------------------------------------------
+echo ""
+echo "--- Haskell stdlib + Koka ---"
+
+run_test "stdlib-cross-lang" "220" \
+    "$SCRIPT_DIR/StdlibHaskell.hs" \
+    "$SCRIPT_DIR/stdlib-cross.kk"
+
+# -------------------------------------------------------
+# Test 8: 7-language demo (Haskell + Rust + Mercury + Python + Go + Futhark + Koka)
+# -------------------------------------------------------
+echo ""
+echo "--- 7-language (all bridges) ---"
+
+# Clean Mercury temp between runs
+rm -rf /tmp/frankenstein-mercury-*/
+
+run_test "7-lang-all-bridges" "147" \
+    "$SCRIPT_DIR/fib.hs" \
+    "$SCRIPT_DIR/double.rs" \
+    "$SCRIPT_DIR/check.m" \
+    "$SCRIPT_DIR/square.py" \
+    "$SCRIPT_DIR/gcd.go" \
+    "$SCRIPT_DIR/sum_to.fut" \
+    "$SCRIPT_DIR/seven-lang.kk"
+
+# -------------------------------------------------------
+# Test 9: 7-language multi-module demo (multi-module Haskell + 5 other languages + Koka)
+# -------------------------------------------------------
+echo ""
+echo "--- 7-language multi-module (Haskell×2 + Rust + Mercury + Python + Go + Futhark + Koka) ---"
+
+# Clean Mercury temp between runs
+rm -rf /tmp/frankenstein-mercury-*/
+
+run_test "7-lang-multi-module" "175" \
+    "$SCRIPT_DIR/CrossModuleMain.hs" \
+    "$SCRIPT_DIR/negate.rs" \
+    "$SCRIPT_DIR/check.m" \
+    "$SCRIPT_DIR/square.py" \
+    "$SCRIPT_DIR/gcd.go" \
+    "$SCRIPT_DIR/sum_to.fut" \
+    "$SCRIPT_DIR/seven-lang-multi.kk"
+
+# -------------------------------------------------------
 # Summary
 # -------------------------------------------------------
 echo ""

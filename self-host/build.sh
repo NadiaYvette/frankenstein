@@ -122,7 +122,8 @@ echo "=== Phase 5a: Link self-hosted test binary ==="
 # Exclude driver.o (has its own main)
 ALL_OBJS=$(ls "$OUT"/*.o | grep -v driver.o)
 clang -O2 -o self-host/frankenstein-self $ALL_OBJS -lm \
-  -Wl,--unresolved-symbols=ignore-in-object-files
+  -Wl,--unresolved-symbols=ignore-in-object-files \
+  -Wl,--allow-multiple-definition
 echo "Linked: self-host/frankenstein-self ($(stat -c%s self-host/frankenstein-self) bytes)"
 POSTLINK=$(nm -u self-host/frankenstein-self 2>/dev/null | grep -cv '@GLIBC\|__gmon' || true)
 FRKN_RESOLVED=$(nm -u self-host/frankenstein-self 2>/dev/null | grep -c 'Frankenstein_' || true)
@@ -133,7 +134,8 @@ echo "=== Phase 5b: Link self-hosted compiler ==="
 # Same objects but with driver.o instead of main.o
 COMPILER_OBJS=$(ls "$OUT"/*.o | grep -v main.o)
 clang -O2 -o self-host/frankenstein-self-compiler $COMPILER_OBJS -lm \
-  -Wl,--unresolved-symbols=ignore-in-object-files
+  -Wl,--unresolved-symbols=ignore-in-object-files \
+  -Wl,--allow-multiple-definition
 echo "Linked: self-host/frankenstein-self-compiler ($(stat -c%s self-host/frankenstein-self-compiler) bytes)"
 
 echo ""
@@ -457,7 +459,8 @@ if [ "$S2_OK" -gt 0 ]; then
   SHIM_OBJS=$(ls "$OUT"/*.o | grep -vE '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_|main\.o|-self-ir\.o|factorial-self-ir|_standalone\.o)')
   clang -O2 -o self-host/frankenstein-self-compiler-stage2 \
     $STAGE2_OBJS $SHIM_OBJS -lm \
-    -Wl,--unresolved-symbols=ignore-in-object-files 2>/dev/null
+    -Wl,--unresolved-symbols=ignore-in-object-files \
+    -Wl,--allow-multiple-definition 2>/dev/null
   echo "Linked: self-host/frankenstein-self-compiler-stage2 ($(stat -c%s self-host/frankenstein-self-compiler-stage2) bytes)"
 
   echo ""

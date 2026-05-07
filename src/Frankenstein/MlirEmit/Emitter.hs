@@ -836,8 +836,23 @@ etaExpandBuiltinAlias d = case defExpr d of
 
 emitDefs :: [Def] -> Emit Text
 emitDefs defs = do
+  pfx <- gets esModulePrefix
   let expandedDefs = map etaExpandBuiltinAlias defs
-  texts <- mapM emitDef expandedDefs
+      -- Deduplicate by qualified name: multi-module compilation can produce
+      -- the same definition from both the importing and imported module
+      -- (GHC's cross-module specialiser copies defs into importers).
+      qualName d = let san = sanitizeName (nameText (qnameName (defName d)))
+                   in if T.any (== '/') (nameText (qnameName (defName d)))
+                         || T.isPrefixOf pfx san
+                      then san else pfx <> san
+      dedup [] _seen = []
+      dedup (d:ds) seen =
+        let qn = qualName d
+        in if Set.member qn seen
+           then dedup ds seen
+           else d : dedup ds (Set.insert qn seen)
+      uniqueDefs = dedup expandedDefs Set.empty
+  texts <- mapM emitDef uniqueDefs
   pure $ T.unlines texts
 
 emitDef :: Def -> Emit Text

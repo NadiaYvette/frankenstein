@@ -24,9 +24,9 @@ static int64_t box_char(int64_t cp) {
     return c;
 }
 
-/* chr :: Int -> Char  (returns boxed Char) */
+/* chr :: Int -> Char  (returns raw codepoint — emitter treats Char as i64) */
 int64_t ghc_char_chr_1(int64_t cp) __asm__("GHC_Internal_Char_chr$1");
-int64_t ghc_char_chr_1(int64_t cp) { return box_char(cp); }
+int64_t ghc_char_chr_1(int64_t cp) { return cp; }
 
 /* digitToInt :: Char -> Int  (receives boxed Char) */
 static int64_t digit_to_int(int64_t c) {

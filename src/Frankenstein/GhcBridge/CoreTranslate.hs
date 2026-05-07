@@ -128,20 +128,32 @@ trExpr (Lit l) = F.ELit (translateLit l)
 -- Type application: App f (Type t) => ETypeApp
 trExpr (App f (Type t)) = F.ETypeApp (trExpr f) [translateType t]
 
--- Detect unpackCString# applied to a string literal: extract the string directly
+-- Detect unpackCString# applied to a string literal: build a [Char] cons-list
+-- in the Core IR directly. After the simplifier runs, bare LitString values
+-- are raw Addr# pointers, so we need to build the list here while we still
+-- know the intent.
 trExpr (App (Var v) (Lit (LitString bs)))
   | getOccString v `elem` ["unpackCString#", "unpackCStringUtf8#"] =
-      F.ELit (F.LitString (TE.decodeUtf8With lenientDecode bs))
+      let s = TE.decodeUtf8With lenientDecode bs
+          nilCon = F.QName T.empty (F.Name "[]" 0)
+          consCon = F.QName T.empty (F.Name ":" 0)
+          go "" = F.ECon nilCon
+          go t  = let (c, rest) = (T.head t, T.tail t)
+                  in F.EApp (F.ECon consCon) [F.ELit (F.LitChar c), go rest]
+      in go s
 
--- Regular application: collect args, strip dictionaries, simplify I#
+-- Regular application: collect args, strip dictionaries, simplify boxing
 trExpr (App f a) =
   case collectArgs (App f a) of
     -- I#(literal) → just the literal (unbox)
     (Var v, [Lit l])
-      | getOccString v == "I#" -> F.ELit (translateLit l)
-    -- I#(var) → just var (Int and Int# share i64 representation)
+      | getOccString v `elem` ["I#", "C#"] -> F.ELit (translateLit l)
+    -- I#(var) / C#(var) → just var (boxed/unboxed share i64 representation)
     (Var v, [arg])
-      | getOccString v == "I#" -> trExpr arg
+      | getOccString v `elem` ["I#", "C#"] -> trExpr arg
+    -- tagToEnum#(expr) → expr (Bool uses 0/1 integers, same as Int#)
+    (Var v, [Type _, arg])
+      | getOccString v == "tagToEnum#" -> trExpr arg
     -- General case: strip dictionary arguments
     (fun, args) ->
       let args' = filter (not . isDictArg) args
@@ -176,17 +188,27 @@ trExpr (Let bind body) =
   in F.ELet groups forcedBody
 
 -- Case: simplify I# unboxing pattern, then translate
--- GHC Core: case scrut of { I# ds# -> rhs } → let ds# = scrut in rhs
+-- GHC Core: case scrut of bndr { I# ds# -> rhs } →
+--   let bndr = scrut in let ds# = scrut in rhs
 -- This strips the integer boxing that GHC uses internally.
+-- The outer case binder (bndr) must also be bound since the rhs may
+-- reference it (e.g. `case n of wild { I# x -> ... wild ... }`).
 trExpr (Case scrut bndr _ty [Alt (DataAlt dc) [innerBndr] rhs])
-  | getOccString (dataConName dc) == "I#" =
-      F.ELet [[ F.Bind
-        { F.bindName = translateName innerBndr
-        , F.bindType = translateType (varType innerBndr)
-        , F.bindExpr = trExpr scrut
-        , F.bindSort = F.DefVal
-        }
-      ]] (trExpr rhs)
+  | getOccString (dataConName dc) `elem` ["I#", "C#"] =
+      let innerBind = F.Bind
+            { F.bindName = translateName innerBndr
+            , F.bindType = translateType (varType innerBndr)
+            , F.bindExpr = trExpr scrut
+            , F.bindSort = F.DefVal
+            }
+          outerBind = F.Bind
+            { F.bindName = translateName bndr
+            , F.bindType = translateType (varType bndr)
+            , F.bindExpr = trExpr scrut
+            , F.bindSort = F.DefVal
+            }
+          binds = if isDeadBinder bndr then [innerBind] else [outerBind, innerBind]
+      in F.ELet [binds] (trExpr rhs)
 -- General case: translate scrutinee and alternatives.
 -- When the case binder is live (used in alternatives, e.g. from @-patterns
 -- like handler@(ELam ...)), bind it with a let so it's available in the body.
@@ -249,10 +271,18 @@ collectArgs = go []
 isDictArg :: CoreExpr -> Bool
 isDictArg (Var v) =
   let name = getOccString v
-  in isPrefixOf "$f" name     -- $fOrdInt, $fNumInt, $fEqInt, etc.
+  in (isPrefixOf "$f" name && not (isInstanceMethod name))
      || isPrefixOf "$d" name  -- $dOrd, $dNum, etc. (alternative naming)
      || isPrefixOf "$c" name  -- $c==, etc. (method selectors)
      || isPrefixOf "$W" name  -- $WI# etc. (wrappers)
+  where
+    -- Instance methods like $fNumInt_$c+ are actual value arguments,
+    -- not dictionaries. They appear after the simplifier inlines dictionary
+    -- lookups. Don't filter them out.
+    isInstanceMethod n = "_$c" `isInfixOf` n
+    isInfixOf needle haystack = any (isPrefixOf needle) (tails haystack)
+    tails []     = [[]]
+    tails s@(_:xs) = s : tails xs
 isDictArg _ = False
 
 isPrefixOf :: String -> String -> Bool
@@ -336,12 +366,15 @@ translateName v = F.Name
   }
   where
     occName = T.pack (getOccString v)
+    uniq    = getKey (nameUnique (varName v))
     -- Preserve module origin for imported names so the emitter can generate
     -- qualified cross-module calls (e.g. Frankenstein.Core.Types/nameText).
+    -- For local names, append the GHC Unique to disambiguate float-out
+    -- bindings (e.g. multiple 'lvl' from the simplifier).
     qualText = case nameModule_maybe (varName v) of
       Just m  -> let modStr = T.pack (moduleNameString (moduleName m))
                  in modStr <> "/" <> occName
-      Nothing -> occName
+      Nothing -> occName <> "$" <> T.pack (show uniq)
 
 -- | Normalize well-known GHC typeclass method names to canonical builtins.
 -- GHC inlines typeclass dictionaries, leaving references like
@@ -374,12 +407,49 @@ normalizeGhcBuiltin v =
     (m, ">")      | isGhcOrd m -> Just ">"
     (m, "<=")     | isGhcOrd m -> Just "<="
     (m, ">=")     | isGhcOrd m -> Just ">="
+    -- GHC unboxed primops — these appear after the simplifier inlines
+    -- Prelude functions, exposing the underlying Int# operations.
+    (m, "+#")     | isGhcPrim m -> Just "+"
+    (m, "-#")     | isGhcPrim m -> Just "-"
+    (m, "*#")     | isGhcPrim m -> Just "*"
+    (m, "remInt#")| isGhcPrim m -> Just "mod"
+    (m, "quotInt#")| isGhcPrim m -> Just "/"
+    (m, "==#")    | isGhcPrim m -> Just "=="
+    (m, "/=#")    | isGhcPrim m -> Just "/="
+    (m, "<#")     | isGhcPrim m -> Just "<"
+    (m, ">#")     | isGhcPrim m -> Just ">"
+    (m, "<=#")    | isGhcPrim m -> Just "<="
+    (m, ">=#")    | isGhcPrim m -> Just ">="
+    (m, "negateInt#") | isGhcPrim m -> Just "negate"
+    -- Bitwise primops — GHC optimizes mod 2 to andI#, etc.
+    (m, "andI#")   | isGhcPrim m -> Just "andI#"
+    (m, "orI#")    | isGhcPrim m -> Just "orI#"
+    (m, "xorI#")   | isGhcPrim m -> Just "xorI#"
+    -- Typeclass instance methods exposed by the simplifier
+    -- e.g. GHC.Internal.Num.$fNumInt_$c+ is the (+) method for Int
+    (m, "$fNumInt_$c+")  | isGhcNum m -> Just "+"
+    (m, "$fNumInt_$c-")  | isGhcNum m -> Just "-"
+    (m, "$fNumInt_$c*")  | isGhcNum m -> Just "*"
+    (m, "$fNumInt_$cnegate") | isGhcNum m -> Just "negate"
+    (m, "$fNumInt_$cabs")    | isGhcNum m -> Just "abs"
+    (m, "$fNumInt_$csignum") | isGhcNum m -> Just "signum"
+    -- tagToEnum# converts Int# (0/1) to Bool — we treat it as identity
+    -- since our Bool representation uses 0/1 integers.
+    (m, "tagToEnum#") | isGhcPrim m -> Just "tagToEnum#"
+    -- Address primops — appear after simplifier inlines unpackCString#
+    (m, "indexCharOffAddr#") | isGhcPrim m -> Just "indexCharOffAddr#"
+    (m, "plusAddr#")         | isGhcPrim m -> Just "plusAddr#"
+    (m, "eqChar#")           | isGhcPrim m -> Just "=="
+    (m, "neChar#")           | isGhcPrim m -> Just "/="
+    (m, "ord#")              | isGhcPrim m -> Just "ord#"
+    (m, "chr#")              | isGhcPrim m -> Just "chr#"
     _ -> Nothing
   where
     isGhcNum  m = m `elem` ["GHC.Internal.Num", "GHC.Num", "GHC.Internal.Num.Integer"]
     isGhcReal m = m `elem` ["GHC.Internal.Real", "GHC.Real"]
     isGhcEq   m = m `elem` ["GHC.Internal.Classes", "GHC.Classes"]
     isGhcOrd  m = m `elem` ["GHC.Internal.Classes", "GHC.Classes"]
+    isGhcPrim m = m `elem` ["GHC.Internal.Prim", "GHC.Prim"]
 
 translateTyVar :: Var -> F.TypeVar
 translateTyVar v = F.TypeVar
@@ -393,12 +463,15 @@ translateTyVar v = F.TypeVar
 -- references (EVar), but for definitions we use the short occurrence name and
 -- store the module in QName.module instead, so the emitter can prefix correctly.
 qualifyName :: Var -> F.QName
-qualifyName v = F.QName modName (F.Name (T.pack (getOccString v))
+qualifyName v = F.QName modName (F.Name localName
                                         (fromIntegral (getKey (nameUnique (varName v)))))
   where
-    modName = case nameModule_maybe (varName v) of
-      Just m  -> T.pack (moduleNameString (moduleName m))
-      Nothing -> T.empty
+    occName = T.pack (getOccString v)
+    uniq    = getKey (nameUnique (varName v))
+    (modName, localName) = case nameModule_maybe (varName v) of
+      Just m  -> (T.pack (moduleNameString (moduleName m)), occName)
+      -- For internal names, disambiguate with unique (matches translateName)
+      Nothing -> (T.empty, occName <> "$" <> T.pack (show uniq))
 
 -------------------------------------------------------------------------------
 -- Type translation
@@ -420,10 +493,23 @@ translateType (FunTy flag _mult arg res)
 
 -- Type constructor with no arguments
 translateType (TyConApp tc []) =
-  F.TCon $ F.TypeCon
-    { F.tcName = tyConQName tc
-    , F.tcKind = F.KindStar
-    }
+  -- Unboxed primitive types: map to their boxed equivalents since our
+  -- runtime represents everything as i64.
+  case T.pack (getOccString (tyConName tc)) of
+    n | n `elem` ["Int#", "Word#", "Int64#", "Word64#", "Addr#", "Char#"] ->
+        F.TCon $ F.TypeCon
+          { F.tcName = F.QName T.empty (F.Name "Int" 0)
+          , F.tcKind = F.KindStar
+          }
+    n | n == "Double#" || n == "Float#" ->
+        F.TCon $ F.TypeCon
+          { F.tcName = F.QName T.empty (F.Name "Double" 0)
+          , F.tcKind = F.KindStar
+          }
+    _ -> F.TCon $ F.TypeCon
+          { F.tcName = tyConQName tc
+          , F.tcKind = F.KindStar
+          }
 
 -- Type constructor applied to arguments
 translateType (TyConApp tc args) =

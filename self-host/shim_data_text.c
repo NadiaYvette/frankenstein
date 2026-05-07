@@ -231,7 +231,8 @@ static int64_t text_uncons(int64_t s) {
     int64_t bytes_used;
     int64_t cp = utf8_decode(buf, &bytes_used);
     int64_t rest = text_slice(flat, bytes_used, len - bytes_used);
-    return kk_just(kk_pair(box_char(cp), rest));
+    /* Raw codepoint — emitter treats Char as i64, not boxed C# */
+    return kk_just(kk_pair(cp, rest));
 }
 
 static int64_t text_concat(int64_t list) {
@@ -455,8 +456,8 @@ static int64_t text_map(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        int64_t new_cp = call_closure_1(f, box_char(cp));
-        opos += utf8_encode(unbox_char(new_cp), out + opos);
+        int64_t new_cp = call_closure_1(f, cp);
+        opos += utf8_encode(new_cp, out + opos);
     }
     int64_t r = text_from_buf(out, opos);
     free(out);
@@ -472,7 +473,7 @@ static int64_t text_all(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (!call_closure_1(f, box_char(cp))) return 0;
+        if (!call_closure_1(f, cp)) return 0;
     }
     return 1;
 }
@@ -486,7 +487,7 @@ static int64_t text_any(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (call_closure_1(f, box_char(cp))) return 1;
+        if (call_closure_1(f, cp)) return 1;
     }
     return 0;
 }
@@ -501,7 +502,7 @@ static int64_t text_take_while(int64_t f, int64_t s) {
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
-        if (!call_closure_1(f, box_char(cp))) break;
+        if (!call_closure_1(f, cp)) break;
         i += bytes_used;
     }
     return text_slice(flat, 0, i);
@@ -517,7 +518,7 @@ static int64_t text_drop_while(int64_t f, int64_t s) {
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
-        if (!call_closure_1(f, box_char(cp))) break;
+        if (!call_closure_1(f, cp)) break;
         i += bytes_used;
     }
     return text_slice(flat, i, len - i);
@@ -536,7 +537,7 @@ static int64_t text_drop_while_end(int64_t f, int64_t s) {
             cp_start--;
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + cp_start, &bytes_used);
-        if (!call_closure_1(f, box_char(cp))) break;
+        if (!call_closure_1(f, cp)) break;
         end = cp_start;
     }
     return text_slice(flat, 0, end);
@@ -552,7 +553,7 @@ static int64_t text_span(int64_t f, int64_t s) {
     while (i < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
-        if (!call_closure_1(f, box_char(cp))) break;
+        if (!call_closure_1(f, cp)) break;
         i += bytes_used;
     }
     int64_t r = kk_pair(text_slice(flat, 0, i), text_slice(flat, i, len - i));
@@ -618,7 +619,8 @@ static int64_t text_unpack(int64_t s) {
     }
     int64_t result = kk_nil();
     for (int64_t j = n - 1; j >= 0; j--) {
-        result = kk_cons(box_char(cps[j]), result);
+        /* Raw codepoint — emitter treats Char as i64, not boxed C# */
+        result = kk_cons(cps[j], result);
     }
     free(cps);
     return result;
@@ -786,7 +788,7 @@ static int64_t text_concatMap(int64_t f, int64_t s) {
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
         kk_retain(f);
-        int64_t piece = call_closure_1(f, box_char(cp));
+        int64_t piece = call_closure_1(f, cp);
         result = kk_str_concat(result, piece);
     }
     return result;
@@ -976,10 +978,13 @@ int64_t bs_unpack_1(int64_t b) {
 static int64_t text_head(int64_t s) {
     int64_t len;
     const char* buf = text_borrow(s, &len);
-    if (len == 0) return box_char(0);
+    if (len == 0) return 0;
     int64_t bytes_used;
     int64_t cp = utf8_decode(buf, &bytes_used);
-    return box_char(cp);
+    /* Return raw codepoint (not box_char) — the emitter treats Char as i64
+     * and GHC's case C# c# -> ... extracts via kk_field(_, 0) which is
+     * compiled away (the outer case becomes a no-op thunk force). */
+    return cp;
 }
 
 static int64_t text_tail(int64_t s) {
@@ -1011,7 +1016,7 @@ static int64_t text_break_pred(int64_t pred, int64_t s) {
     while (off < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + off, &bytes_used);
-        int64_t r = call_closure_1(pred, box_char(cp));
+        int64_t r = call_closure_1(pred, cp);
         if (r) {
             int64_t before = text_slice(flat, 0, off);
             int64_t after  = text_slice(flat, off, len - off);
@@ -1061,7 +1066,7 @@ static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
          * PAP's clos and the inner function's self parameter. */
         int64_t fn_ptr = kk_field(kk_thunk_force(f), 0);
         typedef int64_t (*fn3_t)(int64_t, int64_t, int64_t, int64_t);
-        acc = ((fn3_t)(intptr_t)fn_ptr)(f, f, acc, box_char(cp));
+        acc = ((fn3_t)(intptr_t)fn_ptr)(f, f, acc, cp);
         off += bytes_used;
     }
     /* buf is borrowed — do NOT free */

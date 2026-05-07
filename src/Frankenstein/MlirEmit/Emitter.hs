@@ -17,6 +17,7 @@ module Frankenstein.MlirEmit.Emitter
 
 import Frankenstein.Core.Types
 import Frankenstein.Core.ConTags (assignProgramTags, conKey)
+import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.MlirEmit.Dialects (MlirOp(..), renderOp)
 
 import Data.Text (Text)
@@ -78,6 +79,8 @@ data EmitState = EmitState
   , esExternDecls   :: !(Map Text Int)         -- MLIR symbol name -> param count for func.func private declarations
   , esPromotedFns      :: !(Map Text Text)        -- nameToSsa key -> promoted function MLIR name (for let-bound lambdas)
   , esPromotedCaptures :: !(Map Text [Text])      -- promoted MLIR name -> extra capture SSA names to pass at call site
+  , esCyclicDefs       :: !(Set Text)             -- mangled names of defs that may create reference cycles
+  , esCurDef           :: !Text                   -- current definition being emitted (for cycle candidate check)
   }
 
 type Emit a = State EmitState a
@@ -288,6 +291,13 @@ emitProgramText prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
+      -- Cycle analysis: identify defs that may create reference cycles.
+      -- analyzeCycles returns one CycleInfo per def, in the same order.
+      cyclicDefs = Set.fromList
+        [ qualifyDefName d
+        | (d, ci) <- zip renamedDefs (analyzeCycles prog)
+        , ciCyclic ci
+        ]
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
@@ -297,6 +307,8 @@ emitProgramText prog =
                          Map.empty
                          Map.empty
                          Map.empty
+                         cyclicDefs
+                         ""
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -376,6 +388,10 @@ emitProgramText prog =
       -- over printf("%ld") in the main wrapper.
       returnsDataType p d =
         let (_, _, ret) = decomposeDefType (defType d)
+            -- Exclude primitive types that have TyCon entries but should be
+            -- printed as integers, not as boxed constructors.
+            primitiveTypes = ["Int", "Bool", "Char", "Double", "Float",
+                              "Int#", "Word#", "Int64#", "Word64#"]
             dataNames = [ nameText (qnameName (dataName dd)) | dd <- progData p ]
             tconName (TCon (TypeCon qn _)) = Just (nameText (qnameName qn))
             tconName (TApp t _)            = tconName t
@@ -383,7 +399,7 @@ emitProgramText prog =
             tconName (TForall _ t)         = tconName t
             tconName _                     = Nothing
         in case tconName ret of
-             Just n  -> n `elem` dataNames
+             Just n  -> n `elem` dataNames && n `notElem` primitiveTypes
              Nothing -> False
       -- True iff the def's return type is the first-class string type
       -- ('std.string'). Used to pick kk_println_str over printf("%ld")
@@ -415,6 +431,7 @@ emitProgramText prog =
     , ""
     , "  // Boxed value runtime declarations"
     , "  func.func private @kk_alloc_con(i64, i64) -> i64"
+    , "  func.func private @kk_cycle_candidate(i64) -> ()"
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
@@ -489,8 +506,7 @@ emitProgramText prog =
     , ""
     , bodyText
     , mainWrapper
-    , "}"
-    ]
+    ] <> "}\n"
 
 -- | Emit MLIR with frankenstein.* dialect ops for EHandle/EPerform.
 -- Call this WITHOUT running the evidence pass first — effects remain
@@ -515,6 +531,11 @@ emitProgramWithEffects prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
+      cyclicDefs = Set.fromList
+        [ qualifyDefName d
+        | (d, ci) <- zip renamedDefs (analyzeCycles prog)
+        , ciCyclic ci
+        ]
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty True
                          (qualifiedTopNames `Set.union` externalRuntimeFns)
                          (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
@@ -524,6 +545,8 @@ emitProgramWithEffects prog =
                          Map.empty
                          Map.empty
                          Map.empty
+                         cyclicDefs
+                         ""
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -557,6 +580,7 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_reuse(i64) -> i64"
     , ""
     , "  func.func private @kk_alloc_con(i64, i64) -> i64"
+    , "  func.func private @kk_cycle_candidate(i64) -> ()"
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
@@ -592,8 +616,7 @@ emitProgramWithEffects prog =
     , liftedFns
     , ""
     , bodyText
-    , "}"
-    ]
+    ] <> "}\n"
 
 -- | Emit MLIR for Wasm target: no printf, _frankenstein_main exported directly.
 -- The JS/Wasm host reads the return value of _frankenstein_main().
@@ -616,6 +639,11 @@ emitProgramWasm prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
+      cyclicDefs = Set.fromList
+        [ qualifyDefName d
+        | (d, ci) <- zip renamedDefs (analyzeCycles prog)
+        , ciCyclic ci
+        ]
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False
                          qualifiedTopNames
                          (buildTopFnArity modPrefix renamedDefs)
@@ -625,6 +653,8 @@ emitProgramWasm prog =
                          Map.empty
                          Map.empty
                          Map.empty
+                         cyclicDefs
+                         ""
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -659,6 +689,7 @@ emitProgramWasm prog =
     , ""
     , "  // Boxed value runtime declarations"
     , "  func.func private @kk_alloc_con(i64, i64) -> i64"
+    , "  func.func private @kk_cycle_candidate(i64) -> ()"
     , "  func.func private @kk_set_field(i64, i64, i64) -> ()"
     , "  func.func private @kk_tag(i64) -> i64"
     , "  func.func private @kk_field(i64, i64) -> i64"
@@ -688,12 +719,125 @@ emitProgramWasm prog =
     , liftedFns
     , ""
     , bodyText
-    , "}"
-    ]
+    ] <> "}\n"
+
+-- | Dead code elimination: keep only definitions reachable from main.
+-- This prevents the simplifier's dead code from causing link errors
+-- (e.g. `addN = +` when `main` is constant-folded and doesn't call addN).
+reachableDefs :: [Def] -> [Def]
+reachableDefs defs =
+  -- Build lookup tables using multiple name forms for each def:
+  -- - bare name: "myMap"
+  -- - module-qualified with /: "HigherOrder/myMap"
+  -- - module-qualified with .: "HigherOrder.myMap"
+  let defEntries = concatMap (\d ->
+        let n = nameText (qnameName (defName d))
+            m = qnameModule (defName d)
+            keys = [n] ++
+                   [m <> "/" <> n | not (T.null m)] ++
+                   [m <> "." <> n | not (T.null m)]
+        in [(k, d) | k <- keys]
+        ) defs
+      defMap = Map.fromList defEntries
+      freeVarsExpr :: Expr -> Set Text
+      freeVarsExpr (EVar n)          = Set.singleton (nameText n)
+      freeVarsExpr (ELit _)          = Set.empty
+      freeVarsExpr (ECon qn)         = Set.singleton (nameText (qnameName qn))
+      freeVarsExpr (EApp f args)     = Set.unions (freeVarsExpr f : map freeVarsExpr args)
+      freeVarsExpr (ELam _ body)     = freeVarsExpr body
+      freeVarsExpr (ELet bgs body)   = Set.unions (freeVarsExpr body :
+                                          [freeVarsExpr (bindExpr b) | bg <- bgs, b <- bg])
+      freeVarsExpr (ECase e brs)     = Set.union (freeVarsExpr e)
+                                          (Set.unions [freeVarsExpr (branchBody b) | b <- brs])
+      freeVarsExpr (EDelay e)        = freeVarsExpr e
+      freeVarsExpr (EForce e)        = freeVarsExpr e
+      freeVarsExpr (ETypeLam _ e)    = freeVarsExpr e
+      freeVarsExpr (ETypeApp e _)    = freeVarsExpr e
+      freeVarsExpr (EPerform _ _)    = Set.empty
+      freeVarsExpr (EHandle _ _ e)   = freeVarsExpr e
+      freeVarsExpr (ERetain e)       = freeVarsExpr e
+      freeVarsExpr (EDrop e)         = freeVarsExpr e
+      freeVarsExpr (EReuse _ e)      = freeVarsExpr e
+      -- Walk from roots collecting reachable definition names
+      walk visited [] = visited
+      walk visited (n:ns)
+        | Set.member n visited = walk visited ns
+        | otherwise = case Map.lookup n defMap of
+            Nothing -> walk (Set.insert n visited) ns
+            Just d  -> let refs = freeVarsExpr (defExpr d)
+                           defN = nameText (qnameName (defName d))
+                       in walk (Set.insert defN (Set.insert n visited))
+                               (Set.toList refs ++ ns)
+      -- Start from _frankenstein_main (after rename)
+      roots = ["_frankenstein_main"]
+      reachable = walk Set.empty roots
+  in filter (\d -> nameText (qnameName (defName d)) `Set.member` reachable) defs
+
+-- | Known builtin operator names that don't need their own function definition.
+builtinOpNames :: Set Text
+builtinOpNames = Set.fromList
+  ["+", "-", "*", "/", "mod", "negate", "abs", "signum",
+   "==", "/=", "<", ">", "<=", ">=",
+   "+#", "-#", "*#", "remInt#", "quotInt#",
+   "==#", "/=#", "<#", ">#", "<=#", ">=#",
+   "$fNumInt_$c+", "$fNumInt_$c-", "$fNumInt_$c*",
+   "tagToEnum#"]
+
+-- | Wrapper function specs for builtins used as first-class values.
+-- Returns (wrapperFnName, arity, MLIR body) for builtins that can be
+-- passed to higher-order functions like myFoldl(+, 0, xs).
+builtinWrapperSpec :: Text -> Maybe (Text, Int, Text)
+builtinWrapperSpec name = case name of
+  -- Binary arithmetic
+  "+"  -> Just ("__kk_builtin_add", 2, binOp "arith.addi")
+  "-"  -> Just ("__kk_builtin_sub", 2, binOp "arith.subi")
+  "*"  -> Just ("__kk_builtin_mul", 2, binOp "arith.muli")
+  "/"  -> Just ("__kk_builtin_div", 2, binOp "arith.divsi")
+  "mod" -> Just ("__kk_builtin_mod", 2, binOp "arith.remsi")
+  "+#" -> Just ("__kk_builtin_add", 2, binOp "arith.addi")
+  "-#" -> Just ("__kk_builtin_sub", 2, binOp "arith.subi")
+  "*#" -> Just ("__kk_builtin_mul", 2, binOp "arith.muli")
+  "$fNumInt_$c+" -> Just ("__kk_builtin_add", 2, binOp "arith.addi")
+  "$fNumInt_$c-" -> Just ("__kk_builtin_sub", 2, binOp "arith.subi")
+  "$fNumInt_$c*" -> Just ("__kk_builtin_mul", 2, binOp "arith.muli")
+  -- Binary comparisons (return 0 or 1 as i64)
+  "==" -> Just ("__kk_builtin_eq", 2, cmpOp "eq")
+  "/=" -> Just ("__kk_builtin_ne", 2, cmpOp "ne")
+  "<"  -> Just ("__kk_builtin_lt", 2, cmpOp "slt")
+  ">"  -> Just ("__kk_builtin_gt", 2, cmpOp "sgt")
+  "<=" -> Just ("__kk_builtin_le", 2, cmpOp "sle")
+  ">=" -> Just ("__kk_builtin_ge", 2, cmpOp "sge")
+  -- Unary
+  "negate" -> Just ("__kk_builtin_negate", 1,
+    T.unlines ["    %zero = arith.constant 0 : i64", "    %r = arith.subi %zero, %arg0 : i64", "    func.return %r : i64"])
+  -- tagToEnum# is identity (Bool 0/1 = Int 0/1)
+  "tagToEnum#" -> Just ("__kk_builtin_tagToEnum", 1,
+    "    func.return %arg0 : i64")
+  _ -> Nothing
+  where
+    binOp op = T.unlines ["    %r = " <> op <> " %arg0, %arg1 : i64", "    func.return %r : i64"]
+    cmpOp pred' = T.unlines ["    %c = arith.cmpi " <> pred' <> ", %arg0, %arg1 : i64", "    %r = arith.extui %c : i1 to i64", "    func.return %r : i64"]
+
+-- | Eta-expand definitions whose body is just a bare reference to a builtin op.
+-- GHC's simplifier eta-reduces `addN x y = x + y` to `addN = (+)`.
+-- We need to re-expand these so the emitter can generate proper MLIR ops.
+etaExpandBuiltinAlias :: Def -> Def
+etaExpandBuiltinAlias d = case defExpr d of
+  EVar n | nameText n `Set.member` builtinOpNames ->
+    -- Get arity from the function type
+    let (_, argTypes, _retTy) = decomposeDefType (defType d)
+        argNames = [Name ("_ea" <> T.pack (show i)) (fromIntegral i) | i <- [0..length argTypes - 1]]
+        params = zip argNames argTypes
+        argRefs = [EVar nm | nm <- argNames]
+    in if null params
+       then d  -- can't expand a 0-arity alias
+       else d { defExpr = ELam params (EApp (EVar n) argRefs) }
+  _ -> d
 
 emitDefs :: [Def] -> Emit Text
 emitDefs defs = do
-  texts <- mapM emitDef defs
+  let expandedDefs = map etaExpandBuiltinAlias defs
+  texts <- mapM emitDef expandedDefs
   pure $ T.unlines texts
 
 emitDef :: Def -> Emit Text
@@ -709,6 +853,7 @@ emitDef def = do
     let san = sanitizeName name
     pfx <- gets esModulePrefix
     pure $ if T.any (== '/') name || T.isPrefixOf pfx san then san else pfx <> san
+  modify (\s -> s { esCurDef = qualName })
   case stripTypeLam (defExpr def) of
     ELam params body -> do
       -- Use uniform i64 for all top-level fn params (matches the closure ABI
@@ -747,6 +892,17 @@ emitBody expr retTy = do
     map ("    " <>) ops ++
     [ "    func.return %" <> resultName <> " : " <> retTy ]
 
+-- | Emit a kk_cycle_candidate registration call if the current def is cyclic.
+-- Returns empty list if not cyclic, or a single MLIR call op if cyclic.
+emitCycleCandidate :: Text -> Emit [Text]
+emitCycleCandidate ptrName = do
+  curDef <- gets esCurDef
+  cyclics <- gets esCyclicDefs
+  if Set.member curDef cyclics
+    then pure ["func.call @kk_cycle_candidate(%" <> ptrName <> ") : (i64) -> ()"]
+    else pure []
+
+-- | Emit a string literal as a [Char] cons-list (for Haskell String = [Char]).
 -- | Emit a Core expression. Returns (list of MLIR ops, result SSA name)
 emitExpr :: Expr -> Emit ([Text], Text)
 emitExpr (ELit (LitInt n)) = do
@@ -763,20 +919,33 @@ emitExpr (ELit (LitChar c)) = do
   pure (["%" <> name <> " = arith.constant " <> T.pack (show (fromEnum c)) <> " : i64"], name)
 
 emitExpr (ELit (LitString s)) = do
+  -- LitString in the emitter is always a raw Addr# (pointer to .rodata).
+  -- The [Char] cons-list for Haskell strings is built in CoreTranslate
+  -- (in the unpackCString# handler), not here.
+  -- For non-Haskell string types (Koka), wrap in kk_string_from_literal.
+  conTags <- gets esConTags
+  let hasList = Map.member ":" conTags && Map.member "[]" conTags
   globalName <- addStringLit s
   ptrName <- freshName "v"
   intName <- freshName "v"
-  lenName <- freshName "v"
-  strName <- freshName "v"
-  -- Wrap the static .rodata bytes in a kk_string_t leaf via the runtime.
-  -- byte_len is the UTF-8 byte length, not the Char count.
-  let byteLen = BS.length (TE.encodeUtf8 s)
-  pure ( [ "%" <> ptrName <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"
-         , "%" <> intName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
-         , "%" <> lenName <> " = arith.constant " <> T.pack (show byteLen) <> " : i64"
-         , "%" <> strName <> " = func.call @kk_string_from_literal(%" <> intName <> ", %" <> lenName <> ") : (i64, i64) -> i64"
-         ]
-       , strName)
+  if hasList
+    then do
+      -- Haskell mode: LitString is an Addr# (raw pointer to null-terminated bytes)
+      -- used by indexCharOffAddr#/plusAddr# loops after simplifier inlines unpackCString#
+      pure ( [ "%" <> ptrName <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"
+             , "%" <> intName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
+             ]
+           , intName)
+    else do
+      lenName <- freshName "v"
+      strName <- freshName "v"
+      let byteLen = BS.length (TE.encodeUtf8 s)
+      pure ( [ "%" <> ptrName <> " = llvm.mlir.addressof @" <> globalName <> " : !llvm.ptr"
+             , "%" <> intName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
+             , "%" <> lenName <> " = arith.constant " <> T.pack (show byteLen) <> " : i64"
+             , "%" <> strName <> " = func.call @kk_string_from_literal(%" <> intName <> ", %" <> lenName <> ") : (i64, i64) -> i64"
+             ]
+           , strName)
 
 -- kk_nil used as a bare variable (not inside EApp)
 emitExpr (EVar n)
@@ -784,6 +953,25 @@ emitExpr (EVar n)
       resultName <- freshName "v"
       pure ( [ "%" <> resultName <> " = func.call @kk_nil() : () -> i64" ]
            , resultName)
+
+-- Builtin operator used as a first-class value (e.g. passed to myFoldl).
+-- Emit a small wrapper function and return a closure pointing to it.
+emitExpr (EVar n)
+  | Just (wrapperName, wrapperArity, wrapperBody) <- builtinWrapperSpec (nameText n) = do
+      -- Emit the wrapper function at module scope (only once)
+      addLiftedFnOnce wrapperName $ T.unlines
+        [ "  func.func @" <> wrapperName <> "("
+          <> T.intercalate ", " ["%arg" <> T.pack (show i) <> ": i64" | i <- [0..wrapperArity-1]]
+          <> ") -> i64 {"
+        , wrapperBody
+        , "  }"
+        ]
+      -- Register in topFns and arityMap so emitFnAsValue works
+      modify (\s -> s { esTopFns     = Set.insert wrapperName (esTopFns s)
+                       , esTopFnArity = Map.insert wrapperName wrapperArity (esTopFnArity s)
+                       })
+      arityMap <- gets esTopFnArity
+      emitFnAsValue wrapperName arityMap
 
 emitExpr (EVar n) = do
   -- Variable reference — look up in alias map; if not found and not a known
@@ -832,10 +1020,11 @@ emitExpr (ECon qn) = do
   tagName <- freshName "v"
   nfieldsName <- freshName "v"
   resultName <- freshName "v"
+  cycleOp <- emitCycleCandidate resultName
   pure ([ "%" <> tagName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
         , "%" <> nfieldsName <> " = arith.constant 0 : i64"
         , "%" <> resultName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
-        ], resultName)
+        ] ++ cycleOp, resultName)
 
 -- Constructor application: allocate via runtime, set fields
 emitExpr (EApp (ECon qn) args) = do
@@ -859,7 +1048,9 @@ emitExpr (EApp (ECon qn) args) = do
     pure [ "%" <> idxName <> " = arith.constant " <> T.pack (show i) <> " : i64"
          , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxName <> ", %" <> aName <> ") : (i64, i64, i64) -> ()"
          ]) (zip [(0::Int)..] argNames)
-  pure (allOps ++ allocOps ++ concat setOps, ptrName)
+  -- Register as cycle candidate if the enclosing def may create cycles
+  cycleOp <- emitCycleCandidate ptrName
+  pure (allOps ++ allocOps ++ concat setOps ++ cycleOp, ptrName)
 
 -- All EApp (EVar fn) patterns: intrinsics + general function call
 emitExpr (EApp (EVar fn) args) = emitAppVar fn args
@@ -1065,9 +1256,33 @@ emitAppVar fn [a, b]
   | n `elem` ["andI#", "and#"]                    = emitBinOp "arith.andi" "i64" a b
   | n `elem` ["orI#", "or#"]                      = emitBinOp "arith.ori" "i64" a b
   | n `elem` ["xorI#", "xor#"]                    = emitBinOp "arith.xori" "i64" a b
+  -- Address arithmetic (from inlined unpackCString#)
+  | n == "plusAddr#"                                = emitBinOp "arith.addi" "i64" a b
+  -- indexCharOffAddr# addr off: load byte at addr+off, zero-extend to i64
+  | n == "indexCharOffAddr#" = do
+      (addrOps, addrName) <- emitExpr a
+      (offOps, offName) <- emitExpr b
+      effAddr <- freshName "v"
+      ptrName <- freshName "v"
+      byteName <- freshName "v"
+      resultName <- freshName "v"
+      pure (addrOps ++ offOps ++
+        [ "%" <> effAddr <> " = arith.addi %" <> addrName <> ", %" <> offName <> " : i64"
+        , "%" <> ptrName <> " = llvm.inttoptr %" <> effAddr <> " : i64 to !llvm.ptr"
+        , "%" <> byteName <> " = llvm.load %" <> ptrName <> " : !llvm.ptr -> i8"
+        , "%" <> resultName <> " = arith.extui %" <> byteName <> " : i8 to i64"
+        ], resultName)
   where n = nameText fn
 
 -- Unary integer operations
+-- tagToEnum# converts Int# (0/1) to Bool — identity in our representation
+emitAppVar fn [arg]
+  | nameText fn == "tagToEnum#" = emitExpr arg
+
+-- ord#/chr# are identity in our representation (Char = Int = i64)
+emitAppVar fn [arg]
+  | nameText fn `elem` ["ord#", "chr#"] = emitExpr arg
+
 emitAppVar fn [arg]
   | nameText fn `elem` ["negate", "negateInt#", "$fNumInt_$cnegate"] = do
       (argOps, argName) <- emitExpr arg
@@ -1840,7 +2055,7 @@ emitMultiIntCase scrutOps scrutName ((litVal, body):rest) defaultExpr = do
 isBoolConCase :: [(QName, [Pattern], Expr)] -> Bool
 isBoolConCase branches =
   let names = [nameText (qnameName qn) | (qn, _, _) <- branches]
-  in any (`elem` ["True", "False"]) names
+  in any (\n -> n == "True" || n == "False") names
 
 -- | Emit a Bool constructor case: scrutinee is i64 0 (False) or 1 (True),
 --   not a boxed constructor, so skip kk_tag and compare directly.
@@ -2165,6 +2380,9 @@ data BranchClass
 classifyBranches :: [Branch] -> BranchClass
 classifyBranches [Branch (PatLit (LitInt n)) _ thenExpr, Branch _ _ elseExpr] =
   IntLitCase n thenExpr elseExpr
+-- DEFAULT first, then PatLit: GHC emits `case x of { __DEFAULT -> A; n# -> B }`
+classifyBranches [Branch pat1 _ elseExpr, Branch (PatLit (LitInt n)) _ thenExpr]
+  | isDefaultPat pat1 = IntLitCase n thenExpr elseExpr
 classifyBranches branches
   -- All PatLit with optional default
   | allIntLits, length intLitBranches >= 2 =

@@ -8,7 +8,7 @@ import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, Eff
 import Frankenstein.Core.DeriveSelectors (deriveSelectors)
 import Frankenstein.Core.FlattenPatterns (flattenPatterns)
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
-import Frankenstein.GhcBridge.Driver (compileToCore, GhcCoreResult(..))
+import Frankenstein.GhcBridge.Driver (compileToCore, compileToCoreWith, compileToCoreMulti, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
 import Frankenstein.MercuryBridge.CoreTranslate
 import Frankenstein.RustBridge.MirParse
@@ -63,11 +63,12 @@ main = do
       handleOutput prog flags
     SwiftCrossCheck files -> mapM_ swiftCrossCheck files
     CompileFiles files flags -> do
-      results <- mapM (compileFile (flagFromJson flags)) files
+      results <- mapM (compileFile (flagFromJson flags) (not (flagNoSimplify flags))) files
       -- Run evidence pass with a GLOBAL effect registry (from all modules)
       -- BEFORE the linker mangles names.  This enables cross-module effect
       -- dispatch: Module A can perform an effect handled by Module B.
-      let (errs, rawProgs) = partitionResults results
+      let (errs, rawProgsList) = partitionResults results
+          rawProgs = concat rawProgsList
           -- Auto-derive record field selectors before the linker so they
           -- count as defined symbols and the linker doesn't warn about them.
           derived = map deriveSelectors rawProgs
@@ -111,10 +112,11 @@ data Flags = Flags
   , flagOutput   :: !FilePath
   , flagFromJson :: !Bool
   , flagTarget   :: !CompileTarget
+  , flagNoSimplify :: !Bool
   } deriving (Show)
 
 defaultFlags :: Flags
-defaultFlags = Flags False False False False False "a.out" False TargetNative
+defaultFlags = Flags False False False False False "a.out" False TargetNative False
 
 data Command
   = ShowHelp
@@ -177,46 +179,73 @@ parseFlags args = Flags
                      ("--target":"wasm32":_) -> TargetWasm32
                      ("--target":"wasm":_)   -> TargetWasm32
                      _ -> TargetNative
+  , flagNoSimplify = "--no-simplify" `elem` args
   }
 
 -- Compilation dispatch
 
-compileFile :: Bool -> FilePath -> IO (Either (FilePath, Text) Program)
-compileFile fromJson path = do
+compileFile :: Bool -> Bool -> FilePath -> IO (Either (FilePath, Text) [Program])
+compileFile fromJson simplify path = do
   let ext = takeExtension path
-  result <- case () of
-    _ | fromJson || ext == ".json" || ext == ".organ" || path == "-"
-                -> compileOrganIR path
-      | otherwise -> case ext of
-          ".hs" -> compileHaskell path
-          ".kk" -> compileKoka path
-          ".m"  -> compileMercury path
-          ".rs" -> compileRust path
-          ".py" -> compilePython path
-          ".go" -> compileGo path
-          ".fut" -> compileFuthark path
-          ".scm" -> compileScheme path
-          ".swift" -> compileSwift path
-          ".ml"  -> compileOCaml path
-          ".erl" -> compileErlang path
-          ".fs"  -> compileFSharp path
-          ".fsx" -> compileFSharp path
-          ".idr" -> compileIdris path
-          _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
-  pure $ case result of
-    Left err   -> Left (path, err)
-    Right prog -> Right prog
+  -- Haskell uses multi-module compilation (chases imports)
+  if not fromJson && ext == ".hs"
+    then do
+      result <- compileHaskellMulti simplify path
+      pure $ case result of
+        Left err    -> Left (path, err)
+        Right progs -> Right progs
+    else do
+      result <- case () of
+        _ | fromJson || ext == ".json" || ext == ".organ" || path == "-"
+                    -> compileOrganIR path
+          | otherwise -> case ext of
+              ".hs" -> compileHaskell simplify path  -- unreachable, handled above
+              ".kk" -> compileKoka path
+              ".m"  -> compileMercury path
+              ".rs" -> compileRust path
+              ".py" -> compilePython path
+              ".go" -> compileGo path
+              ".fut" -> compileFuthark path
+              ".scm" -> compileScheme path
+              ".swift" -> compileSwift path
+              ".ml"  -> compileOCaml path
+              ".erl" -> compileErlang path
+              ".fs"  -> compileFSharp path
+              ".fsx" -> compileFSharp path
+              ".idr" -> compileIdris path
+              _     -> pure $ Left $ "Unknown file extension: " <> T.pack ext
+      pure $ case result of
+        Left err   -> Left (path, err)
+        Right prog -> Right [prog]
 
-compileHaskell :: FilePath -> IO (Either Text Program)
-compileHaskell inputFile = do
+compileHaskell :: Bool -> FilePath -> IO (Either Text Program)
+compileHaskell simplify inputFile = do
   hPutStrLn stderr $ "Compiling Haskell: " <> inputFile
-  result <- compileToCore inputFile
+  result <- compileToCoreWith simplify inputFile
   case result of
     Left err -> do
       TIO.putStrLn $ "  GHC bridge error: " <> err
       TIO.putStrLn $ "  Using demo program..."
       pure $ Right demoHaskellProgram
     Right gcr -> pure $ Right (gcrProgram gcr)
+
+-- | Multi-module Haskell compilation: compile the target file and all
+-- its local imports (home-package modules) through the GHC bridge.
+compileHaskellMulti :: Bool -> FilePath -> IO (Either Text [Program])
+compileHaskellMulti simplify inputFile = do
+  hPutStrLn stderr $ "Compiling Haskell: " <> inputFile
+  result <- compileToCoreMulti simplify inputFile
+  case result of
+    Left err -> do
+      TIO.hPutStrLn stderr $ "  GHC bridge error: " <> err
+      TIO.hPutStrLn stderr $ "  Using demo program..."
+      pure $ Right [demoHaskellProgram]
+    Right gcrs -> do
+      if length gcrs > 1
+        then hPutStrLn stderr $ "  Compiled " <> show (length gcrs)
+               <> " modules: " <> unwords [T.unpack (gcrModuleName g) | g <- gcrs]
+        else pure ()
+      pure $ Right [gcrProgram g | g <- gcrs]
 
 compileMercury :: FilePath -> IO (Either Text Program)
 compileMercury inputFile = do
@@ -488,7 +517,7 @@ handleOutput progRaw flags = do
 
 -- Helpers
 
-partitionResults :: [Either (FilePath, Text) Program] -> ([(FilePath, Text)], [Program])
+partitionResults :: [Either (FilePath, Text) [Program]] -> ([(FilePath, Text)], [[Program]])
 partitionResults = go [] []
   where
     go errs progs [] = (reverse errs, reverse progs)
@@ -522,6 +551,7 @@ printHelp = do
   putStrLn "  --target wasm32   Target WebAssembly (use with --compile)"
   putStrLn "  -o, --output      Output path (default: a.out)"
   putStrLn "  --from-json       Treat input as OrganIR JSON (also: --from-organ)"
+  putStrLn "  --no-simplify     Skip GHC Core simplifier (for self-hosting)"
   putStrLn "  --demo            Run built-in demo (factorial)"
   putStrLn "  --swift-crosscheck Compare Frankenstein Perceus vs swiftc SIL RC ops"
   putStrLn "  -h, --help        Show this help"

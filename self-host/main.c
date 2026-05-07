@@ -867,8 +867,9 @@ int main(void) {
         int64_t prog = mk_program("demo", "factorial",
             cons(fac_def, cons(main_def, nil())), nil(), nil());
 
-        /* kk_drop is now a no-op (bootstrapping mode), so retains are
-         * unnecessary but harmless — keep a few for documentation. */
+        /* Retain the prog tree so emitProgramText can traverse it.
+         * kk_drop is fully functional (retain-on-force in kk_thunk_force
+         * handles shared lazy thunks correctly). */
         for (int i = 0; i < 8; i++) kk_retain(prog);
         printf("  ... calling emitProgramText on factorial\n"); fflush(stdout);
         int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);

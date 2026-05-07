@@ -450,6 +450,24 @@ static int64_t elem_2_code(int64_t clos, int64_t xs) {
     return ghc_foldable_elem_2(kk_field(clos, 1), xs);
 }
 
+/* notElem :: Eq a => a -> [a] -> Bool */
+static int64_t notelem_1_code(int64_t clos, int64_t x);
+static int64_t notelem_2_code(int64_t clos, int64_t xs);
+
+int64_t ghc_foldable_notElem_0(void) __asm__("GHC_Internal_Data_Foldable_notElem$0");
+int64_t ghc_foldable_notElem_0(void) { return make_closure0(&notelem_1_code); }
+int64_t ghc_foldable_notElem_2(int64_t x, int64_t xs) __asm__("GHC_Internal_Data_Foldable_notElem$2");
+int64_t ghc_foldable_notElem_2(int64_t x, int64_t xs) {
+    return ghc_foldable_elem_2(x, xs) ? 0 : 1;
+}
+static int64_t notelem_1_code(int64_t clos, int64_t x) {
+    (void)clos;
+    return make_closure1(&notelem_2_code, x);
+}
+static int64_t notelem_2_code(int64_t clos, int64_t xs) {
+    return ghc_foldable_notElem_2(kk_field(clos, 1), xs);
+}
+
 int64_t ghc_foldable_find_1(int64_t p) __asm__("GHC_Internal_Data_Foldable_find$1");
 int64_t ghc_foldable_find_1(int64_t p) { return make_closure1(&find_apply, p); }
 int64_t ghc_foldable_find_2(int64_t p, int64_t xs) __asm__("GHC_Internal_Data_Foldable_find$2");
@@ -780,8 +798,45 @@ static int64_t snd_code(int64_t clos, int64_t p) { (void)clos; return kk_snd(p);
 int64_t ghc_string_fromString_1(int64_t s) __asm__("GHC_Internal_Data_String_fromString$1");
 int64_t ghc_string_fromString_1(int64_t s) {
     if (kk_is_string(s)) return s;
-    /* GHC bridge encodes "" as kk_alloc_con(69, 0) — convert to kk_string_empty */
-    return kk_string_empty();
+    if (kk_is_nil(s)) return kk_string_empty();
+    /* Walk [Char] cons-list (raw codepoints) and build a kk_string.
+     * Each element is a raw i64 codepoint (not boxed C#). */
+    /* First pass: count UTF-8 bytes needed */
+    int64_t total = 0;
+    int64_t cur = s;
+    while (!kk_is_nil(cur) && kk_is_heap_ptr(cur) && kk_tag(cur) == 46589) {
+        int64_t cp = kk_field(cur, 0);
+        if (cp < 0x80) total += 1;
+        else if (cp < 0x800) total += 2;
+        else if (cp < 0x10000) total += 3;
+        else total += 4;
+        cur = kk_field(cur, 1);
+    }
+    if (total == 0) return kk_string_empty();
+    /* Second pass: encode */
+    char* buf = (char*)malloc(total + 1);
+    int64_t pos = 0;
+    cur = s;
+    while (!kk_is_nil(cur) && kk_is_heap_ptr(cur) && kk_tag(cur) == 46589) {
+        int64_t cp = kk_field(cur, 0);
+        if (cp < 0x80) { buf[pos++] = (char)cp; }
+        else if (cp < 0x800) {
+            buf[pos++] = (char)(0xC0 | (cp >> 6));
+            buf[pos++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            buf[pos++] = (char)(0xE0 | (cp >> 12));
+            buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buf[pos++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            buf[pos++] = (char)(0xF0 | (cp >> 18));
+            buf[pos++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buf[pos++] = (char)(0x80 | (cp & 0x3F));
+        }
+        cur = kk_field(cur, 1);
+    }
+    buf[pos] = '\0';
+    return kk_str_alloc_leaf_owned(buf, pos);
 }
 
 /* ================================================================== */

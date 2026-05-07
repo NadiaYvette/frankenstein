@@ -283,17 +283,29 @@ mangleConDecl c =
 -- | Resolve an unqualified name against the symbol table.
 -- Prefers the entry from homeMod if there are multiple providers.
 -- Returns (resolved name, warnings, errors).
+-- Handles GHC's "Module/name" format for cross-module references:
+-- strips the module prefix and uses it for disambiguation.
 resolveName :: Text -> Text -> SymbolTable -> Name
             -> (Name, [Text], [LinkError])
 resolveName homeMod _selfName table nm =
-  let unqual = nameText nm
+  let fullName = nameText nm
+      -- GHC bridge encodes imported refs as "Module/name"
+      (lookupMod, unqual) = case T.breakOn "/" fullName of
+        (modPart, rest)
+          | not (T.null rest) -> (Just modPart, T.drop 1 rest)
+          | otherwise         -> (Nothing, fullName)
+      -- Prefer the explicit module from "Module/name" if present,
+      -- otherwise fall back to the definition's home module.
+      preferMod = case lookupMod of
+        Just m  -> m
+        Nothing -> homeMod
   in case Map.lookup unqual table of
     Nothing ->
       (nm, [], [])
     Just [(_, mangled)] ->
       (nm { nameText = mangled }, [], [])
     Just candidates ->
-      case filter (\(m, _) -> m == homeMod) candidates of
+      case filter (\(m, _) -> m == preferMod) candidates of
         [(_,mangled)] -> (nm { nameText = mangled }, [], [])
         [] ->
           let mangledNames = nubTexts (map snd candidates)
@@ -304,7 +316,7 @@ resolveName homeMod _selfName table nm =
         ((_,mangled):_) ->
           (nm { nameText = mangled },
               ["Warning: multiple definitions of '" <> unqual
-                <> "' within module '" <> homeMod <> "'"],
+                <> "' within module '" <> preferMod <> "'"],
               [])
 
 -- | Resolve a QName against a symbol table (for ECon / PatCon).

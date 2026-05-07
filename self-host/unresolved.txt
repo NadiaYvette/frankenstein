@@ -193,6 +193,7 @@
                  U Frankenstein_MercuryBridge_HldsParse_zeze$0
                  U Frankenstein_MlirEmit_Dialects_renderOp$1
                  U Frankenstein_MlirEmit_Emitter_zeze$0
+                 U Frankenstein_MlirEmit_Emitter_zeze$3
                  U Frankenstein_RustBridge_MirParse_bbIndex$1
                  U Frankenstein_RustBridge_MirParse_bbStatements$1
                  U Frankenstein_RustBridge_MirParse_bbTerminator$1
@@ -215,28 +216,32 @@
                  U GHC_Core_DataCon_dataConFieldLabels$1
                  U GHC_Core_DataCon_dataConName$1
                  U GHC_Core_DataCon_dataConOrigArgTys$1
+                 U GHC_Core_DataCon_dataConTyCon$1
                  U GHC_Core_TyCon_isAlgTyCon$0
                  U GHC_Core_TyCon_tyConDataCons$1
                  U GHC_Core_TyCon_tyConName$1
                  U GHC_Core_TyCon_tyConTyVars$1
+                 U GHC_Core_TyCon_tyConUnique$1
                  U GHC_Data_FastString_unpackFS$1
                  U GHC_desugarModule$1
                  U GHC_dm_core_module$1
+                 U GHC_Driver_DynFlags_gopt_set$0
+                 U GHC_Driver_DynFlags_gopt_unset$2
                  U GHC_Driver_DynFlags_importPaths$1
                  U GHC_Driver_DynFlags_packageDBFlags$1
                  U GHC_Driver_DynFlags_packageFlags$1
                  U GHC_Driver_DynFlags_xopt_set$0
+                 U GHC_Driver_Main_hscSimplify$3
                  U GHC_Driver_Make_load$1
+                 U GHC_Driver_Monad_getSession$0
                  U GHC_Driver_Monad_getSessionDynFlags$0
                  U GHC_Driver_Session_Inspect_getModuleGraph$0
                  U GHC_Driver_Session_updOptLevel$2
                  U GHC_guessTarget$3
                  U GHC_Internal_Base__$2
-                 U GHC_Internal_Base_build$1
                  U GHC_Internal_Base_eqString$2
                  U GHC_Internal_Base_flip$1
                  U GHC_Internal_Base_fmap$1
-                 U GHC_Internal_Base_foldr$3
                  U GHC_Internal_Base_id$0
                  U GHC_Internal_Base_map$1
                  U GHC_Internal_Base_map$2
@@ -264,6 +269,7 @@
                  U GHC_Internal_Classes_zozo$2
                  U GHC_Internal_Control_Exception_Base_patError$1
                  U GHC_Internal_Control_Exception_Base_try$0
+                 U GHC_Internal_Control_Monad_IO_Class_liftIO$0
                  U GHC_Internal_Data_Either_zdfApplicativeEither$0
                  U GHC_Internal_Data_Either_zdfFunctorEither$0
                  U GHC_Internal_Data_Either_zdfMonadEither$0
@@ -272,8 +278,8 @@
                  U GHC_Internal_Data_Foldable_any$2
                  U GHC_Internal_Data_Foldable_concat$0
                  U GHC_Internal_Data_Foldable_concat$1
+                 U GHC_Internal_Data_Foldable_concatMap$1
                  U GHC_Internal_Data_Foldable_concatMap$2
-                 U GHC_Internal_Data_Foldable_elem$0
                  U GHC_Internal_Data_Foldable_elem$2
                  U GHC_Internal_Data_Foldable_find$1
                  U GHC_Internal_Data_Foldable_find$2
@@ -281,6 +287,7 @@
                  U GHC_Internal_Data_Foldable_foldr$3
                  U GHC_Internal_Data_Foldable_forM_$1
                  U GHC_Internal_Data_Foldable_length$1
+                 U GHC_Internal_Data_Foldable_notElem$2
                  U GHC_Internal_Data_Foldable_null$1
                  U GHC_Internal_Data_Foldable_sum$0
                  U GHC_Internal_Data_Foldable_sum$1

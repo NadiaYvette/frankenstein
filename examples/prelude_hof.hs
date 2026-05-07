@@ -1,8 +1,8 @@
 module PreludeHof where
 
 -- Test: Higher-order functions on standard [Int] lists.
--- Uses locally-defined map/filter/foldr since GHC doesn't inline
--- the Prelude versions at -O1 without rewrite rules.
+-- Uses locally-defined map/filter/foldr as a test of custom HOFs.
+-- (Real Prelude map/filter/foldr also work — see prelude_comprehensive.hs)
 -- The key test: HOFs + stdlib list constructors + Perceus RC.
 
 myMap :: (Int -> Int) -> [Int] -> [Int]

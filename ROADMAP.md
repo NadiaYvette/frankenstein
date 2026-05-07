@@ -647,9 +647,10 @@ self-tests, validates factorial MLIR through the full pipeline.
 
 **Lazy selector fix**: GHC compiles `let (a, b) = expr` as two lazy selector
 thunks that share a cached pair. Perceus inserts drops in each selector for the
-unused field, causing use-after-free when both selectors force the same cached
-pair. Fix: `kk_drop` is a no-op in bootstrapping mode — correctness over memory
-management. Proper fix requires Perceus awareness of shared lazy thunks.
+unused field, which originally caused use-after-free when both selectors force
+the same cached pair. Fix: `kk_thunk_force` now retains the cached result on
+every access (retain-on-force semantics), giving each consumer its own reference.
+`kk_drop` is fully functional — all 12 stage 2 examples pass.
 
 **C shim surface**: 423 external symbols across Data.Map, Data.Set, Data.Text,
 GHC.Internal.*, State monad, and standard library functions. All resolved by
@@ -664,17 +665,26 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
 
 ---
 
-## Current State (2026-05-06, stdlib types through Perceus RC)
+## Current State (2026-05-07, multi-module + cross-language + cycle collector)
 
 ### What's Built and Working
-- **4 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API)
+- **8 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API),
+  Python (ast S-expr), Go (go/ast S-expr), Futhark (in-tree Pratt parser), Scheme (S-expr + CPS)
+- **Multi-module compilation**: GHC bridge chases imports through the module graph
+  (`compileToCoreMulti`), compiles all home-package modules in a single session, returns
+  `[Program]`. Cross-module name resolution in the linker (`resolveName` parses
+  `Module/name` format, disambiguates via `preferMod`).
+- **Cross-language multi-module**: Koka extern declarations call Haskell functions compiled
+  from multiple modules. Demo: 2 Haskell modules + 1 Koka module → single binary → 75.
 - **Core IR**: Multiplicity, effect rows, Perceus ops, laziness ops
 - **Perceus pass**: Drop + retain insertion, formally verified (20 kprove claims)
 - **Evidence pass**: Single-op and multi-op effect dispatch with cross-module resolution, 13 kprove claims
 - **Linker**: Multi-module merging with cross-module name rewriting, 20 kprove claims
 - **MLIR emitter**: func/arith/scf/llvm dialects, lambda lifting, closures with
-  real function pointers, thunks, bool/char/int/float/string support
-- **Runtime**: Perceus RC (`kk_retain`/`kk_drop`), boxed values, thunks
+  real function pointers, thunks, bool/char/int/float/string support, cycle candidate
+  marking (`kk_cycle_candidate` after `kk_alloc_con` in statically-detected cyclic defs)
+- **Runtime**: Perceus RC (`kk_retain`/`kk_drop`), boxed values, thunks, retain-on-force
+  semantics for shared lazy selectors
 - **K specs**: OrganIR typing + Perceus + full effect semantics (organ-ir.k,
   1229 lines, 240 rules), 118 krun tests (incl. 42 algebraic effect tests
   with Mercury semidet/choice patterns), 47 bridge property tests,
@@ -733,12 +743,19 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
 - **Phase 5: Wasm Backend** ✓: `--compile --target wasm32` produces `.wasm` binaries.
   485-byte factorial demo runs in Node.js and browser. Freestanding Wasm runtime with
   bump allocator. Browser demo at `web/index.html`. Pipeline: MLIR → llc(wasm32) → wasm-ld.
+- **Self-hosted binary** ✓: 20/20 modules compile through own pipeline, 1.4 MB binary,
+  67 self-tests pass. All 4 compiler passes exercised (ConTags, Perceus, Evidence, MLIR).
+  Full pipeline validation: factorial(10) → MLIR → mlir-opt → clang → 3628800.
+  `kk_drop` is fully functional — all 19 stage 1 and 13 stage 2 examples pass
+  (alloc_stress fixed via retain-on-force in `kk_thunk_force`).
 - **Test suite**: 97 cabal tests (incl. cross-module effect test), 5 polyglot E2E, 3 Wasm validation tests,
-  K test oracle, 116 krun tests, 10 cycle collector C tests
+  K test oracle, 118 krun tests, 10 cycle collector C tests, 19 self-host Phase 8 examples
 - **End-to-end**: `--demo --compile` → 3628800, `--demo --compile --target wasm32` → 3628800 in Node.js,
-  4-language polyglot → 69/1/144
+  4-language polyglot → 69/1/144, cross-language demo (Koka↔Haskell×2) → 75
 
 ### Recent Commits
+- Multi-module GHC bridge + cross-language demo + cycle collector wiring — `compileToCoreMulti` chases imports through GHC module graph, `resolveName` handles `Module/name` cross-module references, `CycleAnalysis` results wired into MLIR emitter via `esCyclicDefs`/`emitCycleCandidate`, cross-language demo (2 Haskell + 1 Koka → 75), cross_module added to Phase 8 (19 examples pass stage 1, 13 pass stage 2).
+- Phase 3f: String support + builtins as first-class values + stage 2 segfault fix — Three fixes: (1) `builtinWrapperSpec` in Emitter.hs generates wrapper closures for `+`, `-`, `*`, `/`, `mod`, `==`, `<`, etc. when used as first-class values (HOF arguments); (2) Address primops `indexCharOffAddr#`/`plusAddr#` for post-simplifier `unpackCString#` byte-walking loops, with `LitString` dual semantics (cons-list in Core IR, raw `Addr#` pointer in emitter); (3) `fix-intra-module-calls.py` generates 86 MLIR wrapper functions for split-compiled `MlirEmit_Emitter` — the split compilation broke `esTopFns` population causing cross-part function calls to resolve to null. All 18 host-compiled examples pass. Stage 2 compiler no longer segfaults — all 12 examples pass through stage 2 (alloc_stress fixed via retain-on-force in kk_thunk_force).
 - Phase 3e: stdlib types — disable RULES, collect referenced TyCons, 5 new stdlib examples (list/maybe/bool/tuple/hof), all 16 examples pass
 - Fix MlirEmit_Emitter stage2 compilation — split emitExpr, flatten deep nesting, 10-part split-compile, 23/23 modules compile, 12/12 e2e tests pass
 - Self-hosted binary — 19/20 modules compile through own pipeline, link into 800 KB binary, 17/17 self-tests pass. Lambda/thunk module-prefix fix in emitter. `self-host/build.sh` + `self-host/main.c`.

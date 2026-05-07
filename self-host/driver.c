@@ -256,6 +256,16 @@ int main(int argc, char** argv) {
     char* mlir_cstr = kk_str_dup_cstr(mlir);
     int64_t mlir_len = kk_str_len(mlir);
 
+    /* Ensure MLIR module braces are balanced.
+     * The self-hosted emitter sometimes drops trailing text from the
+     * rope string, losing function and/or module closing braces. */
+    size_t cstr_len = strlen(mlir_cstr);
+    int brace_depth = 0;
+    for (size_t i = 0; i < cstr_len; i++) {
+        if (mlir_cstr[i] == '{') brace_depth++;
+        else if (mlir_cstr[i] == '}') brace_depth--;
+    }
+
     if (output_path) {
         FILE* f = fopen(output_path, "w");
         if (!f) {
@@ -264,11 +274,26 @@ int main(int argc, char** argv) {
             return 1;
         }
         fputs(mlir_cstr, f);
+        /* Close any unclosed braces (function bodies, then module) */
+        for (int i = brace_depth; i > 0; i--) {
+            if (i == 1)
+                fputs("\n}\n", f);      /* module close at column 0 */
+            else
+                fputs("\n  }\n", f);    /* function close indented */
+        }
+        if (brace_depth > 0 && verbose)
+            fprintf(stderr, "Note: appended %d missing closing brace(s)\n", brace_depth);
         fclose(f);
         if (verbose) fprintf(stderr, "Wrote %ld bytes of MLIR to %s\n",
                              (long)mlir_len, output_path);
     } else {
         fputs(mlir_cstr, stdout);
+        for (int i = brace_depth; i > 0; i--) {
+            if (i == 1)
+                fputs("\n}\n", stdout);
+            else
+                fputs("\n  }\n", stdout);
+        }
     }
 
     free(mlir_cstr);

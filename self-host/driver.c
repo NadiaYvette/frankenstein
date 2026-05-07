@@ -29,15 +29,15 @@ extern void kk_args_init(int argc, char** argv);
 /* ------------------------------------------------------------------ */
 
 /* OrganIR/Consumer.o */
-extern int64_t Frankenstein_OrganIR_Consumer_consumeProgram(int64_t);
+extern int64_t frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(int64_t);
 
 /* Core passes */
-extern int64_t Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t);
-extern int64_t Frankenstein_Core_EffectOpt_effectOptimize(void); /* CAF: returns thunk */
-extern int64_t Frankenstein_Core_Evidence_collectGlobalEffects(int64_t);
-extern int64_t Frankenstein_Core_Evidence_evidencePassGlobal(int64_t, int64_t);
-extern int64_t Frankenstein_Core_Perceus_insertPerceus(int64_t);
-extern int64_t Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t);
+extern int64_t frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t);
+extern int64_t frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(void); /* CAF: returns thunk */
+extern int64_t frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(int64_t);
+extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(int64_t, int64_t);
+extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t);
+extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t);
 
 /* ------------------------------------------------------------------ */
 /*  Read all of stdin into a kk_string                                */
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
 
     /* OrganIR JSON -> Core IR */
     if (verbose) fprintf(stderr, "Parsing OrganIR (%ld bytes)...\n", (long)json_len);
-    int64_t result = Frankenstein_OrganIR_Consumer_consumeProgram(json_text);
+    int64_t result = frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(json_text);
 
     /* result is Either String Program.
      * With hash-based tags: Left=50386, Right=11965 (stable across all modules).
@@ -178,14 +178,14 @@ int main(int argc, char** argv) {
 
     if (verbose) fprintf(stderr, "Running flattenPatterns...\n");
     t0 = now_sec();
-    prog = Frankenstein_Core_FlattenPatterns_flattenPatterns(prog);
+    prog = frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(prog);
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  flattenPatterns: %.3fs\n", t1 - t0);
 
     if (verbose) fprintf(stderr, "Running effectOptimize...\n");
     t0 = now_sec();
     {
-        int64_t thunk = Frankenstein_Core_EffectOpt_effectOptimize();
+        int64_t thunk = frankenstein_Frankenstein_Core_EffectOpt_effectOptimize();
         int64_t closure = kk_thunk_force(thunk);
         int64_t fp = kk_field(closure, 0);
         typedef int64_t (*fn2_t)(int64_t, int64_t);
@@ -197,8 +197,8 @@ int main(int argc, char** argv) {
     if (verbose) fprintf(stderr, "Running evidencePass...\n");
     t0 = now_sec();
     {
-        int64_t globalEffects = Frankenstein_Core_Evidence_collectGlobalEffects(prog);
-        prog = Frankenstein_Core_Evidence_evidencePassGlobal(globalEffects, prog);
+        int64_t globalEffects = frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(prog);
+        prog = frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(globalEffects, prog);
     }
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  evidencePass: %.3fs\n", t1 - t0);
@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
     } else {
         if (verbose) fprintf(stderr, "Running insertPerceus...\n");
         t0 = now_sec();
-        prog = Frankenstein_Core_Perceus_insertPerceus(prog);
+        prog = frankenstein_Frankenstein_Core_Perceus_insertPerceus(prog);
         t1 = now_sec();
         if (verbose) fprintf(stderr, "  insertPerceus: %.3fs\n", t1 - t0);
     }
@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
 
     if (verbose) fprintf(stderr, "Running emitProgramText...\n");
     t0 = now_sec();
-    int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
+    int64_t mlir = frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  emitProgramText: %.3fs\n", t1 - t0);
 

@@ -1,0 +1,4 @@
+module Clamp
+
+clamp : Int -> Int -> Int -> Int
+clamp lo hi x = if x < lo then lo else if x > hi then hi else x

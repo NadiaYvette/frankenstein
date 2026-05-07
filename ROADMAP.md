@@ -750,19 +750,25 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   Full pipeline validation: factorial(10) → MLIR → mlir-opt → clang → 3628800.
   `kk_drop` is fully functional — all 19 stage 1 and 13 stage 2 examples pass
   (alloc_stress fixed via retain-on-force in `kk_thunk_force`).
-- **Cross-language coverage**: 9 polyglot E2E tests in `test-polyglot.sh`:
+- **Cross-language coverage**: 10 polyglot E2E tests in `test-polyglot.sh`:
   - 3-lang (Haskell+Rust+Koka) → 69
   - 4-lang semidet success/failure (Haskell+Rust+Mercury+Koka) → 69/1
   - Cross-lang multi-module (Haskell×2+Koka) → 75
   - Haskell stdlib cross-lang (map/filter/sum from Koka) → 220
   - 7-lang all bridges (Haskell+Rust+Mercury+Python+Go+Futhark+Koka) → 147
   - 7-lang multi-module (Haskell×2+Rust+Mercury+Python+Go+Futhark+Koka) → 175
-- **Test suite**: 97 cabal tests (incl. cross-module effect test), 9 polyglot E2E, 3 Wasm validation tests,
+  - **12-lang all bridges** (Haskell+Rust+Mercury+Python+Go+Futhark+Swift+OCaml+Erlang+F#+Idris+Koka) → **440**
+- **Organ-bank integration**: OCaml shim produces OrganIR JSON consumed end-to-end through
+  frankenstein's `OrganIR.Consumer` → Core → MLIR → native (factorial(10)=3628800, cube(5)=125).
+  SML/Lua/Erlang/Prolog/Forth frontends produce structured OrganIR; Lua shim consumable but
+  runtime type mismatch (any vs int). C/C++ shims at wrong abstraction level (LLVM IR as strings).
+- **Test suite**: 97 cabal tests (incl. cross-module effect test), 10 polyglot E2E, 3 Wasm validation tests,
   K test oracle, 118 krun tests, 10 cycle collector C tests, 19 self-host Phase 8 examples
 - **End-to-end**: `--demo --compile` → 3628800, `--demo --compile --target wasm32` → 3628800 in Node.js
 
 ### Recent Commits
-- Expanded cross-language multi-module coverage — 7-language demo (Haskell+Rust+Mercury+Python+Go+Futhark+Koka → 147), 7-language multi-module demo (Haskell×2 + 5 languages → 175), Haskell stdlib cross-language (map/filter/sum called from Koka → 220). Polyglot test suite expanded to 9 tests. Confirmed Prelude HOFs (map/filter/foldr/sum/take/zipWith/foldl) are fully inlined by GHC at -O1 with aggressive specialization flags.
+- 12-language demo — all 12 direct-style in-tree bridges (Haskell, Rust, Mercury, Python, Go, Futhark, Swift, OCaml, Erlang, F#, Idris, Koka) compose into a single binary → 440. Each function compiled through its real compiler's API/IR. Organ-bank OCaml shim verified end-to-end through OrganIR JSON → Consumer → Core → MLIR → native.
+- Expanded cross-language multi-module coverage — 7-language demo (Haskell+Rust+Mercury+Python+Go+Futhark+Koka → 147), 7-language multi-module demo (Haskell×2 + 5 languages → 175), Haskell stdlib cross-language (map/filter/sum called from Koka → 220). Polyglot test suite expanded to 10 tests. Confirmed Prelude HOFs (map/filter/foldr/sum/take/zipWith/foldl) are fully inlined by GHC at -O1 with aggressive specialization flags.
 - Multi-module GHC bridge + cross-language demo + cycle collector wiring — `compileToCoreMulti` chases imports through GHC module graph, `resolveName` handles `Module/name` cross-module references, `CycleAnalysis` results wired into MLIR emitter via `esCyclicDefs`/`emitCycleCandidate`, cross-language demo (2 Haskell + 1 Koka → 75), cross_module added to Phase 8 (19 examples pass stage 1, 13 pass stage 2).
 - Phase 3f: String support + builtins as first-class values + stage 2 segfault fix — Three fixes: (1) `builtinWrapperSpec` in Emitter.hs generates wrapper closures for `+`, `-`, `*`, `/`, `mod`, `==`, `<`, etc. when used as first-class values (HOF arguments); (2) Address primops `indexCharOffAddr#`/`plusAddr#` for post-simplifier `unpackCString#` byte-walking loops, with `LitString` dual semantics (cons-list in Core IR, raw `Addr#` pointer in emitter); (3) `fix-intra-module-calls.py` generates 86 MLIR wrapper functions for split-compiled `MlirEmit_Emitter` — the split compilation broke `esTopFns` population causing cross-part function calls to resolve to null. All 18 host-compiled examples pass. Stage 2 compiler no longer segfaults — all 12 examples pass through stage 2 (alloc_stress fixed via retain-on-force in kk_thunk_force).
 - Phase 3e: stdlib types — disable RULES, collect referenced TyCons, 5 new stdlib examples (list/maybe/bool/tuple/hof), all 16 examples pass

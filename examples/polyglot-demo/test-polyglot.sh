@@ -208,6 +208,29 @@ run_test "7-lang-multi-module" "175" \
     "$SCRIPT_DIR/seven-lang-multi.kk"
 
 # -------------------------------------------------------
+# Test 10: 12-language demo (all direct-style in-tree bridges)
+# -------------------------------------------------------
+echo ""
+echo "--- 12-language (Haskell + Rust + Mercury + Python + Go + Futhark + Swift + OCaml + Erlang + F# + Idris + Koka) ---"
+
+# Clean Mercury temp between runs
+rm -rf /tmp/frankenstein-mercury-*/
+
+run_test "12-lang-all-bridges" "440" \
+    "$SCRIPT_DIR/fib.hs" \
+    "$SCRIPT_DIR/negate.rs" \
+    "$SCRIPT_DIR/check.m" \
+    "$SCRIPT_DIR/square.py" \
+    "$SCRIPT_DIR/gcd.go" \
+    "$SCRIPT_DIR/sum_to.fut" \
+    "$SCRIPT_DIR/pow4.swift" \
+    "$SCRIPT_DIR/halve.ml" \
+    "$SCRIPT_DIR/modulo.erl" \
+    "$SCRIPT_DIR/abs_val.fsx" \
+    "$SCRIPT_DIR/clamp.idr" \
+    "$SCRIPT_DIR/twelve-lang.kk"
+
+# -------------------------------------------------------
 # Summary
 # -------------------------------------------------------
 echo ""

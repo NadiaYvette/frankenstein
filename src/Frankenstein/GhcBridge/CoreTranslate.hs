@@ -39,9 +39,11 @@ import GHC.Types.Var
 import GHC.Types.Name (getOccString, nameUnique, nameModule_maybe)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Literal (Literal(..))
-import GHC.Types.Id (idDemandInfo, isDataConId_maybe, isDeadBinder)
+import GHC.Types.Id (idDemandInfo, idDetails, isDataConId_maybe, isDeadBinder)
+import GHC.Types.Id.Info (IdDetails(..))
+import GHC.Types.ForeignCall (ForeignCall(..), CCallSpec(..), CCallTarget(..))
 import GHC.Types.Demand (isStrictDmd, isAbsDmd)
-import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys, dataConFieldLabels, dataConTyCon)
+import GHC.Core.DataCon (DataCon, dataConName, dataConOrigArgTys, dataConFieldLabels, dataConTyCon, isUnboxedTupleDataCon)
 import GHC.Unit.Module (moduleNameString, moduleName)
 import GHC.Data.FastString (unpackFS)
 import GHC.Types.FieldLabel (flLabel)
@@ -121,6 +123,9 @@ trExpr (Var v)
                (F.Name (T.pack (getOccString (dataConName dc))) 0))
   | Just canonical <- normalizeGhcBuiltin v =
       F.EVar (F.Name canonical 0)
+  -- foreign import ccall: extract the C function name from FCallId
+  | FCallId (CCall (CCallSpec (StaticTarget _ clabel _ _) _ _)) <- idDetails v =
+      F.EVar (F.Name (T.pack (unpackFS clabel)) 0)
 trExpr (Var v) = F.EVar (translateName v)
 
 trExpr (Lit l) = F.ELit (translateLit l)
@@ -154,9 +159,9 @@ trExpr (App f a) =
     -- tagToEnum#(expr) → expr (Bool uses 0/1 integers, same as Int#)
     (Var v, [Type _, arg])
       | getOccString v == "tagToEnum#" -> trExpr arg
-    -- General case: strip dictionary arguments
+    -- General case: strip dictionary arguments and realWorld# state tokens
     (fun, args) ->
-      let args' = filter (not . isDictArg) args
+      let args' = filter (\x -> not (isDictArg x) && not (isRealWorldArg x)) args
       in F.EApp (trExpr fun) (map trExpr args')
 
 -- Lambda: collect consecutive value binders into a single multi-param ELam
@@ -187,6 +192,30 @@ trExpr (Let bind body) =
         | otherwise          = wrapLazyUses lazyNames bodyCore
   in F.ELet groups forcedBody
 
+-- Unboxed tuple from FFI: case ffi_call(args) of (# state_tok, result #) -> body
+-- GHC wraps foreign import ccall results in (# State# RealWorld, result #).
+-- After stripping realWorld# from args, the actual call returns just the value.
+-- Bind the non-state binder to the scrutinee, ignore the state token.
+trExpr (Case scrut _bndr _ty [Alt (DataAlt dc) bndrs rhs])
+  | isUnboxedTupleDataCon dc
+  , let nonStateBndrs = filter (not . isStateVar) bndrs
+  , length nonStateBndrs < length bndrs =  -- at least one state token was filtered
+      case nonStateBndrs of
+        [resultBndr] ->
+          -- Single non-state result: let result = scrut in rhs
+          let bind = F.Bind
+                { F.bindName = translateName resultBndr
+                , F.bindType = translateType (varType resultBndr)
+                , F.bindExpr = trExpr scrut
+                , F.bindSort = F.DefVal
+                }
+          in F.ELet [[bind]] (trExpr rhs)
+        [] ->
+          -- All binders are state tokens (IO () call): just sequence
+          trExpr rhs
+        _ ->
+          -- Multiple non-state results: fall through to general case
+          F.ECase (trExpr scrut) [translateAlt (Alt (DataAlt dc) bndrs rhs)]
 -- Case: simplify I# unboxing pattern, then translate
 -- GHC Core: case scrut of bndr { I# ds# -> rhs } →
 --   let bndr = scrut in let ds# = scrut in rhs
@@ -284,6 +313,21 @@ isDictArg (Var v) =
     tails []     = [[]]
     tails s@(_:xs) = s : tails xs
 isDictArg _ = False
+
+-- | Is this expression a realWorld# state token?
+-- GHC threads State# RealWorld through IO and foreign call wrappers.
+-- We strip these since Frankenstein doesn't model the IO state token.
+isRealWorldArg :: CoreExpr -> Bool
+isRealWorldArg (Var v) = getOccString v == "realWorld#"
+isRealWorldArg _ = False
+
+-- | Is this variable a State# RealWorld state token?
+-- Used to detect the state component of unboxed tuples from IO/FFI operations.
+isStateVar :: Var -> Bool
+isStateVar v = isStateType (varType v)
+  where
+    isStateType (TyConApp tc _) = getOccString (tyConName tc) == "State#"
+    isStateType _ = False
 
 isPrefixOf :: String -> String -> Bool
 isPrefixOf [] _ = True

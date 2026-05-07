@@ -923,7 +923,7 @@ convertTextLine line =
   let s = T.strip line
       -- Strip trailing semicolons
       noSemi = if ";" `T.isSuffixOf` s then T.dropEnd 1 s else s
-  in if " = " `T.isInfixOf` noSemi
+  in if " = " `T.isInfixOf` noSemi && not (" -> [" `T.isInfixOf` noSemi)
      then let (lhs, rhs') = T.breakOn " = " noSemi
               rhs = T.drop 3 rhs'  -- drop " = "
           in "Assign((" <> lhs <> ", " <> rhs <> "))"

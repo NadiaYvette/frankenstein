@@ -231,6 +231,31 @@ run_test "12-lang-all-bridges" "440" \
     "$SCRIPT_DIR/twelve-lang.kk"
 
 # -------------------------------------------------------
+# Test 11: Haskell foreign import ccall (FFI cross-language)
+# -------------------------------------------------------
+echo ""
+echo "--- Haskell foreign import ccall (Haskell FFI → Python + Go + Koka) ---"
+
+run_test "haskell-ffi-cross" "157" \
+    "$SCRIPT_DIR/FfiImport.hs" \
+    "$SCRIPT_DIR/fib.hs" \
+    "$SCRIPT_DIR/square.py" \
+    "$SCRIPT_DIR/gcd.go" \
+    "$SCRIPT_DIR/ffi-cross.kk"
+
+# -------------------------------------------------------
+# Test 12: Rust extern "C" (FFI cross-language)
+# -------------------------------------------------------
+echo ""
+echo "--- Rust extern \"C\" (Rust FFI → Python + Haskell + Koka) ---"
+
+run_test "rust-extern-cross" "69" \
+    "$SCRIPT_DIR/RustExtern.rs" \
+    "$SCRIPT_DIR/fib.hs" \
+    "$SCRIPT_DIR/square.py" \
+    "$SCRIPT_DIR/rust-extern-cross.kk"
+
+# -------------------------------------------------------
 # Summary
 # -------------------------------------------------------
 echo ""

@@ -668,8 +668,9 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
 ## Current State (2026-05-07, multi-module + cross-language + cycle collector)
 
 ### What's Built and Working
-- **8 bridges**: GHC (real API), Rust (MIR text+JSON), Mercury (HLDS), Koka (library API),
-  Python (ast S-expr), Go (go/ast S-expr), Futhark (in-tree Pratt parser), Scheme (S-expr + CPS)
+- **8 bridges**: GHC (real API + `foreign import ccall` FFI), Rust (MIR text+JSON + `extern "C"` FFI),
+  Mercury (HLDS), Koka (library API), Python (ast S-expr), Go (go/ast S-expr), Futhark (in-tree Pratt parser),
+  Scheme (S-expr + CPS)
 - **Multi-module compilation**: GHC bridge chases imports through the module graph
   (`compileToCoreMulti`), compiles all home-package modules in a single session, returns
   `[Program]`. Cross-module name resolution in the linker (`resolveName` parses
@@ -750,7 +751,18 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   Full pipeline validation: factorial(10) → MLIR → mlir-opt → clang → 3628800.
   `kk_drop` is fully functional — all 19 stage 1 and 13 stage 2 examples pass
   (alloc_stress fixed via retain-on-force in `kk_thunk_force`).
-- **Cross-language coverage**: 10 polyglot E2E tests in `test-polyglot.sh`:
+- **FFI cross-language imports**: Native FFI mechanisms in major bridges resolve through
+  the polyglot linker's symbol table, enabling symmetric multi-language composition:
+  - **Haskell `foreign import ccall`**: GHC bridge detects `FCallId` in Core, extracts C
+    function name from `CCallSpec`/`StaticTarget`, strips `realWorld#` state tokens and
+    unboxed `(# State#, result #)` tuple destructuring. Haskell functions can call Python,
+    Go, Rust, etc. via standard `foreign import ccall "symbol_name"` syntax.
+  - **Rust `extern "C"`**: MIR bridge now correctly parses call terminators with external
+    targets (`_0 = square(copy _1) -> [return: bb1, unwind unreachable]`). Fix: MIR text
+    parser no longer wraps call terminators in `Assign((...))` which prevented the call
+    terminator parser from recognizing them. Rust functions can call Python, Haskell, etc.
+    via standard `extern "C" { fn symbol_name(...); }` syntax.
+- **Cross-language coverage**: 12 polyglot E2E tests in `test-polyglot.sh`:
   - 3-lang (Haskell+Rust+Koka) → 69
   - 4-lang semidet success/failure (Haskell+Rust+Mercury+Koka) → 69/1
   - Cross-lang multi-module (Haskell×2+Koka) → 75
@@ -758,15 +770,18 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   - 7-lang all bridges (Haskell+Rust+Mercury+Python+Go+Futhark+Koka) → 147
   - 7-lang multi-module (Haskell×2+Rust+Mercury+Python+Go+Futhark+Koka) → 175
   - **12-lang all bridges** (Haskell+Rust+Mercury+Python+Go+Futhark+Swift+OCaml+Erlang+F#+Idris+Koka) → **440**
+  - **Haskell FFI cross-lang** (Haskell `foreign import ccall` → Python+Go+Koka) → **157**
+  - **Rust FFI cross-lang** (Rust `extern "C"` → Python+Haskell+Koka) → **69**
 - **Organ-bank integration**: OCaml shim produces OrganIR JSON consumed end-to-end through
   frankenstein's `OrganIR.Consumer` → Core → MLIR → native (factorial(10)=3628800, cube(5)=125).
   SML/Lua/Erlang/Prolog/Forth frontends produce structured OrganIR; Lua shim consumable but
   runtime type mismatch (any vs int). C/C++ shims at wrong abstraction level (LLVM IR as strings).
-- **Test suite**: 97 cabal tests (incl. cross-module effect test), 10 polyglot E2E, 3 Wasm validation tests,
+- **Test suite**: 97 cabal tests (incl. cross-module effect test), 12 polyglot E2E, 3 Wasm validation tests,
   K test oracle, 118 krun tests, 10 cycle collector C tests, 19 self-host Phase 8 examples
 - **End-to-end**: `--demo --compile` → 3628800, `--demo --compile --target wasm32` → 3628800 in Node.js
 
 ### Recent Commits
+- FFI cross-language imports — Haskell `foreign import ccall` and Rust `extern "C"` now resolve through the polyglot linker. GHC bridge detects `FCallId` vars via `idDetails`, extracts C function names from `CCallSpec`/`StaticTarget`, strips `realWorld#` state tokens and unboxed tuple `(# State# RealWorld, result #)` destructuring. MIR bridge fix: `convertTextLine` no longer wraps call terminators in `Assign((...))`, enabling proper parsing of `_0 = func(args) -> [return: bbN, ...]` patterns. Two new demo tests: Haskell FFI cross-lang (Haskell→Python+Go+Koka → 157), Rust FFI cross-lang (Rust→Python+Haskell+Koka → 69). Polyglot test suite now at 12 tests (11 passing, 1 pre-existing Mercury choice issue).
 - 12-language demo — all 12 direct-style in-tree bridges (Haskell, Rust, Mercury, Python, Go, Futhark, Swift, OCaml, Erlang, F#, Idris, Koka) compose into a single binary → 440. Each function compiled through its real compiler's API/IR. Organ-bank OCaml shim verified end-to-end through OrganIR JSON → Consumer → Core → MLIR → native.
 - Expanded cross-language multi-module coverage — 7-language demo (Haskell+Rust+Mercury+Python+Go+Futhark+Koka → 147), 7-language multi-module demo (Haskell×2 + 5 languages → 175), Haskell stdlib cross-language (map/filter/sum called from Koka → 220). Polyglot test suite expanded to 10 tests. Confirmed Prelude HOFs (map/filter/foldr/sum/take/zipWith/foldl) are fully inlined by GHC at -O1 with aggressive specialization flags.
 - Multi-module GHC bridge + cross-language demo + cycle collector wiring — `compileToCoreMulti` chases imports through GHC module graph, `resolveName` handles `Module/name` cross-module references, `CycleAnalysis` results wired into MLIR emitter via `esCyclicDefs`/`emitCycleCandidate`, cross-language demo (2 Haskell + 1 Koka → 75), cross_module added to Phase 8 (19 examples pass stage 1, 13 pass stage 2).

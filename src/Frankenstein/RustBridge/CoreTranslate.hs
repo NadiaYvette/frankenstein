@@ -45,6 +45,8 @@ import qualified Data.Set as Set
 --   (b) Reconstructing ADTs from MIR aggregate rvalues and discriminant reads,
 --       which is lossy and fragile.
 -- TODO: extend rustc-shim to emit ADT definitions alongside MIR bodies.
+-- (Requires modifying rustc-shim/src/main.rs to walk TyCtxt::adt_def()
+-- and emit enum/struct declarations as JSON alongside MIR bodies.)
 translateMir :: MirProgram -> Either Text Program
 translateMir prog = do
   defs <- mapM translateBody (mirBodies prog)

@@ -270,15 +270,35 @@ translateBranch (KC.Branch pats guards) = do
       -- If guard test is True (always-match), no guard needed
       let mguard = if isExprTrue test then Nothing else Just test'
       pure $ F.Branch pat mguard body'
-    (KC.Guard _test body : _) -> do
-      -- Multiple guards: take first (TODO: desugar to nested if)
-      body' <- translateExpr body
+    guards'@(_:_:_) -> do
+      -- Multiple guards: desugar to nested if-then-else
+      body' <- desugarGuards guards'
       pure $ F.Branch pat Nothing body'
     [] ->
       Left "Branch with no guards"
   where
     isExprTrue (KC.Con tname _) = KN.nameStem (KC.getName tname) == "True"
     isExprTrue _ = False
+
+    desugarGuards [] = Left "Branch with no guards"
+    desugarGuards [KC.Guard test body] = do
+      test' <- translateExpr test
+      body' <- translateExpr body
+      if isExprTrue test then pure body'
+      else pure $ F.ECase test'
+        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+        , F.Branch (F.PatWild anyType) Nothing
+            (F.ELit (F.LitInt 0))  -- fallthrough: return 0
+        ]
+    desugarGuards (KC.Guard test body : rest) = do
+      test' <- translateExpr test
+      body' <- translateExpr body
+      rest' <- desugarGuards rest
+      if isExprTrue test then pure body'
+      else pure $ F.ECase test'
+        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+        , F.Branch (F.PatWild anyType) Nothing rest'
+        ]
 
 translatePattern :: KC.Pattern -> Either Text F.Pattern
 translatePattern = \case

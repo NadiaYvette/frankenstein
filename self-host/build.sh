@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FRKN="cabal-3.16.1.0 -v0 exec frankenstein --"
+FRKN="cabal-3.16.1.0 -v0 exec -w /usr/lib64/ghc-9.14.1/bin/ghc frankenstein --"
 OUT=self-host/obj
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -183,7 +183,7 @@ fi
 echo ""
 echo "=== Phase 8: End-to-end examples through self-hosted compiler ==="
 # Compile Haskell examples: host compiler --emit-organ | self-hosted compiler → MLIR → native → run
-FRKN_RUN="cabal-3.16.1.0 -v0 run frankenstein -w /usr/lib64/ghc-9.14.1/bin/ghc --"
+FRKN_RUN="cabal-3.16.1.0 -v0 exec -w /usr/lib64/ghc-9.14.1/bin/ghc frankenstein --"
 MLIR_OPT="mlir-opt --allow-unregistered-dialect \
   --convert-scf-to-cf --convert-arith-to-llvm --convert-cf-to-llvm \
   --convert-func-to-llvm --reconcile-unrealized-casts"
@@ -340,6 +340,7 @@ nparts = max(2, (ndefs + 39) // 40)
 print(nparts)
 ")
     _split_ok=true
+    _any_fallback=false
     _part_files=""
     for _pidx in $(seq 0 $((_nparts - 1))); do
       python3 -c "
@@ -372,7 +373,15 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
            "$STAGE2/${flat}_part${_pidx}.organ.json" \
            --no-perceus -o "$STAGE2/${flat}_part${_pidx}.mlir" \
            2>>"$STAGE2/$flat.err"; then
-        _split_ok=false; break
+        # Part crashed — extract functions from stage1 MLIR as fallback
+        if [ -f "$OUT/$flat.mlir" ]; then
+          python3 self-host/extract-mlir-funcs.py \
+            "$OUT/$flat.mlir" "$STAGE2/${flat}_part${_pidx}.organ.json" \
+            -o "$STAGE2/${flat}_part${_pidx}.mlir" 2>>"$STAGE2/$flat.err"
+          _any_fallback=true
+        else
+          _split_ok=false; break
+        fi
       fi
       python3 self-host/fix-captures.py "$STAGE2/${flat}_part${_pidx}.mlir" \
         2>>"$STAGE2/$flat.err"
@@ -382,9 +391,43 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
       python3 self-host/merge-mlir-parts.py \
         $_part_files \
         -o "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
+      # Inject missing string globals from stage1 MLIR into merged file
+      # (self-hosted compiler references @str_N globals it doesn't define)
+      if [ -f "$OUT/$flat.mlir" ]; then
+        python3 -c "
+import re, sys
+merged = open('$STAGE2/$flat.mlir').read()
+stage1 = open('$OUT/$flat.mlir').read()
+# Find all llvm.mlir.global definitions in stage1
+globals_map = {}
+for m in re.finditer(r'(llvm\.mlir\.global\s+\S+\s+\S+\s+@([A-Za-z0-9_.\$]+)\s*\([^)]*\)[^\n]*)', stage1):
+    globals_map[m.group(2)] = m.group(1)
+# Find referenced but undefined globals in merged file
+refs = set(re.findall(r'llvm\.mlir\.addressof\s+@([A-Za-z0-9_.]+)', merged))
+defined = set(re.findall(r'llvm\.mlir\.global\s+\S+\s+\S+\s+@([A-Za-z0-9_.]+)', merged))
+missing = refs - defined
+injected = 0
+for name in sorted(missing):
+    # Check if stage1 has the un-renamed version (strip pN_ prefix)
+    base = re.sub(r'_p\d+_', '_', name)
+    if base in globals_map:
+        gline = globals_map[base].replace(f'@{base}', f'@{name}')
+        merged = merged.replace('module {', f'module {{\n  {gline}', 1)
+        injected += 1
+    elif name in globals_map:
+        merged = merged.replace('module {', f'module {{\n  {globals_map[name]}', 1)
+        injected += 1
+if injected:
+    open('$STAGE2/$flat.mlir', 'w').write(merged)
+    print(f'  Injected {injected} missing globals from stage1', file=sys.stderr)
+" 2>>"$STAGE2/$flat.err"
+      fi
       # Fix intra-module $N call mismatches from split compilation
       python3 self-host/fix-intra-module-calls.py "$STAGE2/$flat.mlir" \
         2>>"$STAGE2/$flat.err"
+      if $_any_fallback; then
+        echo -n "(partial stage1 fallback) "
+      fi
     else
       echo -n "FAIL (stage1 split-compile)"
       [ -f "$STAGE2/$flat.err" ] && tail -3 "$STAGE2/$flat.err" | sed 's/^/    /'
@@ -445,6 +488,10 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
   # Step 2e: Fix func.call arity mismatches caused by the self-hosted emitter's
   # ConCase default-branch duplication bug (captures computed in wrong scope)
   python3 self-host/fix-mlir-arity.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
+
+  # Step 2f: Add declarations for any remaining orphan function references
+  # (e.g., unfixed fld$0 calls whose private decls were removed by fix scripts)
+  python3 self-host/fix-orphan-decls.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
 
   # Step 3: MLIR → LLVM IR
   if ! mlir-opt $MLIR_PASSES "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err" \

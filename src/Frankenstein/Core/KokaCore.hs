@@ -51,13 +51,13 @@ fromKokaCore = translateProgram
 toKokaCore :: F.Program -> Either Text KC.Core
 toKokaCore prog = do
   defs <- mapM toKokaDef (F.progDefs prog)
-  -- TODO: translate DataDecl -> TypeDefGroup
-  -- TODO: translate EffectDecl -> TypeDefGroup (effect types)
+  let dataTypeDefs = map toKokaDataDecl (F.progData prog)
+      effectTypeDefs = map toKokaEffectDecl (F.progEffects prog)
   pure KC.Core
     { KC.coreProgName     = toKokaQName (F.progName prog)
     , KC.coreProgImports  = []
     , KC.coreProgFixDefs  = []
-    , KC.coreProgTypeDefs = []  -- TODO: translate data + effect declarations
+    , KC.coreProgTypeDefs = dataTypeDefs ++ effectTypeDefs
     , KC.coreProgDefs     = map KC.DefNonRec defs
     , KC.coreProgExternals = []
     , KC.coreProgDoc      = ""
@@ -221,6 +221,106 @@ toKokaBind b = do
     , KC.defNameRange = KR.rangeNull
     , KC.defDoc       = ""
     }
+
+-- ============================================================================
+-- DataDecl / EffectDecl translation
+-- ============================================================================
+
+-- | Translate a Frankenstein DataDecl to a Koka TypeDefGroup
+toKokaDataDecl :: F.DataDecl -> KC.TypeDefGroup
+toKokaDataDecl dd = KC.TypeDefGroup [KC.Data dataInfo]
+  where
+    name = toKokaQName (F.dataName dd)
+    params = map toKokaTypeVar (F.dataParams dd)
+    constrs = zipWith (toKokaConInfo name params) [0..] (F.dataCons dd)
+    kind = foldr (\tv k -> KK.kindFun (KT.typevarKind tv) k) KK.kindStar params
+    dataInfo = KT.DataInfo
+      { KT.dataInfoSort    = KS.Inductive
+      , KT.dataInfoName    = name
+      , KT.dataInfoKind    = kind
+      , KT.dataInfoParams  = params
+      , KT.dataInfoConstrs = constrs
+      , KT.dataInfoRange   = KR.rangeNull
+      , KT.dataInfoDef     = KS.DataDefNormal
+      , KT.dataInfoEffect  = KS.DataNoEffect
+      , KT.dataInfoIsRec   = False
+      , KT.dataInfoVis     = toKokaVisibility (F.dataVis dd)
+      , KT.dataInfoDoc     = ""
+      }
+
+-- | Translate a constructor declaration to Koka ConInfo
+toKokaConInfo :: KN.Name -> [KT.TypeVar] -> Int -> F.ConDecl -> KT.ConInfo
+toKokaConInfo typeName typeParams tag cd = KT.ConInfo
+  { KT.conInfoName       = toKokaQName (F.conName cd)
+  , KT.conInfoTypeName   = typeName
+  , KT.conInfoForalls    = []
+  , KT.conInfoExists     = []
+  , KT.conInfoParams     = [ (toKokaName n, toKokaTypeUnsafe ty) | (n, ty) <- F.conFields cd ]
+  , KT.conInfoType       = resultTy
+  , KT.conInfoTypeSort   = KS.Inductive
+  , KT.conInfoRange      = KR.rangeNull
+  , KT.conInfoParamRanges = replicate (length (F.conFields cd)) KR.rangeNull
+  , KT.conInfoParamVis   = replicate (length (F.conFields cd)) KS.Public
+  , KT.conInfoSingleton  = False
+  , KT.conInfoOrderedParams = []
+  , KT.conInfoValueRepr  = KS.valueReprZero
+  , KT.conInfoLazy       = Nothing
+  , KT.conInfoTag        = tag
+  , KT.conInfoVis        = toKokaVisibility (F.conVis cd)
+  , KT.conInfoDoc        = ""
+  }
+  where
+    -- Build the result type: TyCon applied to type params
+    baseTy = KT.TCon (KT.TypeCon typeName KK.kindStar)
+    resultTy = foldl (\t tv -> KT.TApp t [KT.TVar tv]) baseTy typeParams
+
+-- | Translate a Frankenstein EffectDecl to a Koka TypeDefGroup
+toKokaEffectDecl :: F.EffectDecl -> KC.TypeDefGroup
+toKokaEffectDecl ed = KC.TypeDefGroup [KC.Data dataInfo]
+  where
+    name = toKokaQName (F.effectName ed)
+    params = map toKokaTypeVar (F.effectParams ed)
+    -- Effect ops become constructors (Koka represents effects as data types)
+    constrs = zipWith (opToConInfo name params) [0..] (F.effectOps ed)
+    kind = foldr (\tv k -> KK.kindFun (KT.typevarKind tv) k) KK.kindEffect params
+    dataInfo = KT.DataInfo
+      { KT.dataInfoSort    = KS.Inductive
+      , KT.dataInfoName    = name
+      , KT.dataInfoKind    = kind
+      , KT.dataInfoParams  = params
+      , KT.dataInfoConstrs = constrs
+      , KT.dataInfoRange   = KR.rangeNull
+      , KT.dataInfoDef     = KS.DataDefNormal
+      , KT.dataInfoEffect  = KS.DataEffect { KS.dataEffectIsNamed = False, KS.dataEffectIsLinear = False }
+      , KT.dataInfoIsRec   = False
+      , KT.dataInfoVis     = KS.Public
+      , KT.dataInfoDoc     = ""
+      }
+
+-- | Translate an effect operation to a constructor-like ConInfo
+opToConInfo :: KN.Name -> [KT.TypeVar] -> Int -> F.OpDecl -> KT.ConInfo
+opToConInfo typeName typeParams tag op = KT.ConInfo
+  { KT.conInfoName       = toKokaQName (F.opName op)
+  , KT.conInfoTypeName   = typeName
+  , KT.conInfoForalls    = []
+  , KT.conInfoExists     = []
+  , KT.conInfoParams     = [(KN.nameNil, toKokaTypeUnsafe (F.opType op))]
+  , KT.conInfoType       = resultTy
+  , KT.conInfoTypeSort   = KS.Inductive
+  , KT.conInfoRange      = KR.rangeNull
+  , KT.conInfoParamRanges = [KR.rangeNull]
+  , KT.conInfoParamVis   = [KS.Public]
+  , KT.conInfoSingleton  = False
+  , KT.conInfoOrderedParams = []
+  , KT.conInfoValueRepr  = KS.valueReprZero
+  , KT.conInfoLazy       = Nothing
+  , KT.conInfoTag        = tag
+  , KT.conInfoVis        = KS.Public
+  , KT.conInfoDoc        = ""
+  }
+  where
+    baseTy = KT.TCon (KT.TypeCon typeName KK.kindEffect)
+    resultTy = foldl (\t tv -> KT.TApp t [KT.TVar tv]) baseTy typeParams
 
 -- ============================================================================
 -- Type translation

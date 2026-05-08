@@ -18,6 +18,29 @@ import sys
 
 SCF_IF_RE = re.compile(r'^(\s*)(%\w+)\s*=\s*scf\.if\s+%\w+\s*->\s*i64\s*\{')
 FUNC_RE = re.compile(r'^(\s*)func\.func\s+@\S+\(.*\)\s*->\s*i64\s*\{')
+TRUNCATED_SCF_RE = re.compile(r'^(\s*)scf\.\s*$')
+SSA_DEF_RE = re.compile(r'^\s*(%\w+)\s*=')
+
+
+def fix_truncated_scf(lines):
+    """Fix truncated 'scf.' lines (should be 'scf.yield %vN : i64')."""
+    fixes = 0
+    for i, line in enumerate(lines):
+        m = TRUNCATED_SCF_RE.match(line)
+        if not m:
+            continue
+        indent = m.group(1)
+        # Find the SSA value from the previous line
+        prev_var = None
+        for j in range(i - 1, max(i - 5, -1), -1):
+            pm = SSA_DEF_RE.match(lines[j])
+            if pm:
+                prev_var = pm.group(1)
+                break
+        if prev_var:
+            lines[i] = f'{indent}scf.yield {prev_var} : i64'
+            fixes += 1
+    return fixes
 
 
 def fix_missing_else(path):
@@ -130,7 +153,10 @@ def fix_missing_else(path):
 
         i = func_end + 1
 
-    if fixes or ret_fixes:
+    # Third pass: fix truncated 'scf.' lines
+    trunc_fixes = fix_truncated_scf(out)
+
+    if fixes or ret_fixes or trunc_fixes:
         with open(path, 'w') as f:
             f.write('\n'.join(out))
         parts = []
@@ -138,6 +164,8 @@ def fix_missing_else(path):
             parts.append(f"{fixes} scf.if block(s)")
         if ret_fixes:
             parts.append(f"{ret_fixes} func.return(s)")
+        if trunc_fixes:
+            parts.append(f"{trunc_fixes} truncated scf.yield(s)")
         print(f"fix-missing-else: {path}: fixed {', '.join(parts)}",
               file=sys.stderr)
 

@@ -142,9 +142,12 @@ int64_t c_nameToSsa(int64_t name) {
     return result;
 }
 
-/* Also override encodeChar to prevent any stale references */
+/* Also override encodeChar for defence in depth.
+ * The actual compiled symbol unique is ...48837 (confirmed by nm on
+ * MlirEmit_Emitter.o). This override ensures the deterministic C
+ * implementation is used even if sanitizeName is bypassed somehow. */
 int64_t c_encodeChar(int64_t cp)
-    __asm__("frankenstein_encodeCharzd6989586621679048835_u6989586621679048835");
+    __asm__("frankenstein_encodeCharzd6989586621679048837_u6989586621679048837");
 int64_t c_encodeChar(int64_t cp) {
     int elen;
     const char* enc = encode_char(cp, &elen);

@@ -41,7 +41,7 @@ def find_enclosing_func(lines, pos):
 
 def find_field_var_by_alias(lines, fld_line, func_start):
     """Strategy 1: find the correct field var from alias comments."""
-    start = max(func_start or 0, fld_line - 200)
+    start = func_start or 0  # search entire function (not just 200 lines)
     correct_var = None
     for j in range(start, fld_line):
         am = ALIAS_RE.search(lines[j])
@@ -64,7 +64,7 @@ def find_field_var_by_stage1(func_name, lines, fld_line, func_start,
         return None
 
     # Find the kk_field call at that index in stage2
-    start = max(func_start or 0, fld_line - 200)
+    start = func_start or 0  # search entire function (not just 200 lines)
     constants = {}
     last_match = None
     for j in range(start, fld_line):

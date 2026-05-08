@@ -121,6 +121,27 @@ int64_t c_sanitizeName(void) {
     return kk_thunk_create_forced(c);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Override: frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa      */
+/*                                                                      */
+/*  nameToSsa n = sanitizeName (nameText n) <> T.pack (show (nameUnique n))  */
+/*                                                                      */
+/*  The compiled version's alias-map lookup fails because T.pack/show   */
+/*  or <> produce inconsistent keys. This C version is deterministic:   */
+/*  field 0 = nameText, field 1 = nameUnique (raw int64, strict).      */
+/* ------------------------------------------------------------------ */
+int64_t c_nameToSsa(int64_t name)
+    __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa");
+int64_t c_nameToSsa(int64_t name) {
+    int64_t text   = kk_field(name, 0);  /* nameText   :: !Text */
+    int64_t unique = kk_field(name, 1);  /* nameUnique :: !Int  */
+
+    int64_t sanitized  = sanitize_name_c(text);
+    int64_t unique_str = kk_str_show_int(unique);
+    int64_t result     = kk_str_concat(sanitized, unique_str);
+    return result;
+}
+
 /* Also override encodeChar to prevent any stale references */
 int64_t c_encodeChar(int64_t cp)
     __asm__("frankenstein_encodeCharzd6989586621679048835_u6989586621679048835");

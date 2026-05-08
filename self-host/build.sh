@@ -434,6 +434,10 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
   # (sanitizeName corruption: 'fld' → 'f0d' causes @frankenstein_fld$0 external calls)
   python3 self-host/fix-fld-refs.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
 
+  # Step 2d¼: Fix all other $0() references (pattern vars + function PAPs)
+  # (compiled emitter corrupts Name objects, causing alias map lookup failures)
+  python3 self-host/fix-dollar0-refs.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
+
   # Step 2d½: Fix scf.if blocks that return values but are missing else branches
   # (the compiled emitter omits else for single-constructor pattern matches)
   python3 self-host/fix-missing-else.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"

@@ -112,6 +112,8 @@ clang -O2 -c -o "$OUT/shim_data_char.o" self-host/shim_data_char.c -I runtime/
 clang -O2 -c -o "$OUT/shim_ghc_list.o" self-host/shim_ghc_list.c -I runtime/
 # System.Directory / FilePath / Process / Text.Printf shims
 clang -O2 -c -o "$OUT/shim_system.o" self-host/shim_system.c -I runtime/
+# C sanitizeName override (fixes non-deterministic encodeChar corruption)
+clang -O2 -c -o "$OUT/A_sanitize_shim.o" self-host/A_sanitize_shim.c -I runtime/
 echo "Driver + shims compiled."
 
 echo ""
@@ -131,8 +133,9 @@ echo "Post-link unresolved: $POSTLINK (Frankenstein: $FRKN_RESOLVED)"
 
 echo ""
 echo "=== Phase 5b: Link self-hosted compiler ==="
-# Same objects but with driver.o instead of main.o
-COMPILER_OBJS=$(ls "$OUT"/*.o | grep -v main.o)
+# Same objects but with driver.o instead of main.o, and exclude example
+# binaries (they each define their own main symbol).
+COMPILER_OBJS=$(ls "$OUT"/*.o | grep -v main.o | grep -v '\-self-ir\.o' | grep -v 'factorial-self-ir\.o')
 clang -O2 -o self-host/frankenstein-self-compiler $COMPILER_OBJS -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files \
   -Wl,--allow-multiple-definition

@@ -810,6 +810,12 @@ builtinWrapperSpec name = case name of
   -- Unary
   "negate" -> Just ("__kk_builtin_negate", 1,
     T.unlines ["    %zero = arith.constant 0 : i64", "    %r = arith.subi %zero, %arg0 : i64", "    func.return %r : i64"])
+  "abs" -> Just ("__kk_builtin_abs", 1,
+    T.unlines [ "    %c63 = arith.constant 63 : i64"
+              , "    %sign = arith.shrsi %arg0, %c63 : i64"
+              , "    %xored = arith.xori %arg0, %sign : i64"
+              , "    %r = arith.subi %xored, %sign : i64"
+              , "    func.return %r : i64" ])
   -- tagToEnum# is identity (Bool 0/1 = Int 0/1)
   "tagToEnum#" -> Just ("__kk_builtin_tagToEnum", 1,
     "    func.return %arg0 : i64")
@@ -1068,6 +1074,11 @@ emitExpr (EApp (ECon qn) args) = do
   pure (allOps ++ allocOps ++ concat setOps ++ cycleOp, ptrName)
 
 -- All EApp (EVar fn) patterns: intrinsics + general function call
+-- Builtin operator used as first-class value: EApp (EVar "+") [] comes from
+-- GHC's normalizeGhcBuiltin producing a bare operator name with no args.
+-- Redirect to the EVar handler which has builtinWrapperSpec.
+emitExpr (EApp (EVar fn) [])
+  | Just _ <- builtinWrapperSpec (nameText fn) = emitExpr (EVar fn)
 emitExpr (EApp (EVar fn) args) = emitAppVar fn args
 -- Application of a non-var, non-con expression (e.g. the result of a
 -- closure allocation or a let-bound closure value). The function value
@@ -1242,6 +1253,27 @@ emitExpr (EHandle effRow handler body) = do
 -- Handles intrinsic dispatch (arithmetic, comparisons, string ops, IO)
 -- and general function calls (top-level, closure-indirect, promoted).
 emitAppVar :: Name -> [Expr] -> Emit ([Text], Text)
+-- Dict-passing binary ops: (op dict a b) → strip dict, call 2-arg builtin.
+-- At --no-simplify, GHC keeps typeclass dictionaries as explicit arguments,
+-- so operators like (==) arrive with 3 args instead of 2.
+emitAppVar fn [_dict, a, b]
+  | n `elem` ["==", "eq"]   = emitCmpOp "eq" a b
+  | n `elem` ["/=", "ne"]   = emitCmpOp "ne" a b
+  | n `elem` ["<", "lt"]    = emitCmpOp "slt" a b
+  | n `elem` [">", "gt"]    = emitCmpOp "sgt" a b
+  | n `elem` ["<=", "le"]   = emitCmpOp "sle" a b
+  | n `elem` [">=", "ge"]   = emitCmpOp "sge" a b
+  | n `elem` ["+", "add"]   = emitBinOp "arith.addi" "i64" a b
+  | n `elem` ["-", "sub"]   = emitBinOp "arith.subi" "i64" a b
+  | n `elem` ["*", "mul"]   = emitBinOp "arith.muli" "i64" a b
+  | n `elem` ["/", "div"]   = emitBinOp "arith.divsi" "i64" a b
+  | n `elem` ["mod"]        = emitBinOp "arith.remsi" "i64" a b
+  where n = nameText fn
+-- Dict-passing unary ops: (op dict a) → strip dict, recurse as 1-arg.
+emitAppVar fn [_dict, a]
+  | n == "abs"    = emitAppVar fn [a]
+  | n == "negate" = emitAppVar fn [a]
+  where n = nameText fn
 -- Float binary ops
 emitAppVar fn [a, b]
   | nameText fn == "+f" || nameText fn == "addf" = emitBinOp "arith.addf" "f64" a b
@@ -1894,7 +1926,13 @@ emitLambdaLift params body = do
       -- Deduplicate extra captures (SSA keys for promoted fn capture deps)
       extraCapsUniq = Set.toList (Set.fromList extraCaps)
       nCaptured = length captured + length extraCapsUniq
-  liftedName <- freshName (modPfx <> "lambda")
+  curDef <- gets esCurDef
+  -- Use curDef (the current top-level definition's fully-qualified name) as
+  -- prefix for lifted lambdas.  This avoids cross-module symbol collisions:
+  -- different modules compiled separately share the same esModulePrefix and
+  -- counter range, so plain "frankenstein_lambda<N>" names collide at link time.
+  let lambdaPfx = if T.null curDef then modPfx <> "lambda" else curDef <> "_lambda"
+  liftedName <- freshName lambdaPfx
   -- Allocate fresh SSA param names (closure + regular params).
   closFresh <- freshName "clos"
   paramFresh <- mapM (\_ -> freshName "p") params

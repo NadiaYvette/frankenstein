@@ -277,7 +277,7 @@ stripTrivialCol _ r@(Row [] _ _) = r
 -- | Distinct constructor heads in column 0, in first-appearance order.
 -- Returns @(qname, arity)@ pairs.
 distinctHeadCtors :: [Row] -> [(QName, Int)]
-distinctHeadCtors = go []
+distinctHeadCtors rows = go [] rows
   where
     go acc [] = reverse acc
     go acc (Row (PatCon qn subs : _) _ _ : rest) =

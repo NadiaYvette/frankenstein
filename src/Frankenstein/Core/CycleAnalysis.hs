@@ -77,7 +77,7 @@ analyzeDef def =
 --   EApp (EVar defName) args  -- this is a function CALL, not a data cycle
 --   ELam ... (EVar defName)   -- this is a closure capturing defName (function, not data)
 findSelfRefsInData :: Text -> Expr -> Set Text
-findSelfRefsInData defName = go
+findSelfRefsInData defName expr = go expr
   where
     go (EVar _)         = Set.empty
     go (ELit _)         = Set.empty

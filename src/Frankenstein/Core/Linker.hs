@@ -364,7 +364,7 @@ resolveQName homeMod table qn =
 -- constructors, and returns (rewritten expr, warnings, errors).
 rewriteExpr :: Text -> Text -> SymbolTable -> SymbolTable -> Expr
             -> (Expr, [Text], [LinkError])
-rewriteExpr homeMod selfName symTab conTab = go Set.empty
+rewriteExpr homeMod selfName symTab conTab expr0 = go Set.empty expr0
   where
     -- 'locals' tracks names bound by lambda/let/case that should NOT
     -- be rewritten (they shadow top-level definitions).
@@ -624,7 +624,7 @@ detectUndefinedSymbols prog =
 
 -- | Collect all unqualified variable names referenced in an expression.
 collectVarNames :: Expr -> [Text]
-collectVarNames = go
+collectVarNames expr = go expr
   where
     go (EVar n) = [nameText n]
     go (ELit _) = []
@@ -667,7 +667,7 @@ collectVarNames = go
 
 -- | Collect all qualified constructor names referenced in an expression.
 collectConQNames :: Expr -> [(Text, Text)]
-collectConQNames = go
+collectConQNames expr = go expr
   where
     go (ECon qn) = [(qnameModule qn, nameText (qnameName qn))]
     go (EVar _) = []
@@ -736,7 +736,7 @@ isAnyType _ = False
 
 -- | Collect all (function-name, arg-count) pairs from EApp (EVar _) sites.
 collectAppArities :: Expr -> [(Text, Int)]
-collectAppArities = go
+collectAppArities expr = go expr
   where
     go (EApp (EVar n) args) = (nameText n, length args) : concatMap go args
     go (EApp f args) = go f ++ concatMap go args
@@ -787,7 +787,7 @@ detectDuplicateExports prog =
 
 -- | Remove duplicate Text values, preserving order.
 nubTexts :: [Text] -> [Text]
-nubTexts = go Set.empty
+nubTexts xs = go Set.empty xs
   where
     go _ [] = []
     go seen (x:xs)

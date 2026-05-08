@@ -434,6 +434,10 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
   # (sanitizeName corruption: 'fld' → 'f0d' causes @frankenstein_fld$0 external calls)
   python3 self-host/fix-fld-refs.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
 
+  # Step 2d½: Fix scf.if blocks that return values but are missing else branches
+  # (the compiled emitter omits else for single-constructor pattern matches)
+  python3 self-host/fix-missing-else.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
+
   # Step 2e: Fix func.call arity mismatches caused by the self-hosted emitter's
   # ConCase default-branch duplication bug (captures computed in wrong scope)
   python3 self-host/fix-mlir-arity.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
@@ -487,7 +491,7 @@ if [ "$S2_OK" -gt 0 ]; then
     echo -n "  $example.hs (stage2): "
     # Host compiler → OrganIR → stage 2 compiler → MLIR
     if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \
-         | ./self-host/frankenstein-self-compiler-stage2 - -o "$STAGE2/$example-self.mlir" 2>/dev/null; then
+         | timeout 30 ./self-host/frankenstein-self-compiler-stage2 - -o "$STAGE2/$example-self.mlir" 2>/dev/null; then
       echo "FAIL (stage2 compiler)"
       S2E_FAIL=$((S2E_FAIL + 1))
       continue

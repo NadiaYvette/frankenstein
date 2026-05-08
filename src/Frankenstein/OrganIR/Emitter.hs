@@ -123,7 +123,7 @@ emitType = \case
 
 -- | Collect a left-nested TApp spine into (base, [args]).
 collectTApp :: C.Type -> (C.Type, [C.Type])
-collectTApp = go []
+collectTApp ty = go [] ty
   where
     go acc (C.TApp f a) = go (a : acc) f
     go acc t            = (t, acc)

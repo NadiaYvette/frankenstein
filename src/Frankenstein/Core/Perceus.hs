@@ -306,7 +306,7 @@ patternVars (PatLit _)      = []
 -- For App/Let/Handle/Reuse: sum (each use is a separate reference).
 -- For Case: scrutinee count + max over branches (only one branch executes).
 analyzeUsage :: Expr -> Map Name Int
-analyzeUsage = go
+analyzeUsage expr = go expr
   where
     go (EVar n)         = Map.singleton n 1
     go (ELit _)         = Map.empty

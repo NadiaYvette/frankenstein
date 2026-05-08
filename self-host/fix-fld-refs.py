@@ -176,7 +176,7 @@ def fix_fld_refs(lines, obj_dir):
             if i + 1 < len(lines):
                 yield_re = re.compile(
                     r'(\s*)scf\.yield\s+' +
-                    re.escape(fld_result_var) + r'\s*:\s*i64')
+                    re.escape(fld_result_var) + r'(?:\s*:\s*i64)?')
                 ym = yield_re.search(lines[i + 1])
                 if ym:
                     new_lines.append(
@@ -254,6 +254,32 @@ def main():
         print(f"  Fixed {n_changes} @frankenstein_fld$0 references"
               + (f" ({remaining} remaining)" if remaining else ""),
               file=sys.stderr)
+
+    # Fix truncated 'func.return %' lines (missing SSA name).
+    # The compiled emitter sometimes produces 'func.return %' instead of
+    # 'func.return %vN : i64'.  Look for the preceding scf.if result var.
+    trunc_fixes = 0
+    out_lines = []
+    for line in fixed_lines:
+        m = re.match(r'^(\s*)func\.return\s+%\s*$', line)
+        if m:
+            indent = m.group(1)
+            # Walk backwards to find the scf.if result variable
+            for prev in reversed(out_lines):
+                pm = re.match(r'\s*(%\w+)\s*=\s*scf\.if\b', prev)
+                if pm:
+                    out_lines.append(
+                        f'{indent}func.return {pm.group(1)} : i64')
+                    trunc_fixes += 1
+                    break
+            else:
+                out_lines.append(line)
+        else:
+            out_lines.append(line)
+    if trunc_fixes:
+        print(f"  Fixed {trunc_fixes} truncated func.return line(s)",
+              file=sys.stderr)
+        fixed_lines = out_lines
 
     with open(path, 'w') as f:
         f.write('\n'.join(fixed_lines))

@@ -873,7 +873,7 @@ parseBbHeader line =
 
 -- | Collect lines inside a { ... } block until closing }
 collectBlockBody :: [Text] -> ([Text], [Text])
-collectBlockBody = go []
+collectBlockBody lines = go [] lines
   where
     go acc [] = (reverse acc, [])
     go acc (l:rest)

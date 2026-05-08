@@ -120,7 +120,7 @@ rewriteExternRefs externMap d =
   d { F.defExpr = rewriteExternExpr externMap (F.defExpr d) }
 
 rewriteExternExpr :: Map Text Text -> F.Expr -> F.Expr
-rewriteExternExpr m = go
+rewriteExternExpr m expr = go expr
   where
     go (F.EVar n) = case Map.lookup (F.nameText n) m of
       Just cName -> F.EVar (n { F.nameText = cName })
@@ -336,9 +336,8 @@ translateType = \case
     -- Multi-arg TApp: fold left
     t1' <- translateType t1
     t2' <- translateType t2
-    foldlM (\acc ty -> do
-      ty' <- translateType ty
-      pure $ F.TApp acc ty') (F.TApp t1' t2') rest
+    rest' <- mapM translateType rest
+    pure (foldl F.TApp (F.TApp t1' t2') rest')
 
   KT.TApp t1 [] ->
     translateType t1
@@ -620,7 +619,3 @@ translateBuiltinApp kn args = do
       args' <- mapM translateExpr args
       pure $ F.EApp (F.EVar (translateNameK kn)) args'
 
--- | foldlM implementation
-foldlM :: Monad m => (a -> b -> m a) -> a -> [b] -> m a
-foldlM _ acc []     = pure acc
-foldlM f acc (x:xs) = do acc' <- f acc x; foldlM f acc' xs

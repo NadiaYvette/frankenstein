@@ -69,7 +69,7 @@ collectReferencedCtors prog =
 -- expression — both as 'ECon' / 'EApp (ECon _) _' and inside
 -- 'PatCon' patterns.
 ctorsInExpr :: Expr -> Set Text
-ctorsInExpr = go
+ctorsInExpr expr = go expr
   where
     go (ECon qn)           = Set.singleton (conKey qn)
     go (EVar _)            = Set.empty

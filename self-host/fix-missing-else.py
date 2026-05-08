@@ -79,38 +79,56 @@ def fix_missing_else(path):
         fixes += 1
 
     # Second pass: fix functions missing func.return after scf.if -> i64.
-    # Pattern: func.func ... -> i64 { ... %r = scf.if ... -> i64 { ... } } (no func.return)
+    # Walk through func.func -> i64 blocks and check if func.return is present.
     ret_fixes = 0
-    out = []
-    for i, line in enumerate(lines):
-        out.append(line)
-        # Check: is this a lone `}` closing a func.func, and is the previous
-        # non-empty/non-comment line a `}` closing an scf.if?
-        stripped = line.strip()
-        if stripped == '}':
-            # Walk back to find the nearest scf.if result variable
-            # The pattern is:  }  (closing scf.if else)  then  }  (closing func.func)
-            prev_idx = len(out) - 2  # line before this }
-            while prev_idx >= 0 and (not out[prev_idx].strip()
-                                     or out[prev_idx].strip().startswith('//')):
-                prev_idx -= 1
-            if prev_idx >= 0 and out[prev_idx].strip() == '}':
-                # The line before this } is another }. Check if it's closing an scf.if.
-                # Walk backwards to find the matching scf.if
-                for j in range(prev_idx - 1, max(prev_idx - 500, -1), -1):
-                    sm = SCF_IF_RE.match(out[j])
-                    if sm:
-                        result_var = sm.group(2)
-                        func_indent = sm.group(1)
-                        # Insert func.return before the func closing }
-                        out.pop()  # remove the func closing }
-                        out.append(f'{func_indent}func.return {result_var} : i64')
-                        out.append(line)  # re-add the func closing }
-                        ret_fixes += 1
+    out = lines[:]
+    i = 0
+    while i < len(out):
+        fm = FUNC_RE.match(out[i])
+        if not fm:
+            i += 1
+            continue
+
+        func_indent = fm.group(1)
+        func_start = i
+
+        # Find the closing } of this function by brace-matching
+        depth = 0
+        func_end = None
+        for j in range(i, len(out)):
+            for ch in out[j]:
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        func_end = j
                         break
-                    fm = FUNC_RE.match(out[j])
-                    if fm:
-                        break  # reached the func start, no scf.if found
+            if func_end is not None:
+                break
+
+        if func_end is None:
+            i += 1
+            continue
+
+        # Check if there's a func.return in this function body
+        has_return = False
+        last_scf_if_var = None
+        for j in range(func_start + 1, func_end):
+            if 'func.return' in out[j]:
+                has_return = True
+                break
+            sm = SCF_IF_RE.match(out[j])
+            if sm:
+                last_scf_if_var = sm.group(2)
+
+        if not has_return and last_scf_if_var:
+            # Insert func.return before the closing }
+            ret_line = f'{func_indent}  func.return {last_scf_if_var} : i64'
+            out.insert(func_end, ret_line)
+            ret_fixes += 1
+
+        i = func_end + 1
 
     if fixes or ret_fixes:
         with open(path, 'w') as f:

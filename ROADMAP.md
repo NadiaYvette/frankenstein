@@ -607,12 +607,16 @@ Post-processing pipeline for stage 2 MLIR:
 1. `fix-captures.py` — fix escaped SSA references from lambda-lifting
 2. `fix-intra-module-calls.py` — fix cross-part function call mismatches
 3. `fix-fld-refs.py` — fix corrupted `fld` pattern variable names from
-   `sanitizeName` non-determinism (looks up correct field index from stage 1)
-4. `fix-mlir-arity.py` — pad/trim arity mismatches from capture errors
-5. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
+   `sanitizeName` non-determinism (full function body search window)
+4. `fix-dollar0-refs.py` — fix all other `$0()` pattern variable references
+   (trailing unique match) and function-as-value references (PAP closure
+   construction with correct arity detection)
+5. `fix-missing-else.py` — add missing else branches to scf.if blocks
+6. `fix-mlir-arity.py` — pad/trim arity mismatches from capture errors
+7. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
 
-Two modules (GhcBridge/Driver, MlirEmit/Emitter) fall back to stage 1 `.o`
-files due to partial-application runtime crashes in the stage 1 compiler.
+Two modules (MlirEmit/Emitter, KokaBridge/Driver) fall back to stage 1 `.o`
+files due to split-compile crashes (missing symbols for cross-part references).
 
 ### 9b. Stage 2 Linking ✓
 
@@ -629,17 +633,17 @@ producing identical outputs to the host compiler and stage 1.
 ### Outstanding Stage 2 Issues
 
 - **MLIR divergence**: 0/23 modules produce identical MLIR between stage 1
-  and stage 2 (expected — `sanitizeName` corruption, different SSA numbering)
-- **`sanitizeName` corruption**: Root cause unfixed — `T.concatMap encodeChar`
-  in the self-hosted binary non-deterministically corrupts characters. The
-  `fix-fld-refs.py` workaround is effective but the underlying bug in the
-  runtime's text processing (likely closure dispatch or UTF-8 iteration)
-  remains undiagnosed.
-- **Partial-application crashes**: 2 modules crash the stage 1 compiler
-  when it encounters undersaturated function calls (`compileToCoreWith`,
-  `addLiftedFnOnce`, `isRecLetLambda`, `emitBindAsTopFn`). The Linker.hs
-  arity check now correctly suppresses false-positive warnings, but the
-  emitter still generates bad MLIR for partial applications passed to HOFs.
+  and stage 2 — structural differences from `sanitizeName` corruption,
+  missing Perceus RC ops, different SSA numbering, and pattern binder Name
+  corruption (wrong `nameText` with correct `nameUnique`).
+- **`sanitizeName` corruption**: Root cause: `T.concatMap encodeChar` in
+  the self-hosted binary non-deterministically corrupts characters (closure
+  dispatch or UTF-8 iteration). Workarounds: C shims for `sanitizeName`,
+  `nameToSsa`, `encodeChar` in `A_sanitize_shim.c`, plus `fix-fld-refs.py`
+  and `fix-dollar0-refs.py` for residual `$0()` references.
+- **Split-compile fallbacks**: 2 modules (MlirEmit/Emitter, KokaBridge/Driver)
+  crash the stage 1 compiler during split-part compilation (missing symbols
+  `Text.Printf/printf`, `Type.Type/typevarKind`). Fall back to stage 1 `.o`.
 - **Oversaturation**: `findSelfRefsInData` called with 2 args but defined
   with 1 — a genuine bug in how the self-hosted emitter handles certain
   call sites.

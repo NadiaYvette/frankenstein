@@ -779,8 +779,13 @@ int64_t text_concat_1(int64_t list) { return text_concat(list); }
 /* concatMap :: (Char -> Text) -> Text -> Text */
 static int64_t text_concatMap(int64_t f, int64_t s) {
     int64_t len;
-    const char* buf = text_borrow(s, &len);
+    const char* borrowed = text_borrow(s, &len);
     if (len == 0) return kk_string_empty();
+    /* Copy bytes into a local buffer so that call_closure_1 / kk_str_concat
+     * cannot invalidate our pointer (use-after-free from RC drops).         */
+    char* buf = (char*)malloc((size_t)len);
+    if (!buf) return kk_string_empty();
+    memcpy(buf, borrowed, (size_t)len);
     int64_t result = kk_string_empty();
     int64_t i = 0;
     while (i < len) {
@@ -791,6 +796,7 @@ static int64_t text_concatMap(int64_t f, int64_t s) {
         int64_t piece = call_closure_1(f, cp);
         result = kk_str_concat(result, piece);
     }
+    free(buf);
     return result;
 }
 

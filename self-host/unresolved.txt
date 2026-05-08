@@ -28,10 +28,6 @@
                  U Core_Core_coreProgExternals$1
                  U Core_Core_coreProgName$1
                  U Core_Core_coreProgTypeDefs$1
-                 U Core_Core_defExpr$1
-                 U Core_Core_defName$1
-                 U Core_Core_defSort$1
-                 U Core_Core_defType$1
                  U Core_Core_defVis$1
                  U Core_Core_exprTrue$0
                  U Core_Core_externalFormat$1
@@ -97,6 +93,7 @@
                  U Data_Text_intercalate$1
                  U Data_Text_intercalate$2
                  U Data_Text_Internal_empty$0
+                 U Data_Text_Internal_IO_hPutStrLn$1
                  U Data_Text_Internal_pack$0
                  U Data_Text_Internal_pack$1
                  U Data_Text_IO_readFile$1
@@ -130,86 +127,6 @@
                  U Data_Text_uncons$1
                  U Data_Text_unlines$0
                  U Data_Text_unlines$1
-                 U Frankenstein_Core_ConTags_abs$0
-                 U Frankenstein_Core_ConTags_assignProgramTags$1
-                 U Frankenstein_Core_ConTags_conKey$1
-                 U Frankenstein_Core_ConTags_mod$0
-                 U Frankenstein_Core_EffectOpt_isAbortHandler$1
-                 U Frankenstein_Core_FlattenPatterns_zeze$0
-                 U Frankenstein_Core_Perceus_zp$0
-                 U Frankenstein_Core_Types_bindExpr$0
-                 U Frankenstein_Core_Types_bindExpr$1
-                 U Frankenstein_Core_Types_bindName$1
-                 U Frankenstein_Core_Types_bindSort$1
-                 U Frankenstein_Core_Types_bindType$1
-                 U Frankenstein_Core_Types_branchBody$0
-                 U Frankenstein_Core_Types_branchBody$1
-                 U Frankenstein_Core_Types_branchGuard$1
-                 U Frankenstein_Core_Types_branchPattern$0
-                 U Frankenstein_Core_Types_branchPattern$1
-                 U Frankenstein_Core_Types_conFields$1
-                 U Frankenstein_Core_Types_conName$1
-                 U Frankenstein_Core_Types_dataCons$1
-                 U Frankenstein_Core_Types_dataName$1
-                 U Frankenstein_Core_Types_dataParams$1
-                 U Frankenstein_Core_Types_defExpr$0
-                 U Frankenstein_Core_Types_defExpr$1
-                 U Frankenstein_Core_Types_defName$1
-                 U Frankenstein_Core_Types_defSort$1
-                 U Frankenstein_Core_Types_defType$1
-                 U Frankenstein_Core_Types_defVisibility$1
-                 U Frankenstein_Core_Types_effectName$1
-                 U Frankenstein_Core_Types_effectOps$1
-                 U Frankenstein_Core_Types_nameText$1
-                 U Frankenstein_Core_Types_nameUnique$1
-                 U Frankenstein_Core_Types_opName$1
-                 U Frankenstein_Core_Types_progData$0
-                 U Frankenstein_Core_Types_progData$1
-                 U Frankenstein_Core_Types_progDefs$1
-                 U Frankenstein_Core_Types_progEffects$0
-                 U Frankenstein_Core_Types_progEffects$1
-                 U Frankenstein_Core_Types_progName$0
-                 U Frankenstein_Core_Types_progName$1
-                 U Frankenstein_Core_Types_qnameModule$1
-                 U Frankenstein_Core_Types_qnameName$1
-                 U Frankenstein_Core_Types_tcKind$1
-                 U Frankenstein_Core_Types_tcName$1
-                 U Frankenstein_Core_Types_tvKind$1
-                 U Frankenstein_Core_Types_tvName$1
-                 U Frankenstein_GhcBridge_CoreTranslate_translateProgram$3
-                 U Frankenstein_KokaBridge_CoreTranslate_translateProgram$0
-                 U Frankenstein_KokaBridge_CoreTranslate_translateProgram$1
-                 U Frankenstein_MercuryBridge_HldsParse_hldsModule$1
-                 U Frankenstein_MercuryBridge_HldsParse_hldsPreds$1
-                 U Frankenstein_MercuryBridge_HldsParse_hldsTypes$1
-                 U Frankenstein_MercuryBridge_HldsParse_predArgNames$1
-                 U Frankenstein_MercuryBridge_HldsParse_predDet$1
-                 U Frankenstein_MercuryBridge_HldsParse_predGoal$1
-                 U Frankenstein_MercuryBridge_HldsParse_predModes$1
-                 U Frankenstein_MercuryBridge_HldsParse_predName$1
-                 U Frankenstein_MercuryBridge_HldsParse_typeDeclCtors$1
-                 U Frankenstein_MercuryBridge_HldsParse_typeDeclName$1
-                 U Frankenstein_MercuryBridge_HldsParse_typeDeclParams$1
-                 U Frankenstein_MercuryBridge_HldsParse_zeze$0
-                 U Frankenstein_MlirEmit_Dialects_renderOp$1
-                 U Frankenstein_MlirEmit_Emitter_zeze$0
-                 U Frankenstein_MlirEmit_Emitter_zeze$3
-                 U Frankenstein_RustBridge_MirParse_bbIndex$1
-                 U Frankenstein_RustBridge_MirParse_bbStatements$1
-                 U Frankenstein_RustBridge_MirParse_bbTerminator$1
-                 U Frankenstein_RustBridge_MirParse_localIndex$1
-                 U Frankenstein_RustBridge_MirParse_localType$1
-                 U Frankenstein_RustBridge_MirParse_mirArgCount$1
-                 U Frankenstein_RustBridge_MirParse_mirBlocks$1
-                 U Frankenstein_RustBridge_MirParse_mirBodies$1
-                 U Frankenstein_RustBridge_MirParse_mirLocals$1
-                 U Frankenstein_RustBridge_MirParse_mirName$1
-                 U Frankenstein_RustBridge_MirParse_parseOperand$1
-                 U Frankenstein_RustBridge_MirParse_parseStmt$1
-                 U Frankenstein_RustBridge_MirParse_parseTerminator$1
-                 U Frankenstein_RustBridge_MirParse_switchBlock$1
-                 U Frankenstein_RustBridge_MirParse_switchVal$1
-                 U Frankenstein_RustBridge_MirParse_zeze$0
                  U fseek
                  U ftell
                  U getc
@@ -217,6 +134,7 @@
                  U GHC_Core_DataCon_dataConName$1
                  U GHC_Core_DataCon_dataConOrigArgTys$1
                  U GHC_Core_DataCon_dataConTyCon$1
+                 U GHC_Core_DataCon_isUnboxedTupleDataCon$1
                  U GHC_Core_TyCon_isAlgTyCon$0
                  U GHC_Core_TyCon_tyConDataCons$1
                  U GHC_Core_TyCon_tyConName$1
@@ -227,9 +145,6 @@
                  U GHC_dm_core_module$1
                  U GHC_Driver_DynFlags_gopt_set$0
                  U GHC_Driver_DynFlags_gopt_unset$2
-                 U GHC_Driver_DynFlags_importPaths$1
-                 U GHC_Driver_DynFlags_packageDBFlags$1
-                 U GHC_Driver_DynFlags_packageFlags$1
                  U GHC_Driver_DynFlags_xopt_set$0
                  U GHC_Driver_Main_hscSimplify$3
                  U GHC_Driver_Make_load$1
@@ -287,6 +202,7 @@
                  U GHC_Internal_Data_Foldable_foldr$3
                  U GHC_Internal_Data_Foldable_forM_$1
                  U GHC_Internal_Data_Foldable_length$1
+                 U GHC_Internal_Data_Foldable_mapM_$2
                  U GHC_Internal_Data_Foldable_notElem$2
                  U GHC_Internal_Data_Foldable_null$1
                  U GHC_Internal_Data_Foldable_sum$0
@@ -314,6 +230,7 @@
                  U GHC_Internal_IO_catch$2
                  U GHC_Internal_IORef_newIORef$1
                  U GHC_Internal_IORef_readIORef$1
+                 U GHC_Internal_IO_StdHandles_stderr$0
                  U GHC_Internal_List_drop$2
                  U GHC_Internal_List_dropWhile$1
                  U GHC_Internal_List_dropWhile$2
@@ -370,9 +287,9 @@
                  U GHC_Types_Id_isDeadBinder$1
                  U GHC_Types_Name_getOccString$1
                  U GHC_Types_Name_nameModule_maybe$1
-                 U GHC_Types_Name_nameUnique$1
                  U GHC_Types_Unique_getKey$1
                  U GHC_Types_Var_binderVar$1
+                 U GHC_Types_Var_idDetails$1
                  U GHC_Types_Var_isInvisibleFunArg$1
                  U GHC_Types_Var_isTyVar$0
                  U GHC_Types_Var_isTyVar$1
@@ -398,28 +315,6 @@
                  U Language_Haskell_Syntax_Basic_field_label$1
                  U Language_Haskell_Syntax_Module_Name_moduleNameString$1
                  U longjmp
-                 U OrganIR_Parse_parseOrganIR$1
-                 U OrganIR_Types_conFields$1
-                 U OrganIR_Types_conName$1
-                 U OrganIR_Types_defExpr$1
-                 U OrganIR_Types_defName$1
-                 U OrganIR_Types_defSort$1
-                 U OrganIR_Types_defType$1
-                 U OrganIR_Types_defVisibility$1
-                 U OrganIR_Types_dtConstructors$1
-                 U OrganIR_Types_dtName$1
-                 U OrganIR_Types_dtTypeParams$1
-                 U OrganIR_Types_edName$1
-                 U OrganIR_Types_edOperations$1
-                 U OrganIR_Types_edTypeParams$1
-                 U OrganIR_Types_irModule$1
-                 U OrganIR_Types_modDataTypes$1
-                 U OrganIR_Types_modDefs$1
-                 U OrganIR_Types_modEffectDecls$1
-                 U OrganIR_Types_modName$1
-                 U OrganIR_Types_opName$1
-                 U OrganIR_Types_opType$1
-                 U OrganIR_Types_qnModule$1
                  U putc
                  U rewind
                  U _setjmp
@@ -465,4 +360,3 @@
                  U Type_Type_typeUnit$0
                  U Type_Type_typevarId$1
                  U Type_Type_typevarKind$1
-                 U _ze$0

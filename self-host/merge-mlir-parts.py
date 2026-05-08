@@ -21,6 +21,9 @@ def merge_mlir(part_files, output_file):
     string_globals = []
     bodies = []
 
+    seen_funcs = set()
+    skip_depth = 0  # >0 means we're inside a duplicate func body
+
     for part_idx, part_file in enumerate(part_files):
         with open(part_file) as f:
             content = f.read()
@@ -68,6 +71,14 @@ def merge_mlir(part_files, output_file):
             stripped = line.strip()
 
             if stripped == '' or stripped.startswith('//'):
+                if skip_depth == 0:
+                    continue
+                else:
+                    continue
+
+            # Track brace depth when skipping a duplicate function
+            if skip_depth > 0:
+                skip_depth += stripped.count('{') - stripped.count('}')
                 continue
 
             if stripped.startswith('llvm.func @') or 'func.func private @' in stripped:
@@ -85,6 +96,16 @@ def merge_mlir(part_files, output_file):
             if 'llvm.mlir.global' in stripped and '@str_' in stripped:
                 string_globals.append(line)
                 continue
+
+            # Deduplicate func.func definitions across parts
+            m = re.match(r'\s*func\.func\s+@([A-Za-z0-9_./$]+)\s*\(', line)
+            if m:
+                fname = m.group(1)
+                if fname in seen_funcs:
+                    # Skip this entire function — count braces
+                    skip_depth = stripped.count('{') - stripped.count('}')
+                    continue
+                seen_funcs.add(fname)
 
             bodies.append(line)
 

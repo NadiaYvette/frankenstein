@@ -718,7 +718,7 @@ detectArityMismatches prog =
         | d <- progDefs prog
         , (name, callArity) <- checkDef d
         , Just defArity <- [Map.lookup name arityMap]
-        , callArity /= defArity
+        , callArity > defArity  -- only flag oversaturation; undersaturation is valid partial application
         ]
 
   in nubTexts mismatches

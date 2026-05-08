@@ -320,36 +320,48 @@ for src in "${MODULES[@]}"; do
   python3 self-host/fix-bool-patterns.py "$STAGE2/$flat.organ.json"
 
   # Step 2: Stage 1 self-hosted compiler → MLIR
-  # Large modules (MlirEmit_Emitter) are split into parts to keep each
-  # part's largest definition under ~400KB for the stage1 compiler.
-  # After the emitExpr refactoring (split into emitAppVar/emitLambdaLift/
-  # emitCaseDispatch/emitLetBindings), the module has 89 defs.
-  if [ "$flat" = "MlirEmit_Emitter" ]; then
-    # Split compilation: partition defs into 10 groups, compile each, merge MLIR
-    # Each part ≤200KB (except emitAppVar at 366KB which gets its own part).
-    # The stage1 compiler has super-linear scaling with multiple definitions,
-    # so smaller parts compile much faster (0.8s for 173KB vs >5min for 720KB).
+  # The self-hosted JSON parser has super-linear scaling, so large modules
+  # (>1MB OrganIR JSON) are automatically split into parts of ~40 defs each,
+  # compiled separately, and merged.
+  _json_size=$(stat -c%s "$STAGE2/$flat.organ.json")
+  if [ "$_json_size" -gt 1000000 ]; then
+    # Auto-split: determine number of parts from definition count
+    _nparts=$(python3 -c "
+import json, sys
+sys.setrecursionlimit(10000)
+with open('$STAGE2/$flat.organ.json') as f:
+    data = json.load(f)
+ndefs = len(data['module']['definitions'])
+# ~40 defs per part, minimum 2 parts
+nparts = max(2, (ndefs + 39) // 40)
+print(nparts)
+")
     _split_ok=true
-    for _pidx in 0 1 2 3 4 5 6 7 8 9; do
-      case $_pidx in
-        0) _start=0;  _end=38 ;;   # record selectors + small helpers (168KB)
-        1) _start=38; _end=54 ;;   # classifyBranches..lookupType (183KB)
-        2) _start=54; _end=64 ;;   # precomputeCaptures..emitConCase (144KB)
-        3) _start=64; _end=68 ;;   # emitLambdaLift..emitCaseDispatch (154KB)
-        4) _start=68; _end=69 ;;   # emitAppVar alone (372KB)
-        5) _start=69; _end=78 ;;   # binOp..emitLetBindings (171KB)
-        6) _start=78; _end=79 ;;   # emitExpr alone (146KB)
-        7) _start=79; _end=83 ;;   # emitConChain..emitDef (157KB)
-        8) _start=83; _end=88 ;;   # emitProgramText..runCmd (198KB)
-        9) _start=88; _end=92 ;;   # compileToExecutableLink..compileToWasm (74KB)
-      esac
+    _part_files=""
+    for _pidx in $(seq 0 $((_nparts - 1))); do
       python3 -c "
-import json, copy, sys
+import json, sys, math
+sys.setrecursionlimit(10000)
 with open('$STAGE2/$flat.organ.json') as f:
     data = json.load(f)
 defs = data['module']['definitions']
-part = copy.deepcopy(data)
-part['module']['definitions'] = defs[$_start:$_end]
+mod = data['module']
+nparts = $_nparts
+chunk = math.ceil(len(defs) / nparts)
+start = $_pidx * chunk
+end = min(start + chunk, len(defs))
+part = {
+    'schema_version': data.get('schema_version', '0.1.0'),
+    'metadata': data['metadata'],
+    'module': {
+        'name': mod['name'],
+        'exports': mod.get('exports', []),
+        'imports': mod.get('imports', []),
+        'definitions': defs[start:end],
+        'data_types': mod.get('data_types', []),
+        'effect_decls': mod.get('effect_decls', []),
+    }
+}
 with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
     json.dump(part, f)
 " || { _split_ok=false; break; }
@@ -361,14 +373,11 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
       fi
       python3 self-host/fix-captures.py "$STAGE2/${flat}_part${_pidx}.mlir" \
         2>>"$STAGE2/$flat.err"
+      _part_files="$_part_files $STAGE2/${flat}_part${_pidx}.mlir"
     done
     if $_split_ok; then
       python3 self-host/merge-mlir-parts.py \
-        "$STAGE2/${flat}_part0.mlir" "$STAGE2/${flat}_part1.mlir" \
-        "$STAGE2/${flat}_part2.mlir" "$STAGE2/${flat}_part3.mlir" \
-        "$STAGE2/${flat}_part4.mlir" "$STAGE2/${flat}_part5.mlir" \
-        "$STAGE2/${flat}_part6.mlir" "$STAGE2/${flat}_part7.mlir" \
-        "$STAGE2/${flat}_part8.mlir" "$STAGE2/${flat}_part9.mlir" \
+        $_part_files \
         -o "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
       # Fix intra-module $N call mismatches from split compilation
       python3 self-host/fix-intra-module-calls.py "$STAGE2/$flat.mlir" \
@@ -409,7 +418,7 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
 
   # Step 2b: Fix escaped SSA captures in stage1 MLIR
   # (split-compiled modules already had fix-captures applied per-part)
-  if [ "$flat" != "MlirEmit_Emitter" ]; then
+  if [ "$_json_size" -le 1000000 ]; then
     python3 self-host/fix-captures.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
   fi
 
@@ -418,7 +427,11 @@ with open('$STAGE2/${flat}_part${_pidx}.organ.json', 'w') as f:
   # for local variables the self-hosted emitter incorrectly externalizes)
   python3 self-host/fix-intra-module-calls.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
 
-  # Step 2d: Fix func.call arity mismatches caused by the self-hosted emitter's
+  # Step 2d: Fix corrupted 'fld' pattern-variable references in record selectors
+  # (sanitizeName corruption: 'fld' → 'f0d' causes @frankenstein_fld$0 external calls)
+  python3 self-host/fix-fld-refs.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
+
+  # Step 2e: Fix func.call arity mismatches caused by the self-hosted emitter's
   # ConCase default-branch duplication bug (captures computed in wrong scope)
   python3 self-host/fix-mlir-arity.py "$STAGE2/$flat.mlir" 2>>"$STAGE2/$flat.err"
 

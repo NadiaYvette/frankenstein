@@ -610,22 +610,36 @@ Pre-processing (Core IR, host compiler):
   `PatLit 1/0` and appends `PatWild` defaults to exhaustive multi-constructor
   cases. Replaces the former `fix-bool-patterns.py` script (1,584 fixes/run).
 
-Post-processing pipeline for stage 2/3 MLIR (3 active scripts + merger):
-1. `fix-intra-module-calls.py` — fix cross-part function call mismatches
-   (256 wrappers/run, inherent to split compilation)
-2. `fix-dollar0-refs.py` — fix PAP closure references in OrganIR/Consumer.mlir
-   (13 fixes/run, root cause is sanitizeName non-determinism)
-3. `fix-mlir-arity.py` — pad arity mismatches from self-hosted runtime bug
-   (8 fixes/run, host compiler doesn't have this bug)
-4. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
-   (37 parts/run for 6 modules, inherent to split compilation)
+Post-processing pipeline for stage 2/3 MLIR:
 
-Eliminated post-processing scripts (5 of 8):
-- `fix-bool-patterns.py` → replaced by Haskell `NormalizePatterns` pass
+The three Python scripts that previously patched self-host runtime
+divergences have been absorbed into a single Haskell module
+`Frankenstein.MlirEmit.PostProcess`, invoked via the host compiler's
+`--postprocess-mlir` CLI flag. Architectural immunity: this code runs in
+the GHC-compiled host binary, never in the self-hosted compiler, so
+the runtime bugs it works around cannot affect it.
+
+Active post-processing:
+- `Frankenstein.MlirEmit.PostProcess` (Haskell) — replaces
+  fix-intra-module-calls / fix-dollar0-refs / fix-mlir-arity.
+  See `k-specs/postprocess-claims.k` for the formal immunity claim.
+- `merge-mlir-parts.py` — deduplicate `func.func` across split parts
+  (inherent to split compilation, not a divergence workaround)
+- `extract-mlir-funcs.py` — per-part fallback extraction when a split
+  part crashes (inherent to split-compile robustness)
+
+Eliminated post-processing scripts (8 of 8 divergence-workaround scripts):
+- `fix-bool-patterns.py` → Haskell `NormalizePatterns` pass
 - `fix-captures.py` → dead code (already-fixed lambda-lift bug)
 - `fix-fld-refs.py` → dead code (superseded by `A_sanitize_shim.c`)
 - `fix-missing-else.py` → dead code (already-fixed emitter bug)
-- `fix-orphan-decls.py` → replaced by Haskell EFunRef declaration in emitter
+- `fix-orphan-decls.py` → Haskell EFunRef declaration in emitter
+- `fix-intra-module-calls.py` → Haskell `PostProcess.fixIntraModuleCalls`
+- `fix-dollar0-refs.py` → Haskell `PostProcess.fixDollar0Refs`
+- `fix-mlir-arity.py` → Haskell `PostProcess.fixMlirArity`
+
+Bootstrap fixed point: 24/24 modules match between stage 2 and stage 3,
+21/21 E2E tests pass at every stage.
 
 ### 9b. Stage 2 Linking ✓
 

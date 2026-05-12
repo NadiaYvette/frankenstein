@@ -52,6 +52,37 @@
 //             - The host binary is GHC-compiled, so Map/Set/Eq/Ord
 //               instances behave correctly.
 //
+// LOCALIZATION (from A1 investigation, 2026-05-12):
+//
+//           Targeted instrumentation of `emitConChain` and its callers
+//           on a 7-line reproducer (test_div.hs) traced the divergence
+//           through markers embedded in emitted MLIR comments:
+//
+//             - Host:      DEFCOUNT-eq0 → DISPATCH:ConCase-Nothing →
+//                          ECC:entry-Nothing → CCH:recurse-Nothing →
+//                          single-Nothing-unconditional   (correct)
+//             - Self-host: DEFCOUNT-many → DISPATCH:ConCase-Just →
+//                          ECC:entry-Just → CCH:recurse-Just →
+//                          single-Just-defaultExpr        (wrong)
+//
+//           The corruption originates in `classifyBranches`, where
+//           `isDefaultPat` (a simple `case Pattern of PatWild _ -> True;
+//           PatVar _ _ -> True; _ -> False`) appears to return True for
+//           the PatCon branches in our input — even though source-level
+//           pattern matching cannot distinguish them as defaults.
+//
+//           Every attempt to refactor the affected code (DefExternal
+//           sort, where-clause helper in emitConChain, list-pattern
+//           probes in the instrumentation) triggered a different
+//           manifestation of the same underlying class of bug:
+//           **self-host compiled code mishandles data-type constructor
+//           dispatch in pattern matches**. The misbehavior is
+//           pattern-shape-dependent — different ADTs and different
+//           pattern arities each fail in different ways.
+//
+//           The Maybe-flip we observe is one stable instance of the
+//           bug class; PostProcess.hs is the stable remedy.
+//
 //           Therefore: any future self-host bug of the same class — i.e.,
 //           a divergence in compiled Emitter code — can corrupt the
 //           emitted MLIR text but cannot corrupt the post-processor's

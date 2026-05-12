@@ -672,18 +672,26 @@ modules match, all 21 E2E tests pass at every stage.
 
 ### Outstanding Issues
 
-- **Self-host emitter runtime divergences**: Three known bug classes in
-  compiled `Emitter.hs` produce different MLIR than the GHC-compiled host:
-  1. `emitConChain`'s 5-arg recursive `mDefaultExpr` argument flips
-     `Nothing → Just <previous-branch-body>`, emitting dead-code references
-     to out-of-scope pattern binders.
-  2. Split-compile `$N` externals not resolving (each part only sees its
-     own `esTopFns`).
+- **Self-host runtime: pattern-match dispatch on ADT constructors is
+  systematically wrong** (root-cause class identified via A1
+  investigation, 2026-05-12). Targeted instrumentation traced the
+  emitConChain `Nothing → Just <prev-body>` flip back through
+  `classifyBranches` to `isDefaultPat`, which appears to return `True`
+  for `PatCon` patterns in compiled self-host code even though the
+  source `case Pattern of PatWild _ -> True; PatVar _ _ -> True; _ ->
+  False` cannot do that. Every refactor attempt triggers a different
+  manifestation of the same class — Maybe/Just confusion, list
+  pattern-match crash, etc. The compiled runtime mishandles
+  constructor-tag dispatch in pattern-shape-dependent ways.
+  Three observable consequences:
+  1. `emitConChain`'s `mDefaultExpr` flips Nothing → Just, emitting
+     dead-code references to out-of-scope pattern binders.
+  2. Split-compile `$N` externals not resolving (each part only sees
+     its own `esTopFns`).
   3. Lambda-lift capture-dropping at some `func.call` sites.
   All three are worked around by `Frankenstein.MlirEmit.PostProcess`
   (Haskell, runs in the host binary — architecturally immune; see
-  `k-specs/postprocess-claims.k`). Root-cause fixes would let us delete
-  the post-processor.
+  `k-specs/postprocess-claims.k`).
 - **`sanitizeName` corruption**: Root cause identified — `T.concatMap encodeChar`
   in the self-hosted binary non-deterministically corrupts characters
   (closure dispatch or UTF-8 iteration). Mitigated by `A_sanitize_shim.c`.

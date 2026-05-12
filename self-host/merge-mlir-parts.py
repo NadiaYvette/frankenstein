@@ -19,6 +19,7 @@ def merge_mlir(part_files, output_file):
     headers = []
     seen_headers = set()
     string_globals = []
+    seen_str_globals = set()  # track @str_ global names to deduplicate
     bodies = []
 
     seen_funcs = set()
@@ -94,7 +95,15 @@ def merge_mlir(part_files, output_file):
                 continue
 
             if 'llvm.mlir.global' in stripped and '@str_' in stripped:
-                string_globals.append(line)
+                # Deduplicate by global name (fallback parts from previous
+                # merge may reintroduce already-prefixed @str_pN_M names)
+                gm = re.search(r'@(str_\S+?)[\s(]', stripped)
+                gname = gm.group(1) if gm else None
+                if gname and gname not in seen_str_globals:
+                    seen_str_globals.add(gname)
+                    string_globals.append(line)
+                elif not gname:
+                    string_globals.append(line)
                 continue
 
             # Deduplicate func.func definitions across parts

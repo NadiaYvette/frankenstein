@@ -308,7 +308,8 @@ consumeDataType dt = Right C.DataDecl
 
 consumeConstructor :: O.Constructor -> C.ConDecl
 consumeConstructor ctor =
-    let fields = zipWith mkField [0 :: Int ..] (O.conFields ctor)
+    let cfields = O.conFields ctor
+        fields = zipWith mkField [0 :: Int .. length cfields - 1] cfields
     in  C.ConDecl
           { C.conName   = consumeQName (O.conName ctor)
           , C.conFields = fields

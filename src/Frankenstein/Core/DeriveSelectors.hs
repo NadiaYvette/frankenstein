@@ -47,7 +47,8 @@ deriveSelectors prog =
 recordSelectors :: Set.Set T.Text -> DataDecl -> [Def]
 recordSelectors existing dd = case dataCons dd of
   [con] | hasRecordFields con ->
-            concatMap (mkSelector existing dd con) (zip [0..] (conFields con))
+            let cfs = conFields con
+            in concatMap (mkSelector existing dd con) (zip [0..length cfs - 1] cfs)
   _     -> []  -- multi-ctor, empty, or positional: no auto selectors
 
 -- | A constructor has record fields if at least one field name is NOT
@@ -84,8 +85,9 @@ mkSelector existing dd con (fieldIdx, (fieldName, fieldTy))
           mkPat i (_, ty)
             | i == fieldIdx = PatVar (Name "fld" 0) ty
             | otherwise     = PatWild ty
+          cfs2 = conFields con
           conPat = PatCon (conName con)
-                          [ mkPat i f | (i, f) <- zip [0..] (conFields con) ]
+                          [ mkPat i f | (i, f) <- zip [0..length cfs2 - 1] cfs2 ]
           body = ECase paramExpr
                    [ Branch conPat Nothing (EVar (Name "fld" 0)) ]
           selectorTy = TFun [(Many, recordTy)] EffectRowEmpty fieldTy

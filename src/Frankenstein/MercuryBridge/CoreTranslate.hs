@@ -128,7 +128,7 @@ translateMercuryTypeDecl modName td = DataDecl
       { conName   = QName modName (Name ctorName 0)
       , conFields = [ (Name ("field_" <> T.pack (show i)) 0,
                        TCon (TypeCon (QName "std" (Name fieldTy 0)) KindValue))
-                     | (i, fieldTy) <- zip [(0 :: Int)..] fieldTys
+                     | (i, fieldTy) <- zip [(0 :: Int)..length fieldTys - 1] fieldTys
                      ]
       , conVis    = Public
       }
@@ -142,7 +142,8 @@ translatePred :: MercuryPred -> Either Text Def
 translatePred pred' = do
   let name = QName "mercury" (Name (predName pred') 0)
       -- Separate input and output modes
-      indexedModes = zip [0..] (predModes pred')
+      pmodes = predModes pred'
+      indexedModes = zip [0..length pmodes - 1] pmodes
       inputModes  = [i | (i, m) <- indexedModes, m == ModeIn || m == ModeDi]
       _outputModes = [i | (i, m) <- indexedModes, m == ModeOut || m == ModeUo]
 

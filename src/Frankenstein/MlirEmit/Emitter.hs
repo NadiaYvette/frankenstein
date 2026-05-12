@@ -81,6 +81,8 @@ data EmitState = EmitState
   , esPromotedCaptures :: !(Map Text [Text])      -- promoted MLIR name -> extra capture SSA names to pass at call site
   , esCyclicDefs       :: !(Set Text)             -- mangled names of defs that may create reference cycles
   , esCurDef           :: !Text                   -- current definition being emitted (for cycle candidate check)
+  , esExtRuntimeFns    :: !(Set Text)             -- cached externalRuntimeFns (avoid per-call Set.fromList)
+  , esExtRuntimeArity  :: !(Map Text Int)         -- cached externalRuntimeArity
   }
 
 type Emit a = State EmitState a
@@ -179,7 +181,7 @@ emitPapClosure fnName arity suppliedArgs = do
         [ "%" <> idxN <> " = arith.constant " <> T.pack (show i) <> " : i64"
         , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxN <> ", %" <> a <> ") : (i64, i64, i64) -> ()"
         ]
-    ) (zip [(1 :: Int)..] suppliedArgs)
+    ) (zip [(1 :: Int)..length suppliedArgs] suppliedArgs)
   pure (allocOps ++ setOps, ptrName)
 
 -- | Ensure a PAP wrapper function exists for (fnName, nSupplied). Emits the
@@ -198,10 +200,15 @@ ensurePapWrapper fnName arity nSupplied = do
       let remainingParams = [ "%r" <> T.pack (show i) <> ": i64" | i <- [0 .. nRemaining - 1] ]
           paramList = T.intercalate ", " ("%clos: i64" : remainingParams)
           origParamTys = T.intercalate ", " (replicate arity "i64")
-      -- Body: extract captured args from closure fields 1..nSupplied, then call original
+      -- Body: extract captured args from closure fields 1..nSupplied, then call original.
+      -- Each capture must be retained because PAP wrappers may be called multiple
+      -- times (e.g. via mapM). Without retain, the callee's Perceus-inserted drops
+      -- free the captured value after the first call, causing use-after-free on
+      -- subsequent calls.
       let captureLoads = concat
             [ [ "    %cidx" <> T.pack (show i) <> " = arith.constant " <> T.pack (show i) <> " : i64"
               , "    %c" <> T.pack (show i) <> " = func.call @kk_field(%clos, %cidx" <> T.pack (show i) <> ") : (i64, i64) -> i64"
+              , "    func.call @kk_retain(%c" <> T.pack (show i) <> ") : (i64) -> ()"
               ]
             | i <- [1 .. nSupplied]
             ]
@@ -298,9 +305,11 @@ emitProgramText prog =
         | (d, ci) <- zip renamedDefs (analyzeCycles prog)
         , ciCyclic ci
         ]
+      extRtFns = externalRuntimeFns
+      extRtArity = externalRuntimeArity
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False
-                         (qualifiedTopNames `Set.union` externalRuntimeFns)
-                         (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
+                         (qualifiedTopNames `Set.union` extRtFns)
+                         (buildTopFnArity modPrefix renamedDefs `Map.union` extRtArity)
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
@@ -309,6 +318,8 @@ emitProgramText prog =
                          Map.empty
                          cyclicDefs
                          ""
+                         extRtFns
+                         extRtArity
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -536,9 +547,11 @@ emitProgramWithEffects prog =
         | (d, ci) <- zip renamedDefs (analyzeCycles prog)
         , ciCyclic ci
         ]
+      extRtFns = externalRuntimeFns
+      extRtArity = externalRuntimeArity
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty True
-                         (qualifiedTopNames `Set.union` externalRuntimeFns)
-                         (buildTopFnArity modPrefix renamedDefs `Map.union` externalRuntimeArity)
+                         (qualifiedTopNames `Set.union` extRtFns)
+                         (buildTopFnArity modPrefix renamedDefs `Map.union` extRtArity)
                          Set.empty
                          (assignProgramTags prog)
                          modPrefix
@@ -547,6 +560,8 @@ emitProgramWithEffects prog =
                          Map.empty
                          cyclicDefs
                          ""
+                         extRtFns
+                         extRtArity
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -644,6 +659,8 @@ emitProgramWasm prog =
         | (d, ci) <- zip renamedDefs (analyzeCycles prog)
         , ciCyclic ci
         ]
+      extRtFns = externalRuntimeFns
+      extRtArity = externalRuntimeArity
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False
                          qualifiedTopNames
                          (buildTopFnArity modPrefix renamedDefs)
@@ -655,6 +672,8 @@ emitProgramWasm prog =
                          Map.empty
                          cyclicDefs
                          ""
+                         extRtFns
+                         extRtArity
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -1068,7 +1087,7 @@ emitExpr (EApp (ECon qn) args) = do
     idxName <- freshName "v"
     pure [ "%" <> idxName <> " = arith.constant " <> T.pack (show i) <> " : i64"
          , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxName <> ", %" <> aName <> ") : (i64, i64, i64) -> ()"
-         ]) (zip [(0::Int)..] argNames)
+         ]) (zip [(0::Int)..length argNames - 1] argNames)
   -- Register as cycle candidate if the enclosing def may create cycles
   cycleOp <- emitCycleCandidate ptrName
   pure (allOps ++ allocOps ++ concat setOps ++ cycleOp, ptrName)
@@ -1250,13 +1269,21 @@ emitExpr (EHandle effRow handler body) = do
 
 
 -- | Emit function application where the function is a variable.
--- Handles intrinsic dispatch (arithmetic, comparisons, string ops, IO)
--- and general function calls (top-level, closure-indirect, promoted).
+-- Dispatches by arity to specialized handlers for builtin operations,
+-- then falls back to the general call handler.
 emitAppVar :: Name -> [Expr] -> Emit ([Text], Text)
--- Dict-passing binary ops: (op dict a b) → strip dict, call 2-arg builtin.
+emitAppVar fn args = case args of
+  [d, a, b] -> emitAppVarWith3 fn d a b
+  [a, b]    -> emitAppVarWith2 fn a b
+  [a]       -> emitAppVarWith1 fn a
+  []        -> emitAppVarWith0 fn
+  _         -> emitAppVarGeneral fn args
+
+-- | 3-arg builtins: dict-passing binary ops.
 -- At --no-simplify, GHC keeps typeclass dictionaries as explicit arguments,
 -- so operators like (==) arrive with 3 args instead of 2.
-emitAppVar fn [_dict, a, b]
+emitAppVarWith3 :: Name -> Expr -> Expr -> Expr -> Emit ([Text], Text)
+emitAppVarWith3 fn _dict a b
   | n `elem` ["==", "eq"]   = emitCmpOp "eq" a b
   | n `elem` ["/=", "ne"]   = emitCmpOp "ne" a b
   | n `elem` ["<", "lt"]    = emitCmpOp "slt" a b
@@ -1268,30 +1295,28 @@ emitAppVar fn [_dict, a, b]
   | n `elem` ["*", "mul"]   = emitBinOp "arith.muli" "i64" a b
   | n `elem` ["/", "div"]   = emitBinOp "arith.divsi" "i64" a b
   | n `elem` ["mod"]        = emitBinOp "arith.remsi" "i64" a b
+  | otherwise = emitAppVarGeneral fn [_dict, a, b]
   where n = nameText fn
--- Dict-passing unary ops: (op dict a) → strip dict, recurse as 1-arg.
-emitAppVar fn [_dict, a]
-  | n == "abs"    = emitAppVar fn [a]
-  | n == "negate" = emitAppVar fn [a]
-  where n = nameText fn
--- Float binary ops
-emitAppVar fn [a, b]
-  | nameText fn == "+f" || nameText fn == "addf" = emitBinOp "arith.addf" "f64" a b
-  | nameText fn == "-f" || nameText fn == "subf" = emitBinOp "arith.subf" "f64" a b
-  | nameText fn == "*f" || nameText fn == "mulf" = emitBinOp "arith.mulf" "f64" a b
-  | nameText fn == "/f" || nameText fn == "divf" = emitBinOp "arith.divf" "f64" a b
 
--- Float comparisons
-emitAppVar fn [a, b]
-  | nameText fn == "==f" || nameText fn == "eqf" = emitFloatCmpOp "oeq" a b
-  | nameText fn == "/=f" || nameText fn == "nef" = emitFloatCmpOp "one" a b
-  | nameText fn == "<f"  || nameText fn == "ltf" = emitFloatCmpOp "olt" a b
-  | nameText fn == ">f"  || nameText fn == "gtf" = emitFloatCmpOp "ogt" a b
-  | nameText fn == "<=f" || nameText fn == "lef" = emitFloatCmpOp "ole" a b
-  | nameText fn == ">=f" || nameText fn == "gef" = emitFloatCmpOp "oge" a b
-
--- Integer binary ops (including GHC primops with # suffix)
-emitAppVar fn [a, b]
+-- | 2-arg builtins: dict-passing unary, float, int, string, list, IO ops.
+emitAppVarWith2 :: Name -> Expr -> Expr -> Emit ([Text], Text)
+emitAppVarWith2 fn a b
+  -- Dict-passing unary ops: strip first arg as dict, recurse as 1-arg
+  | n == "abs"    = emitAppVar fn [b]
+  | n == "negate" = emitAppVar fn [b]
+  -- Float binary ops
+  | n `elem` ["+f", "addf"] = emitBinOp "arith.addf" "f64" a b
+  | n `elem` ["-f", "subf"] = emitBinOp "arith.subf" "f64" a b
+  | n `elem` ["*f", "mulf"] = emitBinOp "arith.mulf" "f64" a b
+  | n `elem` ["/f", "divf"] = emitBinOp "arith.divf" "f64" a b
+  -- Float comparisons
+  | n `elem` ["==f", "eqf"] = emitFloatCmpOp "oeq" a b
+  | n `elem` ["/=f", "nef"] = emitFloatCmpOp "one" a b
+  | n `elem` ["<f", "ltf"]  = emitFloatCmpOp "olt" a b
+  | n `elem` [">f", "gtf"]  = emitFloatCmpOp "ogt" a b
+  | n `elem` ["<=f", "lef"] = emitFloatCmpOp "ole" a b
+  | n `elem` [">=f", "gef"] = emitFloatCmpOp "oge" a b
+  -- Integer binary ops (including GHC primops with # suffix)
   | n `elem` ["+", "add", "+#", "$fNumInt_$c+"] = emitBinOp "arith.addi" "i64" a b
   | n `elem` ["-", "sub", "-#", "$fNumInt_$c-"] = emitBinOp "arith.subi" "i64" a b
   | n `elem` ["*", "mul", "*#", "$fNumInt_$c*"] = emitBinOp "arith.muli" "i64" a b
@@ -1307,7 +1332,7 @@ emitAppVar fn [a, b]
   | n `elem` ["orI#", "or#"]                      = emitBinOp "arith.ori" "i64" a b
   | n `elem` ["xorI#", "xor#"]                    = emitBinOp "arith.xori" "i64" a b
   -- Address arithmetic (from inlined unpackCString#)
-  | n == "plusAddr#"                                = emitBinOp "arith.addi" "i64" a b
+  | n == "plusAddr#"                               = emitBinOp "arith.addi" "i64" a b
   -- indexCharOffAddr# addr off: load byte at addr+off, zero-extend to i64
   | n == "indexCharOffAddr#" = do
       (addrOps, addrName) <- emitExpr a
@@ -1322,19 +1347,71 @@ emitAppVar fn [a, b]
         , "%" <> byteName <> " = llvm.load %" <> ptrName <> " : !llvm.ptr -> i8"
         , "%" <> resultName <> " = arith.extui %" <> byteName <> " : i8 to i64"
         ], resultName)
+  -- List cons
+  | n == "kk_cons" = do
+      (hOps, hName) <- emitExpr a
+      (tOps, tName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (hOps ++ tOps ++
+        [ "%" <> resultName <> " = func.call @kk_cons(%" <> hName <> ", %" <> tName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- String binary ops
+  | n `elem` ["str_concat", "++s", "concat_str", "bytes_concat"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  | n `elem` ["str_eq", "==s", "bytes_eq"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_eq(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  | n `elem` ["bytes_index", "byte_at"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_bytes_index(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- File I/O (2-arg): write_file(path, content) -> 0/-1
+  | n `elem` ["write_file", "writeFile"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_write_file(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- IORef set: returns 0 (kk_ref_set is void in C, wrapper returns 0)
+  | n `elem` ["set_ref", "writeIORef"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_ref_set(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)
+  | n == "evv_select" = do
+      (evvOps, evvName) <- emitExpr a
+      (idxOps, idxName) <- emitExpr b
+      resultName <- freshName "v"
+      let callOp = "%" <> resultName <> " = func.call @kk_evv_get(%" <> evvName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
+      pure (evvOps ++ idxOps ++ [callOp], resultName)
+  | otherwise = emitAppVarGeneral fn [a, b]
   where n = nameText fn
 
--- Unary integer operations
--- tagToEnum# converts Int# (0/1) to Bool — identity in our representation
-emitAppVar fn [arg]
-  | nameText fn == "tagToEnum#" = emitExpr arg
-
--- ord#/chr# are identity in our representation (Char = Int = i64)
-emitAppVar fn [arg]
-  | nameText fn `elem` ["ord#", "chr#"] = emitExpr arg
-
-emitAppVar fn [arg]
-  | nameText fn `elem` ["negate", "negateInt#", "$fNumInt_$cnegate"] = do
+-- | 1-arg builtins: unary ops, print, string/IO/ref intrinsics.
+emitAppVarWith1 :: Name -> Expr -> Emit ([Text], Text)
+emitAppVarWith1 fn arg
+  -- tagToEnum# converts Int# (0/1) to Bool — identity in our representation
+  | n == "tagToEnum#" = emitExpr arg
+  -- ord#/chr# are identity in our representation (Char = Int = i64)
+  | n `elem` ["ord#", "chr#"] = emitExpr arg
+  -- Unary integer operations
+  | n `elem` ["negate", "negateInt#", "$fNumInt_$cnegate"] = do
       (argOps, argName) <- emitExpr arg
       zeroName <- freshName "v"
       resultName <- freshName "v"
@@ -1342,7 +1419,7 @@ emitAppVar fn [arg]
         [ "%" <> zeroName <> " = arith.constant 0 : i64"
         , "%" <> resultName <> " = arith.subi %" <> zeroName <> ", %" <> argName <> " : i64"
         ], resultName)
-  | nameText fn == "abs" = do
+  | n == "abs" = do
       (argOps, argName) <- emitExpr arg
       zeroName <- freshName "v"
       negName <- freshName "v"
@@ -1354,15 +1431,10 @@ emitAppVar fn [arg]
         , "%" <> cmpName <> " = arith.cmpi slt, %" <> argName <> ", %" <> zeroName <> " : i64"
         , "%" <> resultName <> " = arith.select %" <> cmpName <> ", %" <> negName <> ", %" <> argName <> " : i64"
         ], resultName)
-
--- Futhark array primitives → MLIR linalg.
--- These light up the linalg/memref dialects in the lowering pipeline.
--- The pattern is always: allocate a dynamic memref, fill it via scf.for
--- (iota or iota²), reduce it via linalg.generic, load the scalar.
-emitAppVar fn [nArg]
-  | nameText fn `elem` ["sum_iota", "dot_iota"] = do
-      let isSquare = nameText fn == "dot_iota"
-      (nOps, nName) <- emitExpr nArg
+  -- Futhark array primitives → MLIR linalg
+  | n `elem` ["sum_iota", "dot_iota"] = do
+      let isSquare = n == "dot_iota"
+      (nOps, nName) <- emitExpr arg
       idxName  <- freshName "n"
       bufName  <- freshName "xs"
       iName    <- freshName "i"
@@ -1407,12 +1479,8 @@ emitAppVar fn [nArg]
         , "    }"
         , "    %" <> result <> " = memref.load %" <> accBuf <> "[] : memref<i64>"
         ], result)
-
--- Haskell print/putStrLn: emit as printf call
--- GHC desugars print to dictionary-passing, but after stripping dicts
--- we get a bare call to print with one argument.
-emitAppVar fn [arg]
-  | nameText fn == "print" = do
+  -- Haskell print/putStrLn: emit as printf call
+  | n == "print" = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       fmtName <- freshName "v"
@@ -1421,177 +1489,119 @@ emitAppVar fn [arg]
         , "llvm.call @printf(%" <> fmtName <> ", %" <> argName <> ") vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
         , "%" <> resultName <> " = arith.constant 0 : i64"
         ], resultName)
-
--- First-class string intrinsics: lower to runtime helpers. Bridges emit
--- these as plain EVar references; the function names below are the
--- canonical intrinsic surface that all frontends share.
-emitAppVar fn [arg]
-  | nameText fn `elem` ["println_str", "putStrLn", "print_str"] = do
+  -- First-class string intrinsics
+  | n `elem` ["println_str", "putStrLn", "print_str"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "func.call @kk_println_str(%" <> argName <> ") : (i64) -> ()"
         , "%" <> resultName <> " = arith.constant 0 : i64"
         ], resultName)
-  | nameText fn `elem` ["str_len", "strlen", "bytes_len"] = do
+  | n `elem` ["str_len", "strlen", "bytes_len"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_len(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["str_char_len", "char_len", "char_count", "length"] = do
+  | n `elem` ["str_char_len", "char_len", "char_count", "length"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_char_len(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["str_flatten", "flatten"] = do
+  | n `elem` ["str_flatten", "flatten"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_flatten(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["show", "show_int", "str_show_int"] = do
+  | n `elem` ["show", "show_int", "str_show_int"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_show_int(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   -- File I/O, process, environment intrinsics (1-arg)
-  | nameText fn `elem` ["read_file", "readFile"] = do
+  | n `elem` ["read_file", "readFile"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_read_file(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["file_exists", "fileExists"] = do
+  | n `elem` ["file_exists", "fileExists"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_file_exists(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["system", "shell"] = do
+  | n `elem` ["system", "shell"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_system(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["getenv", "getEnv"] = do
+  | n `elem` ["getenv", "getEnv"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_getenv(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   -- IORef intrinsics (1-arg)
-  | nameText fn `elem` ["new_ref", "newIORef", "ref"] = do
+  | n `elem` ["new_ref", "newIORef", "ref"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_ref_new(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["get_ref", "readIORef", "deref"] = do
+  | n `elem` ["get_ref", "readIORef", "deref"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_ref_get(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-
--- Zero-arg intrinsics (e.g. stdin read_line, args_count)
--- List constructors: Koka Nil/Cons mapped to runtime calls
-emitAppVar fn [h, t]
-  | nameText fn == "kk_cons" = do
-      (hOps, hName) <- emitExpr h
-      (tOps, tName) <- emitExpr t
-      resultName <- freshName "v"
-      pure (hOps ++ tOps ++
-        [ "%" <> resultName <> " = func.call @kk_cons(%" <> hName <> ", %" <> tName <> ") : (i64, i64) -> i64"
-        ], resultName)
-
-emitAppVar fn []
-  | nameText fn == "kk_nil" = do
-      resultName <- freshName "v"
-      pure ( [ "%" <> resultName <> " = func.call @kk_nil() : () -> i64" ]
-           , resultName)
-
-emitAppVar fn []
-  | nameText fn `elem` ["read_line", "getLine"] = do
-      resultName <- freshName "v"
-      pure ( [ "%" <> resultName <> " = func.call @kk_read_line() : () -> i64" ]
-           , resultName)
-  | nameText fn `elem` ["args_count", "numArgs"] = do
-      resultName <- freshName "v"
-      pure ( [ "%" <> resultName <> " = func.call @kk_args_count() : () -> i64" ]
-           , resultName)
-  | nameText fn `elem` ["args_progname", "getProgName"] = do
-      resultName <- freshName "v"
-      pure ( [ "%" <> resultName <> " = func.call @kk_args_progname() : () -> i64" ]
-           , resultName)
-
--- Single-arg command-line / exit intrinsics
-emitAppVar fn [arg]
-  | nameText fn `elem` ["args_get", "getArg"] = do
+  -- Command-line / exit intrinsics
+  | n `elem` ["args_get", "getArg"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_args_get(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | nameText fn `elem` ["exit", "exitWith"] = do
+  | n `elem` ["exit", "exitWith"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "func.call @kk_exit(%" <> argName <> ") : (i64) -> ()"
         , "%" <> resultName <> " = arith.constant 0 : i64  // unreachable (exit)"
         ], resultName)
+  | otherwise = emitAppVarGeneral fn [arg]
+  where n = nameText fn
 
-emitAppVar fn [a, b]
-  | nameText fn `elem` ["str_concat", "++s", "concat_str", "bytes_concat"] = do
-      (aOps, aName) <- emitExpr a
-      (bOps, bName) <- emitExpr b
+-- | 0-arg builtins: nil, read_line, args_count, args_progname.
+emitAppVarWith0 :: Name -> Emit ([Text], Text)
+emitAppVarWith0 fn
+  | n == "kk_nil" = do
       resultName <- freshName "v"
-      pure (aOps ++ bOps ++
-        [ "%" <> resultName <> " = func.call @kk_str_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
-        ], resultName)
-  | nameText fn `elem` ["str_eq", "==s", "bytes_eq"] = do
-      (aOps, aName) <- emitExpr a
-      (bOps, bName) <- emitExpr b
+      pure ( [ "%" <> resultName <> " = func.call @kk_nil() : () -> i64" ]
+           , resultName)
+  | n `elem` ["read_line", "getLine"] = do
       resultName <- freshName "v"
-      pure (aOps ++ bOps ++
-        [ "%" <> resultName <> " = func.call @kk_str_eq(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
-        ], resultName)
-  | nameText fn `elem` ["bytes_index", "byte_at"] = do
-      (aOps, aName) <- emitExpr a
-      (bOps, bName) <- emitExpr b
+      pure ( [ "%" <> resultName <> " = func.call @kk_read_line() : () -> i64" ]
+           , resultName)
+  | n `elem` ["args_count", "numArgs"] = do
       resultName <- freshName "v"
-      pure (aOps ++ bOps ++
-        [ "%" <> resultName <> " = func.call @kk_bytes_index(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
-        ], resultName)
-  -- File I/O (2-arg): write_file(path, content) -> 0/-1
-  | nameText fn `elem` ["write_file", "writeFile"] = do
-      (aOps, aName) <- emitExpr a
-      (bOps, bName) <- emitExpr b
+      pure ( [ "%" <> resultName <> " = func.call @kk_args_count() : () -> i64" ]
+           , resultName)
+  | n `elem` ["args_progname", "getProgName"] = do
       resultName <- freshName "v"
-      pure (aOps ++ bOps ++
-        [ "%" <> resultName <> " = func.call @kk_write_file(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
-        ], resultName)
-  -- IORef set: returns 0 (kk_ref_set is void in C, wrapper returns 0)
-  | nameText fn `elem` ["set_ref", "writeIORef"] = do
-      (aOps, aName) <- emitExpr a
-      (bOps, bName) <- emitExpr b
-      resultName <- freshName "v"
-      pure (aOps ++ bOps ++
-        [ "%" <> resultName <> " = func.call @kk_ref_set(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
-        ], resultName)
+      pure ( [ "%" <> resultName <> " = func.call @kk_args_progname() : () -> i64" ]
+           , resultName)
+  | otherwise = emitAppVarGeneral fn []
+  where n = nameText fn
 
--- Evidence intrinsic: evv_select(evv, idx) -> kk_evv_get(evv, idx)
-emitAppVar fn [evvArg, idxArg]
-  | nameText fn == "evv_select" = do
-      (evvOps, evvName) <- emitExpr evvArg
-      (idxOps, idxName) <- emitExpr idxArg
-      resultName <- freshName "v"
-      let callOp = "%" <> resultName <> " = func.call @kk_evv_get(%" <> evvName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
-      pure (evvOps ++ idxOps ++ [callOp], resultName)
-
-emitAppVar fn args = do
+-- | General function call handler: top-level calls, closure-indirect,
+-- promoted lambdas, and unresolved externals.
+emitAppVarGeneral :: Name -> [Expr] -> Emit ([Text], Text)
+emitAppVarGeneral fn args = do
   -- General function call. If fn names a top-level function, emit a direct
   -- func.call; otherwise treat it as a local closure value (heap-allocated
   -- via kk_alloc_con) and dispatch indirectly through field 0 (fptr).
@@ -1610,8 +1620,9 @@ emitAppVar fn args = do
   -- Also, runtime functions (kk_*, mercury_*) are never module-qualified.
   qualSanitized <- do
     pfx <- gets esModulePrefix
+    extRtSet <- gets esExtRuntimeFns
     pure $ if hasModule || T.isPrefixOf pfx sanitized
-              || Set.member sanitized externalRuntimeFns
+              || Set.member sanitized extRtSet
            then sanitized else pfx <> sanitized
   let nArgs = length args
       mArity = Map.lookup qualSanitized arityMap
@@ -1948,12 +1959,16 @@ emitLambdaLift params body = do
                                       (esAliases s)
                                       (capAliases ++ extraCapAliases ++ paramAliases) })
   -- Build prologue ops that extract captured fields from %closure.
+  -- Each capture must be retained: if the closure is called multiple times
+  -- (e.g. as a callback in mapM/map), the Perceus-inserted drops in the body
+  -- would free the capture after the first call without this retain.
   let allCapFresh = capFresh ++ extraCapFresh
       prologue = concat
         [ [ "%idx_" <> cfn <> " = arith.constant " <> T.pack (show i) <> " : i64"
           , "%" <> cfn <> " = func.call @kk_field(%" <> closFresh <> ", %idx_" <> cfn <> ") : (i64, i64) -> i64"
+          , "func.call @kk_retain(%" <> cfn <> ") : (i64) -> ()"
           ]
-        | (i, cfn) <- zip [(1::Int)..] allCapFresh
+        | (i, cfn) <- zip [(1::Int)..length allCapFresh] allCapFresh
         ]
   (bodyOps, bodyResult) <- emitExpr body
   -- Restore alias map (body-local aliases shouldn't leak out).
@@ -2010,7 +2025,7 @@ emitLambdaLift params body = do
     idxN <- freshName "v"
     pure [ "%" <> idxN <> " = arith.constant " <> T.pack (show i) <> " : i64"
          , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxN <> ", %" <> cnName <> ") : (i64, i64, i64) -> ()"
-         ]) (zip [(1::Int)..] allCapturedNames)
+         ]) (zip [(1::Int)..length allCapturedNames] allCapturedNames)
   pure (allocOps ++ concat capSetOps, ptrName)
 
 
@@ -2235,7 +2250,7 @@ emitConChain tagName scrutName structTy ((qn, pats, body):rest) mDefaultExpr = d
 -- | Extract fields from a constructor struct and bind pattern variables
 emitPatternBindings :: Text -> Text -> [Pattern] -> Emit ([Text], [Text])
 emitPatternBindings scrutName structTy pats = do
-  opsAndNames <- mapM (emitPatField scrutName structTy) (zip [1..] pats)
+  opsAndNames <- mapM (emitPatField scrutName structTy) (zip [1..length pats] pats)
   let allOps = concatMap fst opsAndNames
       allNames = map snd opsAndNames
   pure (allOps, allNames)

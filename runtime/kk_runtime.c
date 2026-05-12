@@ -1049,7 +1049,7 @@ int64_t kk_thunk_create_forced(int64_t result) {
  * cached pair and each drops it independently. */
 int64_t kk_thunk_force(int64_t thunk) {
     if (!kk_is_heap_ptr(thunk)) return thunk;  /* not a thunk, return as-is */
-    if (!kk_arena_owns((const void*)(intptr_t)thunk)) return thunk; /* not our heap */
+    if (!kk_arena_maybe_owns((const void*)(intptr_t)thunk)) return thunk; /* not our heap */
     int64_t tag = kk_tag(thunk);
     if (tag != KK_THUNK_TAG) return thunk;     /* not a thunk, return as-is */
     int64_t evaluated = kk_field(thunk, 0);

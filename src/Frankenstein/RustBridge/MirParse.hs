@@ -837,7 +837,7 @@ parseBodyContents :: [Text] -> ([MirLocalDecl], [MirBasicBlock])
 parseBodyContents ls =
   let -- Local decls start with "let"
       localLines = filter (\l -> "let " `T.isPrefixOf` T.stripStart l) ls
-      locals = zipWith parseLocalDecl [0..] localLines
+      locals = zipWith parseLocalDecl [0..length localLines - 1] localLines
       blocks = extractBlocks ls
   in (locals, blocks)
 

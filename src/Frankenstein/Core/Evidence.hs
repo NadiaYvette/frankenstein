@@ -189,7 +189,8 @@ evidenceExpr effs scope nextTag expr = case expr of
                 , bindExpr = handler'
                 , bindSort = DefVal
                 }
-              opBindsAndNames = zipWith (mkOpBind effName evName) [0..] (effectOps ed)
+              ops = effectOps ed
+              opBindsAndNames = zipWith (mkOpBind effName evName) [0..length ops - 1] ops
               opBinds  = map fst opBindsAndNames
               scope' = foldl (\s (opN, varN) -> insertOp effName opN varN s)
                          (insertEvidence effName evName scope)

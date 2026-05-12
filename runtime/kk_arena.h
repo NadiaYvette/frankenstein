@@ -74,4 +74,21 @@ void kk_arena_rollback(kk_arena_checkpoint_t cp);
 /* True iff `ptr` falls in the region that would be freed by rollback to `cp`. */
 int kk_arena_in_rollback_region(const void* ptr, kk_arena_checkpoint_t cp);
 
+/* ---- Free-list recycling ----
+ *
+ * Arena cells are bump-allocated and never individually freed. This
+ * causes unbounded memory growth in long-running compilations. The
+ * recycler adds per-size-class free lists: when kk_drop reaches RC=0
+ * for an arena-owned cell, it pushes the cell onto a free list. The
+ * next kk_alloc_con of the same size pops from the list instead of
+ * bumping, keeping the working set bounded.
+ */
+
+/* Try to reclaim a previously freed block of `size` bytes.
+ * Returns NULL if no recycled block is available. */
+void* kk_arena_recycle(size_t size);
+
+/* Push a dead arena block onto the free list for its size class. */
+void kk_arena_recycle_put(void* block, size_t size);
+
 #endif /* KK_ARENA_H */

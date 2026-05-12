@@ -805,7 +805,7 @@ translateDataCon dc =
       fields
         | null labels =
             [ (F.Name ("field_" <> T.pack (show i)) 0, translateType ty)
-            | (i, Scaled _ ty) <- zip [(0 :: Int)..] argTys
+            | (i, Scaled _ ty) <- zip [(0 :: Int)..length argTys - 1] argTys
             ]
         | otherwise =
             [ (F.Name (T.pack (unpackFS (field_label (flLabel fl)))) 0, translateType ty)

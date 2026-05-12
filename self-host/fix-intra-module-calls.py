@@ -48,8 +48,9 @@ def main():
         privates[key] = (name, suffix, nargs, args_str)
 
     # Parse all func.func @Name(...) -> i64 { definitions
+    # Include $ in name pattern to catch $N variants that are real definitions
     def_pattern = re.compile(
-        r'^  func\.func @(\w+)\(([^)]*)\) -> i64 \{',
+        r'^  func\.func @([\w$]+)\(([^)]*)\) -> i64 \{',
         re.MULTILINE
     )
     definitions = {}
@@ -66,6 +67,11 @@ def main():
     for key, (name, suffix, call_nargs, call_args_str) in sorted(privates.items()):
         if name not in definitions:
             continue  # truly external, skip
+        if key in definitions:
+            # $N variant already defined as a real function — just remove the
+            # private declaration so it doesn't conflict with the definition
+            removed_privates.add(key)
+            continue
 
         def_nargs, def_args_str = definitions[name]
 

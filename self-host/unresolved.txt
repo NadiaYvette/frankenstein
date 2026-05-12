@@ -219,7 +219,6 @@
                  U GHC_Internal_Data_Tuple_fst$0
                  U GHC_Internal_Data_Tuple_fst$1
                  U GHC_Internal_Data_Tuple_snd$0
-                 U GHC_Internal_Enum_enumFrom$1
                  U GHC_Internal_Enum_enumFromTo$2
                  U GHC_Internal_Enum_fromEnum$1
                  U GHC_Internal_Enum_toEnum$1

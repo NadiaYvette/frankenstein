@@ -178,3 +178,28 @@ int kk_arena_in_rollback_region(const void* ptr, kk_arena_checkpoint_t cp) {
     }
     return 0;
 }
+
+/* ---- Free-list recycling ---- */
+
+/* Size classes: index = total_bytes / 8.  A cons cell with N fields
+ * occupies (2+N)*8 bytes (rc + tag + fields), so class = 2+N.
+ * Classes 0..KK_RECYCLE_CLASSES-1 each hold a singly-linked list of
+ * dead blocks.  The first 8 bytes of a dead block store the next ptr. */
+#define KK_RECYCLE_CLASSES 128  /* up to 126 fields */
+
+static void* g_free_lists[KK_RECYCLE_CLASSES] = {0};
+
+void* kk_arena_recycle(size_t size) {
+    size_t cls = size / 8;
+    if (cls >= KK_RECYCLE_CLASSES || !g_free_lists[cls]) return NULL;
+    void* block = g_free_lists[cls];
+    g_free_lists[cls] = *(void**)block;
+    return block;
+}
+
+void kk_arena_recycle_put(void* block, size_t size) {
+    size_t cls = size / 8;
+    if (cls >= KK_RECYCLE_CLASSES) return;  /* too big, let it leak */
+    *(void**)block = g_free_lists[cls];
+    g_free_lists[cls] = block;
+}

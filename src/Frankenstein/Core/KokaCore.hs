@@ -232,7 +232,8 @@ toKokaDataDecl dd = KC.TypeDefGroup [KC.Data dataInfo]
   where
     name = toKokaQName (F.dataName dd)
     params = map toKokaTypeVar (F.dataParams dd)
-    constrs = zipWith (toKokaConInfo name params) [0..] (F.dataCons dd)
+    dcons = F.dataCons dd
+    constrs = zipWith (toKokaConInfo name params) [0..length dcons - 1] dcons
     kind = foldr (\tv k -> KK.kindFun (KT.typevarKind tv) k) KK.kindStar params
     dataInfo = KT.DataInfo
       { KT.dataInfoSort    = KS.Inductive
@@ -250,17 +251,19 @@ toKokaDataDecl dd = KC.TypeDefGroup [KC.Data dataInfo]
 
 -- | Translate a constructor declaration to Koka ConInfo
 toKokaConInfo :: KN.Name -> [KT.TypeVar] -> Int -> F.ConDecl -> KT.ConInfo
-toKokaConInfo typeName typeParams tag cd = KT.ConInfo
+toKokaConInfo typeName typeParams tag cd =
+  let cfs = F.conFields cd
+  in KT.ConInfo
   { KT.conInfoName       = toKokaQName (F.conName cd)
   , KT.conInfoTypeName   = typeName
   , KT.conInfoForalls    = []
   , KT.conInfoExists     = []
-  , KT.conInfoParams     = [ (toKokaName n, toKokaTypeUnsafe ty) | (n, ty) <- F.conFields cd ]
+  , KT.conInfoParams     = [ (toKokaName n, toKokaTypeUnsafe ty) | (n, ty) <- cfs ]
   , KT.conInfoType       = resultTy
   , KT.conInfoTypeSort   = KS.Inductive
   , KT.conInfoRange      = KR.rangeNull
-  , KT.conInfoParamRanges = replicate (length (F.conFields cd)) KR.rangeNull
-  , KT.conInfoParamVis   = replicate (length (F.conFields cd)) KS.Public
+  , KT.conInfoParamRanges = replicate (length cfs) KR.rangeNull
+  , KT.conInfoParamVis   = replicate (length cfs) KS.Public
   , KT.conInfoSingleton  = False
   , KT.conInfoOrderedParams = []
   , KT.conInfoValueRepr  = KS.valueReprZero
@@ -281,7 +284,8 @@ toKokaEffectDecl ed = KC.TypeDefGroup [KC.Data dataInfo]
     name = toKokaQName (F.effectName ed)
     params = map toKokaTypeVar (F.effectParams ed)
     -- Effect ops become constructors (Koka represents effects as data types)
-    constrs = zipWith (opToConInfo name params) [0..] (F.effectOps ed)
+    eops = F.effectOps ed
+    constrs = zipWith (opToConInfo name params) [0..length eops - 1] eops
     kind = foldr (\tv k -> KK.kindFun (KT.typevarKind tv) k) KK.kindEffect params
     dataInfo = KT.DataInfo
       { KT.dataInfoSort    = KS.Inductive

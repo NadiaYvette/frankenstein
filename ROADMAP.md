@@ -610,14 +610,22 @@ Pre-processing (Core IR, host compiler):
   `PatLit 1/0` and appends `PatWild` defaults to exhaustive multi-constructor
   cases. Replaces the former `fix-bool-patterns.py` script (1,584 fixes/run).
 
-Post-processing pipeline for stage 2 MLIR:
+Post-processing pipeline for stage 2/3 MLIR (3 active scripts + merger):
 1. `fix-intra-module-calls.py` — fix cross-part function call mismatches
-2. `fix-dollar0-refs.py` — fix `$0()` pattern variable references from
-   `sanitizeName` non-determinism, and function-as-value references (PAP
-   closure construction with correct arity detection)
-3. `fix-mlir-arity.py` — pad/trim arity mismatches from capture errors
-4. `fix-orphan-decls.py` — add declarations for unresolved function refs
-5. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
+   (256 wrappers/run, inherent to split compilation)
+2. `fix-dollar0-refs.py` — fix PAP closure references in OrganIR/Consumer.mlir
+   (13 fixes/run, root cause is sanitizeName non-determinism)
+3. `fix-mlir-arity.py` — pad arity mismatches from self-hosted runtime bug
+   (8 fixes/run, host compiler doesn't have this bug)
+4. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
+   (37 parts/run for 6 modules, inherent to split compilation)
+
+Eliminated post-processing scripts (5 of 8):
+- `fix-bool-patterns.py` → replaced by Haskell `NormalizePatterns` pass
+- `fix-captures.py` → dead code (already-fixed lambda-lift bug)
+- `fix-fld-refs.py` → dead code (superseded by `A_sanitize_shim.c`)
+- `fix-missing-else.py` → dead code (already-fixed emitter bug)
+- `fix-orphan-decls.py` → replaced by Haskell EFunRef declaration in emitter
 
 ### 9b. Stage 2 Linking ✓
 

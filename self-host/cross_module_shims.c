@@ -104,25 +104,15 @@ int64_t frkn_koka_translateProgram_0(void) {
 /*  references.  For unboxed ints/chars, == is just integer compare.  */
 /* ------------------------------------------------------------------ */
 
-/* == : compare two values (works for ints, chars, and boxed values by
- * comparing field 0 when both are heap-allocated cons with same tag) */
+/* == : structural equality via the runtime's recursive comparator.
+ * The previous version only handled boxed nfields==1 constructors and
+ * strings, so two Maps (nfields==0 for Tip, ==5 for Bin), two Cons cells,
+ * two tuples, etc. always compared unequal — breaking precomputeCaptures'
+ * fixed-point loop in Emitter.hs (which depends on `Map Text [Text] == ...`
+ * to terminate properly). kk_compare walks tags + all fields recursively,
+ * with arena-ownership guards. */
 static int64_t prim_eq(int64_t a, int64_t b) {
-    if (a == b) return 1;
-    /* If both are heap-allocated constructors, compare field 0 (unbox) */
-    if (kk_is_heap_ptr(a) && !kk_is_string(a) &&
-        kk_is_heap_ptr(b) && !kk_is_string(b)) {
-        if (kk_tag(a) == kk_tag(b) && kk_nfields(a) == 1 && kk_nfields(b) == 1)
-            return kk_field(a, 0) == kk_field(b, 0) ? 1 : 0;
-    }
-    /* String equality */
-    if (kk_is_string(a) && kk_is_string(b)) {
-        char* sa = kk_str_dup_cstr(a);
-        char* sb = kk_str_dup_cstr(b);
-        int eq = sa && sb && strcmp(sa, sb) == 0;
-        free(sa); free(sb);
-        return eq ? 1 : 0;
-    }
-    return 0;
+    return kk_compare(a, b) == 0 ? 1 : 0;
 }
 /* + : integer addition */
 static int64_t prim_plus(int64_t a, int64_t b) { return a + b; }

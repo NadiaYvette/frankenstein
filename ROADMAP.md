@@ -594,14 +594,16 @@ self-hosted compiler. **Result**: 21/21 pass.
 
 ## Phase 9: Bootstrap Loop ✓
 
-**Goal**: Two-stage bootstrap — host compiler → stage 1 → stage 2 — with
-the stage 2 compiler passing the same 21 end-to-end tests.
+**Goal**: Three-stage bootstrap — host compiler → stage 1 → stage 2 → stage 3
+— with the self-hosted compiler reaching a fixed point (stage 2 and stage 3
+produce byte-identical MLIR for all 23 modules).
 
 ### 9a. Stage 2 Compilation ✓
 
 All 23 modules compile through the stage 1 self-hosted compiler to produce
 stage 2 MLIR → LLVM IR → native objects. Large modules (>1MB OrganIR JSON)
-are automatically split into ~40-def parts, compiled separately, and merged.
+are automatically split by size (400KB target per part), compiled separately,
+and merged. JSON is minified (`separators=(',',':')`) to reduce parser load.
 
 Post-processing pipeline for stage 2 MLIR:
 1. `fix-captures.py` — fix escaped SSA references from lambda-lifting
@@ -615,9 +617,6 @@ Post-processing pipeline for stage 2 MLIR:
 6. `fix-mlir-arity.py` — pad/trim arity mismatches from capture errors
 7. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
 
-Two modules (MlirEmit/Emitter, KokaBridge/Driver) fall back to stage 1 `.o`
-files due to split-compile crashes (missing symbols for cross-part references).
-
 ### 9b. Stage 2 Linking ✓
 
 Stage 2 compiler binary: ~6.3 MB. Links against the same C runtime
@@ -628,34 +627,35 @@ Stage 2 compiler binary: ~6.3 MB. Links against the same C runtime
 **Result**: 21/21 end-to-end examples pass through the stage 2 compiler,
 producing identical outputs to the host compiler and stage 1.
 
-**BOOTSTRAP LOOP COMPLETE**: host → stage 1 → stage 2, all tests green.
+### 9d. Stage 3 — Fixed-Point Convergence ✓
 
-### Outstanding Stage 2 Issues (mostly resolved)
+**Result**: All 23 modules compiled through the stage 2 compiler produce
+**byte-identical MLIR** to stage 2 output. The self-hosted compiler has
+reached a fixed point — it reproduces itself.
 
-- **MLIR divergence**: 0/23 modules produce identical MLIR between stage 1
-  and stage 2 — structural differences from `sanitizeName` corruption,
-  missing Perceus RC ops, different SSA numbering, and pattern binder Name
-  corruption (wrong `nameText` with correct `nameUnique`).
+Pipeline: same 23 OrganIR JSON files → stage 2 compiler → stage 3 MLIR,
+with the same 7 post-processing scripts applied. Stage 3 binary linked
+and passes all 21 E2E tests.
+
+**Key fix for convergence**: The monolithic `emitAppVar` function (~490 lines,
+936KB OrganIR definition) caused the self-hosted compiler to hang indefinitely
+during compilation. Refactored into 6 arity-dispatched functions (`emitAppVarWith0`
+through `emitAppVarWith3` + `emitAppVarGeneral`), each producing a manageable
+OrganIR definition that compiles in seconds.
+
+**BOOTSTRAP FIXED POINT**: host → stage 1 → stage 2 → stage 3, all 23/23
+modules match, all 21 E2E tests pass at every stage.
+
+### Outstanding Issues
+
+- **Post-processing scripts**: 7 Python scripts still needed to repair MLIR
+  output. Each script compensates for a bug in the self-hosted compiler's
+  emitter (sanitizeName corruption, missing else branches, arity mismatches,
+  etc.). Root-cause fixes would eliminate these.
 - **`sanitizeName` corruption**: Root cause identified — `T.concatMap encodeChar`
   in the self-hosted binary non-deterministically corrupts characters (closure
-  dispatch or UTF-8 iteration). Not fixable without fixing closure dispatch;
-  mitigated by C shims (`A_sanitize_shim.c`) and post-processing scripts
-  (`fix-fld-refs.py`, `fix-dollar0-refs.py`).
-- **Split-compile fallbacks**: RESOLVED. Per-part fallback extracts needed
-  functions from stage1 MLIR when a split part crashes (`extract-mlir-funcs.py`).
-  `fix-missing-else.py` repairs truncated `scf.yield` lines. String global
-  injection maps `@str_pN_M` back to `@str_M` in stage1 definitions. Result:
-  **23/23 modules compile** (MlirEmit/Emitter and KokaBridge/Driver use
-  partial stage1 fallback for 2-3 crashing parts each).
-- **Oversaturation**: RESOLVED. `findSelfRefsInData` correctly takes 2 params
-  (`DataDecl` + `Set Name`); no bug exists — the apparent oversaturation was
-  a stale observation.
-- **`cabal exec` race condition**: RESOLVED. Added `-w /usr/lib64/ghc-9.14.1/bin/ghc`
-  to all `cabal exec` invocations in `build.sh` to prevent GHC mismatch
-  triggering rebuilds during execution.
-- **KokaCore TypeDefs**: RESOLVED. `coreProgTypeDefs` now translates
-  `DataDecl`/`EffectDecl` to Koka's `TypeDefGroup` representation.
-  `KokaBridge/CoreTranslate` multi-guard branches use nested `ECase` desugaring.
+  dispatch or UTF-8 iteration). Mitigated by C shims (`A_sanitize_shim.c`) and
+  post-processing scripts (`fix-fld-refs.py`, `fix-dollar0-refs.py`).
 
 ---
 
@@ -783,7 +783,7 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
 
 ---
 
-## Current State (2026-05-07, multi-module + cross-language + cycle collector)
+## Current State (2026-05-12, 3-stage bootstrap fixed point)
 
 ### What's Built and Working
 - **8 bridges**: GHC (real API + `foreign import ccall` FFI), Rust (MIR text+JSON + `extern "C"` FFI),
@@ -864,11 +864,11 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
 - **Phase 5: Wasm Backend** ✓: `--compile --target wasm32` produces `.wasm` binaries.
   485-byte factorial demo runs in Node.js and browser. Freestanding Wasm runtime with
   bump allocator. Browser demo at `web/index.html`. Pipeline: MLIR → llc(wasm32) → wasm-ld.
-- **Self-hosted binary** ✓: 20/20 modules compile through own pipeline, 1.4 MB binary,
-  67 self-tests pass. All 4 compiler passes exercised (ConTags, Perceus, Evidence, MLIR).
-  Full pipeline validation: factorial(10) → MLIR → mlir-opt → clang → 3628800.
-  `kk_drop` is fully functional — all 19 stage 1 and 13 stage 2 examples pass
-  (alloc_stress fixed via retain-on-force in `kk_thunk_force`).
+- **Self-hosted binary** ✓: 23/23 modules compile through own pipeline. 3-stage
+  bootstrap reaches fixed point — stage 2 and stage 3 produce byte-identical MLIR
+  for all 23 modules. All 21 E2E tests pass at every stage. All 4 compiler passes
+  exercised (ConTags, Perceus, Evidence, MLIR). Full pipeline validation:
+  factorial(10) → MLIR → mlir-opt → clang → 3628800.
 - **FFI cross-language imports**: Native FFI mechanisms in major bridges resolve through
   the polyglot linker's symbol table, enabling symmetric multi-language composition:
   - **Haskell `foreign import ccall`**: GHC bridge detects `FCallId` in Core, extracts C
@@ -895,10 +895,16 @@ compiler's output, proving self-hosted compilation is functionally equivalent.
   SML/Lua/Erlang/Prolog/Forth frontends produce structured OrganIR; Lua shim consumable but
   runtime type mismatch (any vs int). C/C++ shims at wrong abstraction level (LLVM IR as strings).
 - **Test suite**: 97 cabal tests (incl. cross-module effect test), 12 polyglot E2E, 3 Wasm validation tests,
-  K test oracle, 118 krun tests, 10 cycle collector C tests, 19 self-host Phase 8 examples
+  K test oracle, 118 krun tests, 10 cycle collector C tests, 21 self-host E2E examples (pass all 3 stages)
 - **End-to-end**: `--demo --compile` → 3628800, `--demo --compile --target wasm32` → 3628800 in Node.js
 
 ### Recent Commits
+- **Bootstrap fixed point (010016d)**: 3-stage self-hosted compiler converges — 23/23
+  modules produce byte-identical MLIR in stages 2 and 3. Key fix: refactored monolithic
+  `emitAppVar` (~490 lines, 936KB OrganIR) into 6 arity-dispatched functions to eliminate
+  a compiler hang during self-compilation. Size-based JSON splitting (400KB target) with
+  minification. `compile_stage()` and `run_e2e_tests()` extracted as reusable bash functions.
+  All 21 E2E tests pass at all 3 stages.
 - Stage 2 bootstrap: 23/23 — per-part fallback with global injection, cabal exec race fix, KokaCore TypeDefs, guard desugaring. Two modules (MlirEmit/Emitter, KokaBridge/Driver) still crash 2-3 split-parts each but fallback extraction + `fix-missing-else.py` truncated-scf repair + `llvm.mlir.global` injection from stage1 produces valid .o files. Regex fix: `extract-mlir-funcs.py` global name capture was `\S+` (greedily matched into string content), now `[A-Za-z0-9_.$]+`. Stage 2 compiler passes all 21 E2E tests.
 - FFI cross-language imports — Haskell `foreign import ccall` and Rust `extern "C"` now resolve through the polyglot linker. GHC bridge detects `FCallId` vars via `idDetails`, extracts C function names from `CCallSpec`/`StaticTarget`, strips `realWorld#` state tokens and unboxed tuple `(# State# RealWorld, result #)` destructuring. MIR bridge fix: `convertTextLine` no longer wraps call terminators in `Assign((...))`, enabling proper parsing of `_0 = func(args) -> [return: bbN, ...]` patterns. Two new demo tests: Haskell FFI cross-lang (Haskell→Python+Go+Koka → 157), Rust FFI cross-lang (Rust→Python+Haskell+Koka → 69). Polyglot test suite now at 12 tests (11 passing, 1 pre-existing Mercury choice issue).
 - 12-language demo — all 12 direct-style in-tree bridges (Haskell, Rust, Mercury, Python, Go, Futhark, Swift, OCaml, Erlang, F#, Idris, Koka) compose into a single binary → 440. Each function compiled through its real compiler's API/IR. Organ-bank OCaml shim verified end-to-end through OrganIR JSON → Consumer → Core → MLIR → native.

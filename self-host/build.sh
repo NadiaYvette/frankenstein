@@ -333,9 +333,6 @@ compile_stage() {
         SN_FAIL=$((SN_FAIL + 1))
         continue
       fi
-      # Fix Bool patterns (PatCon False/True → PatLit 0/1) to avoid
-      # exponential code generation in the self-hosted emitter's ConCase path
-      python3 self-host/fix-bool-patterns.py "$ORGAN_DIR/$flat.organ.json"
     fi
 
     # Step 2: Self-hosted compiler → MLIR
@@ -407,8 +404,6 @@ print(len(parts))
             _split_ok=false; break
           fi
         fi
-        python3 self-host/fix-captures.py "$OUTDIR/${flat}_part${_pidx}.mlir" \
-          2>>"$OUTDIR/$flat.err"
         _part_files="$_part_files $OUTDIR/${flat}_part${_pidx}.mlir"
       done
       if $_split_ok; then
@@ -486,28 +481,16 @@ if injected:
       fi
     fi
 
-    # Step 2b: Fix escaped SSA captures
-    # (split-compiled modules already had fix-captures applied per-part)
-    if [ "$_json_size" -le 1000000 ]; then
-      python3 self-host/fix-captures.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
-    fi
-
-    # Step 2c: Fix intra-module $N call mismatches
+    # Step 2b: Fix intra-module $N call mismatches
     python3 self-host/fix-intra-module-calls.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
 
-    # Step 2d: Fix corrupted 'fld' pattern-variable references in record selectors
-    python3 self-host/fix-fld-refs.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
-
-    # Step 2d1/4: Fix all other $0() references (pattern vars + function PAPs)
+    # Step 2c: Fix all other $0() references (pattern vars + function PAPs)
     python3 self-host/fix-dollar0-refs.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
 
-    # Step 2d1/2: Fix scf.if blocks that return values but are missing else branches
-    python3 self-host/fix-missing-else.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
-
-    # Step 2e: Fix func.call arity mismatches
+    # Step 2d: Fix func.call arity mismatches
     python3 self-host/fix-mlir-arity.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
 
-    # Step 2f: Add declarations for any remaining orphan function references
+    # Step 2e: Add declarations for any remaining orphan function references
     python3 self-host/fix-orphan-decls.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
 
     # Step 3: MLIR → LLVM IR

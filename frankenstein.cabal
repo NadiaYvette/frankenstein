@@ -21,6 +21,7 @@ library
         Frankenstein.Core.EffectOpt
         Frankenstein.Core.DeriveSelectors
         Frankenstein.Core.FlattenPatterns
+        Frankenstein.Core.NormalizePatterns
         Frankenstein.Core.ConTags
         Frankenstein.Core.Linker
         Frankenstein.GhcBridge.Driver

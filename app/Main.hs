@@ -7,6 +7,7 @@ import Frankenstein.Core.Evidence (evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..))
 import Frankenstein.Core.DeriveSelectors (deriveSelectors)
 import Frankenstein.Core.FlattenPatterns (flattenPatterns)
+import Frankenstein.Core.NormalizePatterns (normalizePatterns)
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, compileToCoreWith, compileToCoreMulti, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
@@ -484,8 +485,10 @@ handleOutput progRaw flags = do
             Right path -> TIO.putStrLn $ "Compiled: " <> T.pack path
       | flagEmitOrgan flags -> do
           -- Emit OrganIR JSON from the raw (pre-optimization) program.
-          -- This is the interchange format for feeding to other backends.
-          TIO.putStrLn $ OrganEmit.emitProgram progRaw
+          -- normalizePatterns converts Bool PatCon → PatLit and adds
+          -- PatWild defaults to exhaustive constructor cases, so the
+          -- self-hosted compiler avoids buggy code paths.
+          TIO.putStrLn $ OrganEmit.emitProgram (normalizePatterns progRaw)
       | flagEmitEffectMlir flags -> do
           -- Emit MLIR with frankenstein.* dialect ops — skip both the
           -- effect optimizer (which would inline handlers) and the

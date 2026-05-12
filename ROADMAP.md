@@ -605,17 +605,19 @@ stage 2 MLIR → LLVM IR → native objects. Large modules (>1MB OrganIR JSON)
 are automatically split by size (400KB target per part), compiled separately,
 and merged. JSON is minified (`separators=(',',':')`) to reduce parser load.
 
+Pre-processing (Core IR, host compiler):
+- `Frankenstein.Core.NormalizePatterns` — converts `PatCon True/False` to
+  `PatLit 1/0` and appends `PatWild` defaults to exhaustive multi-constructor
+  cases. Replaces the former `fix-bool-patterns.py` script (1,584 fixes/run).
+
 Post-processing pipeline for stage 2 MLIR:
-1. `fix-captures.py` — fix escaped SSA references from lambda-lifting
-2. `fix-intra-module-calls.py` — fix cross-part function call mismatches
-3. `fix-fld-refs.py` — fix corrupted `fld` pattern variable names from
-   `sanitizeName` non-determinism (full function body search window)
-4. `fix-dollar0-refs.py` — fix all other `$0()` pattern variable references
-   (trailing unique match) and function-as-value references (PAP closure
-   construction with correct arity detection)
-5. `fix-missing-else.py` — add missing else branches to scf.if blocks
-6. `fix-mlir-arity.py` — pad/trim arity mismatches from capture errors
-7. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
+1. `fix-intra-module-calls.py` — fix cross-part function call mismatches
+2. `fix-dollar0-refs.py` — fix `$0()` pattern variable references from
+   `sanitizeName` non-determinism, and function-as-value references (PAP
+   closure construction with correct arity detection)
+3. `fix-mlir-arity.py` — pad/trim arity mismatches from capture errors
+4. `fix-orphan-decls.py` — add declarations for unresolved function refs
+5. `merge-mlir-parts.py` — deduplicate `func.func` across split parts
 
 ### 9b. Stage 2 Linking ✓
 
@@ -648,14 +650,16 @@ modules match, all 21 E2E tests pass at every stage.
 
 ### Outstanding Issues
 
-- **Post-processing scripts**: 7 Python scripts still needed to repair MLIR
-  output. Each script compensates for a bug in the self-hosted compiler's
-  emitter (sanitizeName corruption, missing else branches, arity mismatches,
-  etc.). Root-cause fixes would eliminate these.
+- **Post-processing scripts**: 4 Python scripts remain after eliminating
+  four (fix-bool-patterns via `NormalizePatterns`; fix-captures, fix-fld-refs,
+  fix-missing-else as zero-fix dead code). Each remaining script compensates
+  for a bug in the self-hosted compiler's emitter (sanitizeName corruption,
+  arity mismatches, split-compile naming). Root-cause fixes would eliminate
+  the rest.
 - **`sanitizeName` corruption**: Root cause identified — `T.concatMap encodeChar`
   in the self-hosted binary non-deterministically corrupts characters (closure
   dispatch or UTF-8 iteration). Mitigated by C shims (`A_sanitize_shim.c`) and
-  post-processing scripts (`fix-fld-refs.py`, `fix-dollar0-refs.py`).
+  `fix-dollar0-refs.py`.
 
 ---
 

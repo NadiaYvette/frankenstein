@@ -1211,6 +1211,14 @@ emitExpr (EFunRef qn) = do
   pfx <- gets esModulePrefix
   let qualName = if T.isPrefixOf pfx rawQualName then rawQualName
                  else pfx <> rawQualName
+  -- Declare as external if not defined locally. The `() -> i64` type is the
+  -- minimum-arity convention used in the func.constant cast below; the actual
+  -- function may have higher arity but MLIR allows function-type aliasing
+  -- through the ptrtoint dance.
+  topFns <- gets esTopFns
+  if Set.member qualName topFns
+    then pure ()
+    else addExternDecl qualName 0
   refName <- freshName "v"
   fptrName <- freshName "v"
   -- func.constant produces a value of function type (() -> i64)

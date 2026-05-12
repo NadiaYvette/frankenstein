@@ -490,9 +490,6 @@ if injected:
     # Step 2d: Fix func.call arity mismatches
     python3 self-host/fix-mlir-arity.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
 
-    # Step 2e: Add declarations for any remaining orphan function references
-    python3 self-host/fix-orphan-decls.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
-
     # Step 3: MLIR → LLVM IR
     if ! mlir-opt $MLIR_PASSES "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err" \
          | mlir-translate --mlir-to-llvmir > "$OUTDIR/$flat.ll" 2>>"$OUTDIR/$flat.err"; then

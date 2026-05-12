@@ -672,16 +672,21 @@ modules match, all 21 E2E tests pass at every stage.
 
 ### Outstanding Issues
 
-- **Post-processing scripts**: 4 Python scripts remain after eliminating
-  four (fix-bool-patterns via `NormalizePatterns`; fix-captures, fix-fld-refs,
-  fix-missing-else as zero-fix dead code). Each remaining script compensates
-  for a bug in the self-hosted compiler's emitter (sanitizeName corruption,
-  arity mismatches, split-compile naming). Root-cause fixes would eliminate
-  the rest.
+- **Self-host emitter runtime divergences**: Three known bug classes in
+  compiled `Emitter.hs` produce different MLIR than the GHC-compiled host:
+  1. `emitConChain`'s 5-arg recursive `mDefaultExpr` argument flips
+     `Nothing → Just <previous-branch-body>`, emitting dead-code references
+     to out-of-scope pattern binders.
+  2. Split-compile `$N` externals not resolving (each part only sees its
+     own `esTopFns`).
+  3. Lambda-lift capture-dropping at some `func.call` sites.
+  All three are worked around by `Frankenstein.MlirEmit.PostProcess`
+  (Haskell, runs in the host binary — architecturally immune; see
+  `k-specs/postprocess-claims.k`). Root-cause fixes would let us delete
+  the post-processor.
 - **`sanitizeName` corruption**: Root cause identified — `T.concatMap encodeChar`
-  in the self-hosted binary non-deterministically corrupts characters (closure
-  dispatch or UTF-8 iteration). Mitigated by C shims (`A_sanitize_shim.c`) and
-  `fix-dollar0-refs.py`.
+  in the self-hosted binary non-deterministically corrupts characters
+  (closure dispatch or UTF-8 iteration). Mitigated by `A_sanitize_shim.c`.
 
 ---
 

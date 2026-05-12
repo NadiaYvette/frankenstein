@@ -39,6 +39,22 @@ extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(int64_
 extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t);
 extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t);
 
+/* Debug helper: deterministic show of a Program for host-vs-self-host
+ * differential comparison. Enabled by FRANKENSTEIN_DUMP_AST env var. */
+extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t);
+
+static void maybe_dump_ast(const char* label, int64_t prog) {
+    if (!getenv("FRANKENSTEIN_DUMP_AST")) return;
+    int64_t dump = frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(prog);
+    if (kk_is_string(dump)) {
+        char* s = kk_str_dup_cstr(dump);
+        fprintf(stderr, "=== AST after %s ===\n%s\n", label, s ? s : "(null)");
+        free(s);
+    } else {
+        fprintf(stderr, "=== AST after %s === (not a string)\n", label);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Read all of stdin into a kk_string                                */
 /* ------------------------------------------------------------------ */
@@ -172,6 +188,7 @@ int main(int argc, char** argv) {
 
     int64_t prog = kk_field(result, 0);
     if (verbose) fprintf(stderr, "Parsed OrganIR successfully\n");
+    maybe_dump_ast("consumer", prog);
 
     /* Run compiler passes */
     double t0, t1;
@@ -181,6 +198,7 @@ int main(int argc, char** argv) {
     prog = frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(prog);
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  flattenPatterns: %.3fs\n", t1 - t0);
+    maybe_dump_ast("flattenPatterns", prog);
 
     if (verbose) fprintf(stderr, "Running effectOptimize...\n");
     t0 = now_sec();
@@ -193,6 +211,7 @@ int main(int argc, char** argv) {
     }
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  effectOptimize: %.3fs\n", t1 - t0);
+    maybe_dump_ast("effectOptimize", prog);
 
     if (verbose) fprintf(stderr, "Running evidencePass...\n");
     t0 = now_sec();
@@ -202,6 +221,7 @@ int main(int argc, char** argv) {
     }
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  evidencePass: %.3fs\n", t1 - t0);
+    maybe_dump_ast("evidencePass", prog);
 
     if (skip_perceus) {
         if (verbose) fprintf(stderr, "Skipping insertPerceus (--no-perceus)\n");
@@ -211,6 +231,7 @@ int main(int argc, char** argv) {
         prog = frankenstein_Frankenstein_Core_Perceus_insertPerceus(prog);
         t1 = now_sec();
         if (verbose) fprintf(stderr, "  insertPerceus: %.3fs\n", t1 - t0);
+        maybe_dump_ast("insertPerceus", prog);
     }
 
     /* Debug: inspect prog before emitting */

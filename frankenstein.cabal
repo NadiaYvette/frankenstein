@@ -22,6 +22,8 @@ library
         Frankenstein.Core.DeriveSelectors
         Frankenstein.Core.FlattenPatterns
         Frankenstein.Core.NormalizePatterns
+        Frankenstein.Debug.DumpProgram
+        Frankenstein.MlirEmit.PostProcess
         Frankenstein.Core.ConTags
         Frankenstein.Core.Linker
         Frankenstein.GhcBridge.Driver

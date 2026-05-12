@@ -8,6 +8,7 @@ import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, Eff
 import Frankenstein.Core.DeriveSelectors (deriveSelectors)
 import Frankenstein.Core.FlattenPatterns (flattenPatterns)
 import Frankenstein.Core.NormalizePatterns (normalizePatterns)
+import Frankenstein.Debug.DumpProgram (dumpProgram)
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, compileToCoreWith, compileToCoreMulti, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
@@ -34,13 +35,14 @@ import Frankenstein.FSharpBridge.CoreTranslate (translateFSharp)
 import Frankenstein.IdrisBridge.Driver (readIdrisFile)
 import Frankenstein.IdrisBridge.CoreTranslate (translateIdris)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
+import qualified Frankenstein.MlirEmit.PostProcess as PostProcess
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 import Frankenstein.OrganIR.Emitter qualified as OrganEmit
 
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import System.Environment (getArgs)
+import System.Environment (getArgs, lookupEnv)
 import System.FilePath (takeExtension, takeBaseName)
 import System.IO (hPutStrLn, stderr)
 import Data.List (partition, dropWhile)
@@ -63,6 +65,7 @@ main = do
       let prog = demoMultiEffectProgram
       handleOutput prog flags
     SwiftCrossCheck files -> mapM_ swiftCrossCheck files
+    PostProcessMlir files -> mapM_ PostProcess.postProcessFile files
     CompileFiles files flags -> do
       results <- mapM (compileFile (flagFromJson flags) (not (flagNoSimplify flags))) files
       -- Run evidence pass with a GLOBAL effect registry (from all modules)
@@ -109,6 +112,7 @@ data Flags = Flags
   , flagEmitMlir :: !Bool
   , flagEmitEffectMlir :: !Bool
   , flagEmitOrgan :: !Bool
+  , flagEmitOrganPost :: !Bool
   , flagCompile  :: !Bool
   , flagOutput   :: !FilePath
   , flagFromJson :: !Bool
@@ -117,7 +121,7 @@ data Flags = Flags
   } deriving (Show)
 
 defaultFlags :: Flags
-defaultFlags = Flags False False False False False "a.out" False TargetNative False
+defaultFlags = Flags False False False False False False "a.out" False TargetNative False
 
 data Command
   = ShowHelp
@@ -127,6 +131,7 @@ data Command
   | DemoMultiEffect Flags
   | CompileFiles [FilePath] Flags
   | SwiftCrossCheck [FilePath]
+  | PostProcessMlir [FilePath]
   deriving (Show)
 
 parseArgs :: [String] -> Command
@@ -140,6 +145,9 @@ parseArgs args
   | "--swift-crosscheck" `elem` args =
       let (files, _) = partition (not . isFlag) (removeArgValues args)
       in SwiftCrossCheck files
+  | "--postprocess-mlir" `elem` args =
+      let (files, _) = partition (not . isFlag) (removeArgValues args)
+      in PostProcessMlir files
   | otherwise =
       let flags = parseFlags args
           (files, _flagArgs) = partition (not . isFlag) (removeArgValues args)
@@ -169,6 +177,8 @@ parseFlags args = Flags
   , flagEmitMlir = "--emit-mlir" `elem` args
   , flagEmitEffectMlir = "--emit-effect-mlir" `elem` args
   , flagEmitOrgan = "--emit-organ" `elem` args
+                 || "--emit-organ-post-passes" `elem` args
+  , flagEmitOrganPost = "--emit-organ-post-passes" `elem` args
   , flagCompile  = "--compile" `elem` args
   , flagOutput   = case dropWhile (/= "--output") args of
                      ("--output":o:_) -> o
@@ -444,6 +454,17 @@ compileOrganIR inputFile = do
 
 handleOutput :: Program -> Flags -> IO ()
 handleOutput progRaw flags = do
+  -- Optional per-pass AST dump for host-vs-self-host divergence debugging.
+  -- Enabled by FRANKENSTEIN_DUMP_AST env var. Both this host path and the
+  -- self-host driver.c emit dumps with identical "=== AST after <pass> ==="
+  -- markers, so per-pass diffs localize the diverging pass.
+  dumpEnv <- lookupEnv "FRANKENSTEIN_DUMP_AST"
+  let dumpStage label p = case dumpEnv of
+        Nothing -> pure ()
+        Just _  -> do
+          hPutStrLn stderr ("=== AST after " ++ label ++ " ===")
+          TIO.hPutStrLn stderr (dumpProgram p)
+  dumpStage "consumer" progRaw
   -- Flatten nested patterns so downstream passes see only one level of
   -- constructor destructuring per case branch.
   -- NOTE: deriveSelectors already ran before the linker — do NOT re-run
@@ -451,18 +472,23 @@ handleOutput progRaw flags = do
   -- "progName" -> "Frankenstein.Core.Types_progName") and re-running
   -- would create duplicate selectors that only match the unmangled name.
   let prog0 = flattenPatterns progRaw
+  dumpStage "flattenPatterns" prog0
   -- Run effect optimizations before evidence pass
   let (optProg, optStats) = effectOptimizeWithStats prog0
+  dumpStage "effectOptimize" optProg
   -- Run global evidence pass again on the merged program.  The pre-linker
   -- pass resolves most effects; this catches any that survived (e.g. effects
   -- introduced by flattenPatterns or deriveSelectors re-run).
   let globalEffects = collectGlobalEffects optProg
-      prog = insertPerceus (evidencePassGlobal globalEffects optProg)
+      progEv = evidencePassGlobal globalEffects optProg
+  dumpStage "evidencePass" progEv
+  let prog = insertPerceus progEv
       config = defaultEmitConfig
         { ecOutputPath = flagOutput flags
         , ecKokaRuntimePath = Just "runtime/kk_runtime.c"
         , ecTarget = flagTarget flags
         }
+  dumpStage "insertPerceus" prog
   -- Print optimization stats if any optimizations fired (not for effect-dialect mode)
   let totalOpts = eosInlined optStats + eosEliminated optStats + eosTailRes optStats
   if totalOpts > 0 && not (flagEmitEffectMlir flags)
@@ -488,7 +514,9 @@ handleOutput progRaw flags = do
           -- normalizePatterns converts Bool PatCon → PatLit and adds
           -- PatWild defaults to exhaustive constructor cases, so the
           -- self-hosted compiler avoids buggy code paths.
-          TIO.putStrLn $ OrganEmit.emitProgram (normalizePatterns progRaw)
+          if flagEmitOrganPost flags
+            then TIO.putStrLn $ OrganEmit.emitProgram prog
+            else TIO.putStrLn $ OrganEmit.emitProgram (normalizePatterns progRaw)
       | flagEmitEffectMlir flags -> do
           -- Emit MLIR with frankenstein.* dialect ops — skip both the
           -- effect optimizer (which would inline handlers) and the

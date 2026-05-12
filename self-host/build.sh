@@ -29,6 +29,7 @@ MODULES=(
   src/Frankenstein/RustBridge/CoreTranslate.hs
   src/Frankenstein/MlirEmit/Dialects.hs
   src/Frankenstein/MlirEmit/Emitter.hs
+  src/Frankenstein/Debug/DumpProgram.hs
   src/Frankenstein/KokaBridge/CoreTranslate.hs
   src/Frankenstein/KokaBridge/Driver.hs
   src/OrganIR/Types.hs
@@ -441,8 +442,10 @@ if injected:
     print(f'  Injected {injected} missing globals from prev stage', file=sys.stderr)
 " 2>>"$OUTDIR/$flat.err"
         fi
-        # Fix intra-module $N call mismatches from split compilation
-        python3 self-host/fix-intra-module-calls.py "$OUTDIR/$flat.mlir" \
+        # Post-process MLIR (replaces fix-intra-module-calls.py,
+        # fix-dollar0-refs.py, fix-mlir-arity.py — see
+        # Frankenstein.MlirEmit.PostProcess for the Haskell port).
+        $FRKN_RUN --postprocess-mlir "$OUTDIR/$flat.mlir" \
           2>>"$OUTDIR/$flat.err"
         if $_any_fallback; then
           echo -n "(partial prev-stage fallback) "
@@ -481,14 +484,12 @@ if injected:
       fi
     fi
 
-    # Step 2b: Fix intra-module $N call mismatches
-    python3 self-host/fix-intra-module-calls.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
-
-    # Step 2c: Fix all other $0() references (pattern vars + function PAPs)
-    python3 self-host/fix-dollar0-refs.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
-
-    # Step 2d: Fix func.call arity mismatches
-    python3 self-host/fix-mlir-arity.py "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
+    # Step 2b: Post-process MLIR. Single Haskell pass replaces the former
+    # fix-intra-module-calls.py, fix-dollar0-refs.py, and fix-mlir-arity.py
+    # Python scripts (see Frankenstein.MlirEmit.PostProcess). Runs in the
+    # host-compiled frankenstein binary, so it's architecturally immune to
+    # any self-host runtime divergence in the emitted .mlir input.
+    $FRKN_RUN --postprocess-mlir "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err"
 
     # Step 3: MLIR → LLVM IR
     if ! mlir-opt $MLIR_PASSES "$OUTDIR/$flat.mlir" 2>>"$OUTDIR/$flat.err" \

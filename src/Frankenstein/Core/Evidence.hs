@@ -25,7 +25,8 @@ module Frankenstein.Core.Evidence
   ) where
 
 import Frankenstein.Core.Types
-import Frankenstein.Core.EffectOpt (isAbortHandler)
+import Frankenstein.Core.EffectOpt (isAbortHandler, HandlerKind(..), classifyHandler)
+import Frankenstein.Core.CpsConvert (cpsTopLevel)
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -140,6 +141,40 @@ evidenceExpr :: [EffectDecl] -> Scope -> Int -> Expr -> (Expr, Int)
 evidenceExpr effs scope nextTag expr = case expr of
   -- The key transformation: handle -> let-bind evidence, transform body
   EHandle effRow handler body
+    -- Multi-shot handler: CPS-convert the body so each EPerform site
+    -- reifies the remaining computation as a closure value the handler
+    -- can invoke any number of times. See docs/multi-shot-design.md.
+    --
+    -- Status (B2-medium): the CPS converter runs and produces a valid
+    -- transformed body, but the downstream lowering of the synthesised
+    -- continuation closure is not yet wired. The handler call shape
+    -- (\v -> rest_of_body) is emitted as a regular ELam — the existing
+    -- lambda-lifting pass in the emitter will allocate it as a closure.
+    -- The handler invokes resume by closure-indirect call, which the
+    -- emitter already supports for EApp on a non-topFns value.
+    --
+    -- TODO (B2-full): wire the handler-binding reference into the CPS
+    -- output (currently uses EFunRef qn as a sentinel — the handler
+    -- is the *evidence*, not a global function). Once wired, the
+    -- nondet demo + K verification claim land. See B2-remaining task.
+    | classifyHandler handler == HKMulti ->
+        let effName = effectRowName effRow
+            evName  = Name ("ev_" <> effName) 0
+            (handler', nextTag1) = evidenceExpr effs scope nextTag handler
+            cpsBody = cpsTopLevel body  -- pure transform, no scope work
+            -- Bind the handler as evidence; CPS body references it via
+            -- the sentinel EFunRef qn (which the emitter currently can't
+            -- resolve back to evName — wiring TBD in B2-full).
+            evBind = Bind
+              { bindName = evName
+              , bindType = anyType
+              , bindExpr = handler'
+              , bindSort = DefVal
+              }
+            scope' = insertEvidence effName evName scope
+            (cpsBody', nextTag2) = evidenceExpr effs scope' nextTag1 cpsBody
+        in (ELet [[evBind]] cpsBody', nextTag2)
+
     -- Abort handler: emit callback-based setjmp/longjmp pattern.
     -- The body is wrapped in a 0-arg lambda and passed to kk_handler_exec
     -- as a closure. kk_handler_exec calls setjmp in its own frame, then

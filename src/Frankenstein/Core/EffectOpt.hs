@@ -18,6 +18,8 @@ module Frankenstein.Core.EffectOpt
   , eliminateIdentityHandlers
   , annotateTailResumptive
   , isAbortHandler
+  , HandlerKind(..)
+  , classifyHandler
   , EffectOptStats(..)
   , effectOptimizeWithStats
   ) where
@@ -238,6 +240,64 @@ isAbortHandler (ELam params body)
       in not (containsName resumeName body)
   | otherwise = False  -- single-param or no-param → not abort (tail-resumptive)
 isAbortHandler _ = False
+
+-- | Coarse classification of effect handlers. The evidence pass routes
+-- each kind to a different lowering strategy. See docs/multi-shot-design.md.
+data HandlerKind
+  = HKAbort   -- ^ Handler discards the continuation (exn-style).
+  | HKTail    -- ^ Handler calls the continuation exactly once in tail
+              --   position (tail-resumptive — current default lowering).
+  | HKMulti   -- ^ Handler calls the continuation more than once, or
+              --   uses its result (must capture continuation as a value).
+  deriving (Eq, Show)
+
+-- | Classify a handler by how it uses the @resume@ continuation parameter.
+-- Convention: the handler's last parameter is the continuation. We count
+-- application sites of that parameter in the body.
+--
+--  * 0 references          → 'HKAbort'   (existing setjmp/longjmp lowering)
+--  * 1 reference  in tail  → 'HKTail'    (existing inlining lowering)
+--  * 1 ref non-tail / >=2  → 'HKMulti'   (CPS lowering, see CpsConvert)
+classifyHandler :: Expr -> HandlerKind
+classifyHandler (ELam params body)
+  | length params >= 2 =
+      let resumeName = nameText (fst (last params))
+          n = countAppsOf resumeName body
+      in if n == 0
+           then HKAbort
+           else if n == 1 && isTailCall resumeName body
+                  then HKTail
+                  else HKMulti
+  | otherwise = HKTail  -- 1-param or 0-param handlers: treat as tail
+classifyHandler _ = HKTail
+
+-- | Count the number of @EApp (EVar name) _@ sites under @expr@.
+-- Used by 'classifyHandler' to tell tail-resumptive from multi-shot.
+countAppsOf :: Text -> Expr -> Int
+countAppsOf name = go
+  where
+    go (EApp (EVar n) as)
+      | nameText n == name = 1 + sum (map go as)
+      | otherwise          = go (EVar n) + sum (map go as)
+    go (EApp f as)         = go f + sum (map go as)
+    go (ELam _ b)          = go b
+    go (ELet bgs b)        =
+      sum [ go (bindExpr bnd) | bg <- bgs, bnd <- bg ] + go b
+    go (ECase s brs)       = go s + sum (map (go . branchBody) brs)
+    go (EHandle _ h b)     = go h + go b
+    go (EPerform _ as)     = sum (map go as)
+    go (EDelay e)          = go e
+    go (EForce e)          = go e
+    go (ERetain e)         = go e
+    go (ERelease e)        = go e
+    go (EDrop e)           = go e
+    go (EReuse e1 e2)      = go e1 + go e2
+    go (ETypeApp e _)      = go e
+    go (ETypeLam _ e)      = go e
+    go (EVar _)            = 0
+    go (ELit _)            = 0
+    go (ECon _)            = 0
+    go (EFunRef _)         = 0
 
 -- | Check if a name appears anywhere in an expression
 containsName :: Text -> Expr -> Bool

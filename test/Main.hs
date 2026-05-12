@@ -10,7 +10,9 @@ import Frankenstein.Core.Perceus (insertPerceus, analyzeUsage, freeVars)
 import Frankenstein.Core.Evidence (evidencePass, evidencePassGlobal, collectGlobalEffects)
 import Frankenstein.Core.DeriveSelectors (deriveSelectors, recordSelectors)
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..)
-  , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive, isAbortHandler)
+  , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive, isAbortHandler
+  , HandlerKind(..), classifyHandler)
+import Frankenstein.Core.CpsConvert (cpsTopLevel)
 import Frankenstein.Core.FlattenPatterns (flattenPatternsExpr)
 import Frankenstein.Core.ConTags (assignProgramTags, collectReferencedCtors)
 import Frankenstein.MercuryBridge.HldsParse
@@ -76,6 +78,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , perceusTests
   , evidenceTests
   , effectOptTests
+  , cpsConvertTests
   , linkerTests
   , mlirEmitTests
   , flattenPatternsTests
@@ -1497,3 +1500,97 @@ myMaybeProgram = Program
       ]
   , progEffects = []
   }
+
+-------------------------------------------------------------------------------
+-- CPS conversion + multi-shot classifier tests
+-------------------------------------------------------------------------------
+
+cpsConvertTests :: TestTree
+cpsConvertTests = testGroup "CPS conversion / multi-shot classifier"
+  [ -- HandlerKind classification: how the resume parameter is used.
+
+    testCase "classifyHandler: abort (resume never referenced)" $
+      -- \v resume -> v   (resume unused)
+      let h = ELam [(mkName "v", anyType), (mkName "resume", anyType)]
+                (EVar (mkName "v"))
+      in classifyHandler h @?= HKAbort
+
+  , testCase "classifyHandler: tail-resumptive (single tail call to resume)" $
+      -- \v resume -> resume v
+      let h = ELam [(mkName "v", anyType), (mkName "resume", anyType)]
+                (EApp (EVar (mkName "resume")) [EVar (mkName "v")])
+      in classifyHandler h @?= HKTail
+
+  , testCase "classifyHandler: multi-shot (resume called twice)" $
+      -- \v resume -> resume True ++ resume False  (modelled as nested EApp)
+      let resumeTrue  = EApp (EVar (mkName "resume")) [ELit (LitInt 1)]
+          resumeFalse = EApp (EVar (mkName "resume")) [ELit (LitInt 0)]
+          h = ELam [(mkName "v", anyType), (mkName "resume", anyType)]
+                (EApp (EVar (mkName "append")) [resumeTrue, resumeFalse])
+      in classifyHandler h @?= HKMulti
+
+  , testCase "classifyHandler: multi-shot (resume in non-tail position)" $
+      -- \v resume -> let x = resume v in x + 1
+      let h = ELam [(mkName "v", anyType), (mkName "resume", anyType)]
+                (ELet [[Bind (mkName "x") anyType
+                          (EApp (EVar (mkName "resume")) [EVar (mkName "v")])
+                          DefVal]]
+                  (EApp (EVar (mkName "add"))
+                    [EVar (mkName "x"), ELit (LitInt 1)]))
+      in classifyHandler h @?= HKMulti
+
+  , -- CPS conversion: structural property tests on the output AST.
+
+    testCase "cpsTopLevel: literal is delivered to identity continuation" $
+      -- cps (ELit 42) id = ELit 42
+      cpsTopLevel (ELit (LitInt 42)) @?= ELit (LitInt 42)
+
+  , testCase "cpsTopLevel: variable is delivered to identity continuation" $
+      cpsTopLevel (EVar (mkName "x")) @?= EVar (mkName "x")
+
+  , testCase "cpsTopLevel: ECon passes through" $
+      cpsTopLevel (ECon (mkQName "" "Nothing"))
+        @?= ECon (mkQName "" "Nothing")
+
+  , testCase "cpsTopLevel: EApp recurses into fn and args" $
+      -- cps (f x y) id = f x y    (no perform, no continuation reified)
+      let e = EApp (EVar (mkName "f"))
+                [EVar (mkName "x"), EVar (mkName "y")]
+      in cpsTopLevel e @?= e
+
+  , testCase "cpsTopLevel: EPerform reifies a continuation closure" $
+      -- cps (perform op [a]) id
+      --   = handlerRef(op)(a, \k_cps_0 -> k_cps_0)
+      -- because the final cont is `id`, so `k (EVar v) = EVar v`.
+      let op = mkQName "exn" "raise"
+          input = EPerform op [EVar (mkName "msg")]
+          out = cpsTopLevel input
+      in case out of
+           EApp (EFunRef qn) [EVar (Name "msg" _), ELam [(kN, _)] (EVar kN')]
+             | qn == op && nameText kN == nameText kN' -> pure ()
+           _ -> assertFailure ("Unexpected CPS output: " ++ show out)
+
+  , testCase "cpsTopLevel: ELet linear sequencing" $
+      -- cps (let x = 1 in x) id = let x = 1 in x   (no effects)
+      let e = ELet [[Bind (mkName "x") anyType (ELit (LitInt 1)) DefVal]]
+                (EVar (mkName "x"))
+      in cpsTopLevel e @?= e
+
+  , testCase "cpsTopLevel: ECase distributes continuation into branches" $
+      -- cps (case x of Just y -> y; Nothing -> 0) id
+      --   = case x of Just y -> y; Nothing -> 0
+      let e = ECase (EVar (mkName "x"))
+                [ Branch (PatCon (mkQName "" "Just") [PatVar (mkName "y") anyType])
+                    Nothing (EVar (mkName "y"))
+                , Branch (PatCon (mkQName "" "Nothing") [])
+                    Nothing (ELit (LitInt 0))
+                ]
+      in cpsTopLevel e @?= e
+
+  , testCase "cpsTopLevel: idempotence on effect-free expressions" $
+      -- For expressions with no EPerform, CPS conversion is identity
+      -- (modulo administrative redexes, of which there are none here).
+      let e = EApp (EVar (mkName "f"))
+                [EApp (EVar (mkName "g")) [ELit (LitInt 1)]]
+      in cpsTopLevel (cpsTopLevel e) @?= cpsTopLevel e
+  ]

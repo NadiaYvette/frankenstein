@@ -34,6 +34,8 @@ module Frankenstein.Core.EvidenceEvv
   ) where
 
 import Frankenstein.Core.Types
+import Frankenstein.Core.CpsConvert (cpsTopLevel)
+import Frankenstein.Core.EffectOpt (HandlerKind(..), classifyHandler)
 
 import Data.Char (ord)
 import Data.Set (Set)
@@ -104,6 +106,13 @@ transformExpr effs topNames evv = go
       EPerform qn args ->
         lowerPerform qn (map go args)
 
+      -- After CPS conversion of an HKMulti handler's body, perform
+      -- sites appear as @EApp (EFunRef effect.op) (args ++ [contLam])@.
+      -- Lower these the same way as raw EPerform: evv lookup + optab
+      -- get + invoke (the continuation rides along as the last arg).
+      EApp (EFunRef qn) xs
+        | isEffectOp qn ->
+            lowerPerform qn (map go xs)
       -- Inject evv as the first arg of every call targeting a top-level
       -- definition in this program. Calls to runtime helpers (kk_*) and
       -- to local closures (let-bound variables, lambda params) are not
@@ -145,6 +154,16 @@ transformExpr effs topNames evv = go
     isTopLevelQ :: QName -> Bool
     isTopLevelQ qn = Set.member (qnameToFlat qn) topNames
 
+    -- An EFunRef qn is an effect-op reference iff qn.module names a
+    -- declared effect in this program. The CPS converter generates
+    -- exactly these for EPerform sites; substEFunRef (inline pass) does
+    -- the parallel job for the inline lowering. Here we lower the same
+    -- shape directly to the evv-lookup pattern.
+    isEffectOp :: QName -> Bool
+    isEffectOp qn = case lookupEffectDecl effs (qnameModule qn) of
+      Just _ -> True
+      Nothing -> False
+
     lowerHandle effRow handler body =
       let effName = effectRowName effRow
           effId   = hashEffectName effName
@@ -165,7 +184,18 @@ transformExpr effs topNames evv = go
                          (eApp "kk_evv_extend"
                             [EVar evv, ELit (LitInt effId), EVar opTab])
                          DefVal
-          body'      = transformExpr effs topNames newEvv body
+          -- For HKMulti handlers, CPS-convert the body before lowering.
+          -- After CPS, every EPerform appears as
+          --   EApp (EFunRef effect.op) (args ++ [contLam])
+          -- which the EApp(EFunRef …) branch of transformExpr lowers to
+          -- the evv-lookup + invoke pattern. The continuation lambda
+          -- captures @newEvv@ as a free variable, so when the handler
+          -- invokes the continuation later, it has the right evv in
+          -- scope.
+          bodyForTransform = case classifyHandler handler of
+            HKMulti -> cpsTopLevel body
+            _       -> body
+          body'      = transformExpr effs topNames newEvv bodyForTransform
       in ELet [[opTabBind, opSetBind, evvBind]] body'
 
     lowerPerform qn args =

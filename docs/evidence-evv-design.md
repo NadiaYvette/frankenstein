@@ -277,6 +277,40 @@ look up the handler. Two paths forward:
   Both interact with `Emitter.hs:1675` (the oversaturated path);
   whichever lands first should also revisit that bundling.
 
+  **PAP runtime + emitter wiring (IMPLEMENTED, partial)**.
+  `KK_PAP_TAG` with `kk_pap_call_N` trampolines added in commit
+  `13e6528`. The emitter's `emitFnAsValue` now pre-supplies `evv`
+  when emitting a plotkin'd top-level fn in value position, using
+  `esCurrentEvv` (set in `emitDef` when the first param is
+  `evv_p`). HOFs see a PAP closure whose trampoline at field 0
+  forwards (self, args...) to wrapped_fn(evv, args...), so the
+  existing closure dispatcher invokes plotkin'd fns transparently.
+
+  Progress: stage 2 compile count went from 12 modules (alias-
+  resolution only) to 18 modules (after adding `esLambdaDepth`
+  to gate the injection inside lifted lambdas without captured
+  evv). Six modules still fail at MLIR-validate:
+  FlattenPatterns, KokaCore, MercuryBridge/CoreTranslate,
+  MlirEmit/Emitter, KokaBridge/CoreTranslate, KokaBridge/Driver.
+  E2E: 0/21 — the linked stage 1 binary still has issues even
+  for modules that built clean.
+
+  Remaining blocker: **promoted let-rec functions**. The emitter
+  promotes inner recursive `let`-bound lambdas (e.g.
+  `frankenstein_dszd...`) to top-level via `emitBindAsTopFn`. The
+  promoted body is emitted with an alias map that still
+  references the OUTER lambda's capture SSAs (`%cap913` etc.).
+  When `emitFnAsValue` fires inside such a promoted body and
+  injects evv resolved through that map, the resulting MLIR
+  references an SSA defined in a different function — MLIR
+  region-isolation failure ("using value defined outside the
+  region").
+
+  The architecturally correct fix is to track a per-function
+  "in-scope SSA names" set in `EmitState` and gate injection
+  on actual membership rather than the current alias-map +
+  lambda-depth heuristic. Too invasive for one session; deferred.
+
   Inline-mode bootstrap remains 24/24 + 21/21 + fixed point.
 
 ## Files

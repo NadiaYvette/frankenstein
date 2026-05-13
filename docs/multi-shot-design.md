@@ -202,22 +202,33 @@ These belong to B2-full:
 | **Future** | K verification claim | next session |
 | **Future** | EffectOpt integration; B2-full benchmark suite | research |
 
-## What landed in B2-medium (this session)
+## What landed in B2-medium + B2-full
 
   - `docs/multi-shot-design.md` — this document.
   - `Frankenstein.Core.EffectOpt.HandlerKind` + `classifyHandler` —
     distinguishes `HKAbort` / `HKTail` / `HKMulti` from how the handler's
     last parameter (the resume) is used.
-  - `Frankenstein.Core.CpsConvert` — pure CPS converter, ~180 LOC.
-    Handles `EVar`/`ELit`/`ECon`/`EFunRef`/`EApp`/`ELam`/`ELet`/`ECase`/
+  - `Frankenstein.Core.CpsConvert` — pure CPS converter. Handles
+    `EVar`/`ELit`/`ECon`/`EFunRef`/`EApp`/`ELam`/`ELet`/`ECase`/
     `EPerform`/`ETypeLam`/`ETypeApp`/`EHandle`/`ERetain`/`ERelease`/
-    `EDrop`/`EReuse`/`EDelay`/`EForce`.
-  - 10 cabal unit tests covering both classifier and CPS converter.
+    `EDrop`/`EReuse`/`EDelay`/`EForce`. Plotkin-correct let-fusion at
+    `EPerform` sites: `cps[let x = M in N] k = cps[M] (\v -> let x = v
+    in cps[N] k)`.
+  - 12 cabal unit tests covering both classifier and CPS converter.
   - `Frankenstein.Core.Evidence.evidenceExpr` — Multi-shot dispatch
-    branch wired before the existing abort/tail branches. Currently
-    invokes the CPS converter and binds the handler as evidence; the
-    sentinel `EFunRef qn` for resolved performs still needs wiring (see
-    below).
+    branch with sentinel substitution: replaces `EFunRef qn` in the
+    CPS output with `EVar evName` (handler binding) based on
+    `scopeOps`.
+  - `Frankenstein.Core.EffectOpt.inlineLocalHandler` — guard against
+    `HKMulti`, preserving the multi-shot semantics until the evidence
+    pass.
+  - `examples/effect_nondet.json` — nondeterminism demo. Handler
+    resumes twice (with 1 and 0), body returns 10 or 20, handler
+    sums them: **end-to-end native output is 30**.
+  - `k-specs/multishot-claims.k` — 9 kprove claims (all `#Top`)
+    covering classifier on canonical handler shapes, countAppsOf
+    composition, and structural invariants.
+  - Bootstrap fixed point unchanged: **24/24 + 21/21** at all stages.
 
 ## What's left for B2-full
 

@@ -748,6 +748,96 @@ produces 3628800. All 56 cabal tests pass plus 2 new Scheme structural tests.
 
 ---
 
+## Phase 11: Native Multi-Shot Effect Handlers ✓
+
+**Goal**: Make `EHandle`/`EPerform` support multi-shot continuations natively,
+not just zero-shot (abort) and single-shot (tail-resumptive). Distinct from
+the specialized `mercury_choose` binary-choice runtime primitive — this is a
+general handler API where the handler receives `(args..., resume)` and may
+invoke `resume` any number of times with any value.
+
+### 11a. Handler classifier ✓
+
+`Frankenstein.Core.EffectOpt.HandlerKind` = `HKAbort | HKTail | HKMulti` and
+the `classifyHandler` function partition handlers by how the last parameter
+(the resume continuation) is used:
+
+  * 0 references → `HKAbort` (existing setjmp/longjmp lowering)
+  * 1 reference in tail position → `HKTail` (existing inlining lowering)
+  * 1 in non-tail position or ≥2 references → `HKMulti` (CPS lowering)
+
+### 11b. CPS converter ✓
+
+`Frankenstein.Core.CpsConvert` — pure Plotkin-style CPS transformation
+threaded through a thin `Cps` monad for fresh-name generation. Handles all
+expression forms. The key insight is let-fusion at `EPerform` sites:
+
+```
+cps[let x = M in N] k  =  cps[M] (\v -> Let x = v in cps[N] k)
+```
+
+so the handler's continuation captures the rest of the body, not just an
+identity binder. 12 cabal unit tests cover both the classifier and the CPS
+converter.
+
+### 11c. Evidence-pass dispatch + sentinel substitution ✓
+
+`Frankenstein.Core.Evidence.evidenceExpr` routes `HKMulti` handlers
+through CPS conversion, then runs `substEFunRef` to replace the
+sentinel `EFunRef qn` (left by the CPS converter at perform sites)
+with `EVar evName` — a regular variable reference to the handler's
+evidence binding. `Frankenstein.Core.EffectOpt.inlineLocalHandler`
+has a matching guard to skip `HKMulti` so optimization doesn't
+collapse multi-shot semantics back to single-shot.
+
+### 11d. Nondeterminism demo ✓
+
+`examples/effect_nondet.json`:
+
+```haskell
+effect nondet { choose : int }
+handler = \dummy resume -> let r1 = resume(1)
+                           in let r2 = resume(0)
+                           in r1 + r2
+body    = let b = perform choose 0 in case b of 1 -> 10; _ -> 20
+```
+
+After multi-shot evidence pass:
+
+```
+let ev_nondet = handler in
+ev_nondet(0, \k -> let b = k in case b of 10 | 20)
+```
+
+When `resume(1)` is invoked, the continuation yields 10. `resume(0)`
+yields 20. Handler returns `r1 + r2 = 30`.
+
+**End-to-end native binary output: 30.** First working multi-shot
+effect handler in Frankenstein, all the way through host →
+MLIR → LLVM IR → native binary.
+
+### 11e. K verification ✓
+
+`k-specs/multishot-claims.k` — 9 kprove claims, all proven `#Top`:
+
+  * **MS1**: Classifier on canonical shapes (abort / tail / multi).
+  * **MS2**: `countAppsOf` composition correctness (literal, direct
+    apply, nested apply).
+  * **MS3**: Structural invariants (1-param ELam / non-lambda → never
+    multi-shot).
+
+New K helpers in `EFFECTOPT-CHECKERS`: `countAppsOf` (and list/BG/branch
+variants), `isMultiShotHandler`.
+
+### 11f. Bootstrap verification ✓
+
+Full 3-stage bootstrap holds: **24/24 modules match between stage 2
+and stage 3, 21/21 E2E tests pass at every stage.** Multi-shot
+infrastructure is dormant for bootstrap modules (none of which use
+multi-shot handlers) and active only when invoked.
+
+---
+
 ## Cross-Module Effect Dispatch ✓
 
 **Goal**: Module A performs an effect, Module B handles it — effects work across

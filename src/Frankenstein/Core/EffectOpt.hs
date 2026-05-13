@@ -78,10 +78,17 @@ inlineLocalHandlers = fst . inlineLocalHandler emptyStats
 inlineLocalHandler :: EffectOptStats -> Expr -> (Expr, EffectOptStats)
 inlineLocalHandler stats expr = case expr of
   EHandle effRow handler@(ELam _params _handlerBody) body
-    -- Do NOT inline abort handlers — inlining an abort handler is semantically
-    -- wrong because the continuation after the perform site would still execute.
-    -- Abort handlers need setjmp/longjmp codegen in the evidence pass instead.
-    | not (isAbortHandler handler) ->
+    -- Inlining rules:
+    --   * Abort handlers: must stay as EHandle so the evidence pass can
+    --     emit setjmp/longjmp scaffolding.
+    --   * Multi-shot handlers: must stay as EHandle so the evidence
+    --     pass's HKMulti branch can CPS-convert the body and reify
+    --     continuations. Inlining would collapse perform sites into a
+    --     single handler call, destroying the multi-shot semantics.
+    --   * Tail-resumptive: safe to inline (handler call replaces the
+    --     perform exactly once, no continuation reification needed).
+    | not (isAbortHandler handler)
+    , classifyHandler handler /= HKMulti ->
     let effName = effectRowNameText effRow
         performCount = countPerforms effName body
     in if performCount > 0

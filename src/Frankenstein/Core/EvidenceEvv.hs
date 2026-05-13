@@ -119,34 +119,73 @@ evidencePassEvvGlobal topNames prog = prog
 qnameToFlat :: QName -> (Text, Text)
 qnameToFlat qn = (qnameModule qn, nameText (qnameName qn))
 
--- | Lower one definition. Adds an @evv@ parameter as the first formal
--- and rewrites the body to thread it through handles and performs.
+-- | Lower one definition.
+--
+-- (1) Prepend @evv@ as the first formal.
+-- (2) Eta-expand if the existing 'defExpr' lambda arity is less than
+--     'defType's flat arrow arity.
+--
+-- The combined effect: post-plotkin @defExpr@'s lambda arity matches
+-- @defType@'s flat arrow arity exactly. Callers issue saturated calls
+-- and never hit the emitter's oversaturated dispatch path
+-- (Emitter.hs:1675), which has a bug for curried closure chains.
+--
+-- For a GHC-eta-reduced def like @runCps = compose fst etaBody@ with
+-- type @Cps a -> a@: original 'defExpr' has 0 lambda params, 'defType'
+-- has flat arity 1. After this pass:
+--
+--   defType: @(any, Cps a) -> a@           (flat arity 2)
+--   defExpr: @\evv_p eta_p0 -> body eta_p0@ (lambda arity 2)
+--
+-- For a 1-param-lambda def like @consumeProgram = \txt -> ...@ with
+-- type @Text -> Either ...@: original has 1 lambda param, type has
+-- flat arity 1. After this pass:
+--
+--   defType: @(any, Text) -> Either ...@   (flat arity 2)
+--   defExpr: @\evv_p txt -> ...@           (lambda arity 2)
 transformDef :: [EffectDecl] -> Set (Text, Text) -> Def -> Def
 transformDef effs topNames d =
-  d { defExpr = prependEvvParam (defExpr d)
-    , defType = prependEvvType  (defType d)
+  d { defExpr = newExpr
+    , defType = prependEvvType (defType d)
     }
   where
     evvName = Name "evv_p" 0
 
-    -- For an ELam, add evv as the first formal. For a bare body,
-    -- wrap in a fresh 1-param lambda.
-    prependEvvParam :: Expr -> Expr
-    prependEvvParam = \case
-      ELam params body ->
-        ELam ((evvName, anyType) : params)
-             (transformExpr effs topNames evvName body)
-      body ->
-        ELam [(evvName, anyType)]
-             (transformExpr effs topNames evvName body)
+    -- Original defExpr decomposed into outer params and inner body.
+    (existingParams, innerBody) = case defExpr d of
+      ELam ps b -> (ps, b)
+      b         -> ([], b)
 
-    -- Add evv as the first arrow argument in the declared type. We
-    -- preserve any leading TForall.
-    prependEvvType :: Type -> Type
-    prependEvvType = \case
-      TForall vs t   -> TForall vs (prependEvvType t)
-      TFun args e r  -> TFun ((Many, anyType) : args) e r
-      t              -> TFun [(Many, anyType)] EffectRowEmpty t
+    -- Target arity after the evv prepend = flat type arity + 1.
+    targetArity  = flatTypeArity (defType d) + 1
+    currentArity = 1 + length existingParams
+    missing      = max 0 (targetArity - currentArity)
+
+    -- Fresh eta-expansion params @eta_p0..eta_p(missing-1)@ if needed.
+    etaParams = [ (Name (T.pack ("eta_p" <> show i)) 0, anyType)
+                | i <- [0 .. missing - 1] ]
+    bodyWithEta = case etaParams of
+      []     -> innerBody
+      ps     -> EApp innerBody [EVar n | (n, _) <- ps]
+
+    allParams = (evvName, anyType) : existingParams ++ etaParams
+    newExpr =
+      ELam allParams (transformExpr effs topNames evvName bodyWithEta)
+
+-- | Add @evv@ as the first arrow argument in the declared type. We
+-- preserve any leading 'TForall'.
+prependEvvType :: Type -> Type
+prependEvvType = \case
+  TForall vs t   -> TForall vs (prependEvvType t)
+  TFun args e r  -> TFun ((Many, anyType) : args) e r
+  t              -> TFun [(Many, anyType)] EffectRowEmpty t
+
+-- | Total flat arrow arity of a type — sum of all nested 'TFun' arg
+-- counts, after stripping 'TForall'.
+flatTypeArity :: Type -> Int
+flatTypeArity (TForall _ t)        = flatTypeArity t
+flatTypeArity (TFun args _ result) = length args + flatTypeArity result
+flatTypeArity _                    = 0
 
 -- | Walk an expression, rewriting EHandle and EPerform.
 -- @evv@ names the current in-scope evidence vector EVar.

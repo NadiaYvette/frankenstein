@@ -229,22 +229,53 @@ look up the handler. Two paths forward:
   a closure that takes ..., etc.) — those need one closure
   dispatch per extra arg.
 
-  Multi-session fix design:
+  Fix design (combined static + dynamic, see commit ddc4147 message):
 
-  1. Make `Frankenstein.Core.EvidenceEvv` eta-expand defs whose
-     `defExpr` arity is less than `defType` arity (after the evv
-     prepend), so the post-plotkin def has a single uncurried
-     lambda matching its type's arity. Removes the oversaturated
-     dispatch entirely. Subtle: requires generating fresh names
-     and matching argument positions; care needed around CAFs and
-     polymorphic types.
-  2. OR: extend the emitter to distinguish curried vs. uncurried
-     closures via tag bits or a separate "PAP" tag. Bigger change
-     but principled. Curried dispatch loops one-arg-at-a-time;
-     uncurried takes all at once.
+  **(1) `EvidenceEvv` eta-expansion** — IMPLEMENTED. Each def in
+  `transformDef` now computes a `targetArity = flatTypeArity defType
+  + 1` and eta-expands by adding `eta_p0..eta_pN` fresh params so
+  the post-plotkin `defExpr` lambda arity exactly matches
+  `defType`'s flat arrow arity. Confirmed: `unCps` now emits as
+  `fn(evv_p, eta_p0, eta_p1)` with type `(any, Cps a, Int) -> Tuple2`
+  (both arity 3, matched). The four small examples still pass
+  (84 / 100 / 30 / 99). `--demo` still produces 3628800.
 
-  Approach #1 (eta-expansion) is the more contained fix and the
-  natural next step.
+  **(1) is necessary but not sufficient** — bootstrapping still
+  fails. With every def now at full uncurried arity, the
+  oversaturated path at `Emitter.hs:1675` is no longer hit at
+  *plotkin-introduced* call sites. But the KK_TAG_TRACE output is
+  unchanged: the same closure-walked-as-list infinite recursion
+  appears at byte tag 10 of any non-trivial input.
+
+  **Next blocker: HOFs**. The bigger-tinder bug: when a
+  plotkin-transformed def is passed as a *value* (not a call) to a
+  higher-order function (`map`, `Map.fromList`, `foldr`,
+  `bind`, etc.), the HOF was compiled against the function's
+  ORIGINAL arity (1 arg) and invokes it with 1 arg. The
+  plotkin-transformed def now needs N+1 args (evv prepended). The
+  resulting 1-arg call is undersaturated → produces a PAP closure
+  instead of the value. The HOF stores PAPs in its result list, and
+  later code walking that list sees CLOSURE tags where it expects
+  data constructors.
+
+  Two paths forward (the latent third blocker, since HOFs are
+  pervasive):
+
+  - **PAP-as-value wrapping**. When emitting `EVar fn` as a value
+    (not the head of an EApp), wrap the post-plotkin fn in a PAP
+    that pre-supplies the current `evv_p`. The PAP then expects
+    only the original N args, matching what HOFs call it with.
+    Requires: emitter tracks "use as value" vs "use as call head";
+    PAP construction emits `kk_alloc_con(CLOSURE_TAG, 1+arity)`
+    with the fn pointer at field 0 and evv at field 1 (or similar
+    slot the dispatcher recognizes).
+  - **(2) PAP-tag distinction** (from earlier). Encode "curried
+    chain expecting one arg at a time" vs "uncurried N-arg body"
+    in the closure's tag word. Dispatcher branches; HOFs work
+    transparently because the PAP carries the dispatch shape.
+
+  Both interact with `Emitter.hs:1675` (the oversaturated path);
+  whichever lands first should also revisit that bundling.
 
   Inline-mode bootstrap remains 24/24 + 21/21 + fixed point.
 

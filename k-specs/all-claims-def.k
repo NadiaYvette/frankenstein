@@ -331,6 +331,34 @@ module LINKER-CHECKERS
 
 endmodule
 
+// --- Plotkin evidence-vector runtime semantics (D6) ---
+// Models the runtime kk_evv_extend / kk_evv_lookup semantics added in
+// D1. The evv is a stack of (effect_id, op_table) pairs; extend pushes
+// a new pair on top; lookup linear-searches from the top down so the
+// most recently installed handler shadows outer ones. op_tables are
+// also opaque integers at this level — what matters for the lowering
+// claims is the lookup semantics, not the table layout.
+
+module EVV-CHECKERS
+  imports ORGAN-IR
+  imports BOOL
+  imports INT
+
+  // Evidence vector: either empty or one frame on top of a parent.
+  syntax Evv ::= "emptyEvv"                       [symbol(emptyEvv)]
+               | evvExtend(Evv, Int, Int)         [symbol(evvExtend)]
+
+  // Lookup: walks from the top down, returning the op_table of the
+  // innermost matching frame, or 0 if no frame matches.
+  syntax Int ::= evvLookup(Evv, Int) [function, symbol(evvLookup)]
+  rule evvLookup(emptyEvv, _) => 0
+  rule evvLookup(evvExtend(_, EffId, Tab), EffId) => Tab
+  rule evvLookup(evvExtend(Parent, EffId1, _), EffId2)
+    => evvLookup(Parent, EffId2)
+    requires EffId1 =/=Int EffId2
+
+endmodule
+
 // --- Top-level combined module ---
 
 module ALL-CLAIMS-DEF
@@ -339,4 +367,5 @@ module ALL-CLAIMS-DEF
   imports EVIDENCE-CHECKERS
   imports EFFECTOPT-CHECKERS
   imports LINKER-CHECKERS
+  imports EVV-CHECKERS
 endmodule

@@ -202,6 +202,68 @@ module EFFECTOPT-CHECKERS
   syntax Bool ::= noPerformsOf(String, Expr) [function, symbol(noPerformsOf)]
   rule noPerformsOf(M, E) => countPerforms(M, E) ==Int 0
 
+  // -----------------------------------------------------------------
+  // Multi-shot classifier (mirrors classifyHandler in EffectOpt.hs).
+  //
+  // We count EApp sites whose head is `EVar N`. If a handler with last
+  // param K never applies K, it's Abort. If it applies K exactly once
+  // in tail position, it's Tail-resumptive. Otherwise (>1 use or
+  // non-tail use), Multi.
+  // -----------------------------------------------------------------
+
+  syntax Int ::= countAppsOf(Name, Expr) [function, symbol(countAppsOf)]
+  syntax Int ::= countAppsOfList(Name, ExprList) [function, symbol(countAppsOfList)]
+
+  rule countAppsOf(N, EApp(EVar(N), Args))
+    => 1 +Int countAppsOfList(N, Args)
+  rule countAppsOf(N, EApp(F, Args))
+    => countAppsOf(N, F) +Int countAppsOfList(N, Args)
+    [owise]
+  rule countAppsOf(N, ELam(_, Body))     => countAppsOf(N, Body)
+  rule countAppsOf(N, ELet(BGs, Body))
+    => countAppsOfBGList(N, BGs) +Int countAppsOf(N, Body)
+  rule countAppsOf(N, ECase(S, Brs))     => countAppsOf(N, S) +Int countAppsOfBranches(N, Brs)
+  rule countAppsOf(N, EHandle(_, H, B))  => countAppsOf(N, H) +Int countAppsOf(N, B)
+  rule countAppsOf(N, EPerform(_, Args)) => countAppsOfList(N, Args)
+  rule countAppsOf(N, EDelay(E))         => countAppsOf(N, E)
+  rule countAppsOf(N, EForce(E))         => countAppsOf(N, E)
+  rule countAppsOf(N, ERetain(E))        => countAppsOf(N, E)
+  rule countAppsOf(N, EDrop(E))          => countAppsOf(N, E)
+  rule countAppsOf(_, _)                 => 0 [owise]
+
+  rule countAppsOfList(_, .ExprList) => 0
+  rule countAppsOfList(N, E , Es)
+    => countAppsOf(N, E) +Int countAppsOfList(N, Es)
+
+  syntax Int ::= countAppsOfBGList(Name, BGList) [function, symbol(countAppsOfBGList)]
+  syntax Int ::= countAppsOfBG(Name, BindGroup)  [function, symbol(countAppsOfBG)]
+  rule countAppsOfBGList(_, .BGList) => 0
+  rule countAppsOfBGList(N, Bg ;; Rest)
+    => countAppsOfBG(N, Bg) +Int countAppsOfBGList(N, Rest)
+  rule countAppsOfBG(_, .BindGroup) => 0
+  rule countAppsOfBG(N, bind(_, _, Rhs, _) , Rest)
+    => countAppsOf(N, Rhs) +Int countAppsOfBG(N, Rest)
+
+  syntax Int ::= countAppsOfBranches(Name, BranchList) [function, symbol(countAppsOfBranches)]
+  rule countAppsOfBranches(_, .BranchList) => 0
+  rule countAppsOfBranches(N, branch(_, _, Body) ; Rest)
+    => countAppsOf(N, Body) +Int countAppsOfBranches(N, Rest)
+
+  // Handler is multi-shot iff:
+  //   - it has >= 2 params (last is the resume), AND
+  //   - resume is referenced > 1 time, OR referenced once but not in
+  //     tail position (i.e., its result is used by something else).
+  // For a 2-param ELam, "in tail position" means the body either is
+  // EApp(EVar(K),...), or a let/case whose tails all are.
+  syntax Bool ::= isMultiShotHandler(Expr) [function, symbol(isMultiShotHandler)]
+
+  rule isMultiShotHandler(
+         ELam(param(_X, _TX) , param(K, _TK) , .ParamList, Body)
+       ) => (countAppsOf(K, Body) >Int 1)
+            orBool ((countAppsOf(K, Body) ==Int 1) andBool (notBool isTailCall(K, Body)))
+
+  rule isMultiShotHandler(_) => false [owise]
+
 endmodule
 
 // --- Linker checker functions ---

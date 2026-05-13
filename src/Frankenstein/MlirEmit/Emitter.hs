@@ -506,6 +506,13 @@ emitProgramText prog =
     , "  func.func private @kk_handler_exec(i64, i64) -> i64"
     , "  func.func private @kk_handler_abort(i64, i64) -> i64"
     , ""
+    , "  // Plotkin-style evidence-vector dispatch"
+    , "  func.func private @kk_evv_extend(i64, i64, i64) -> i64"
+    , "  func.func private @kk_evv_lookup(i64, i64) -> i64"
+    , "  func.func private @kk_optab_create(i64) -> i64"
+    , "  func.func private @kk_optab_set(i64, i64, i64) -> i64"
+    , "  func.func private @kk_optab_get(i64, i64) -> i64"
+    , ""
     , "  // Mercury choice effect runtime (multi-shot backtracking)"
     , "  func.func private @mercury_choose() -> i64"
     , "  func.func private @mercury_collect_choices(i64) -> i64"
@@ -728,6 +735,13 @@ emitProgramWasm prog =
     , "  // Abort effect runtime (setjmp/longjmp)"
     , "  func.func private @kk_handler_exec(i64, i64) -> i64"
     , "  func.func private @kk_handler_abort(i64, i64) -> i64"
+    , ""
+    , "  // Plotkin-style evidence-vector dispatch"
+    , "  func.func private @kk_evv_extend(i64, i64, i64) -> i64"
+    , "  func.func private @kk_evv_lookup(i64, i64) -> i64"
+    , "  func.func private @kk_optab_create(i64) -> i64"
+    , "  func.func private @kk_optab_set(i64, i64, i64) -> i64"
+    , "  func.func private @kk_optab_get(i64, i64) -> i64"
     , ""
     , "  // Mercury choice effect runtime"
     , "  func.func private @mercury_choose() -> i64"
@@ -2746,6 +2760,8 @@ externalRuntimeFns = Set.fromList
   , "kk_thunk_create", "kk_thunk_create_forced", "kk_thunk_force"
   , "kk_evv_create", "kk_evv_set", "kk_evv_get", "kk_unhandled_effect"
   , "kk_handler_exec", "kk_handler_abort"
+  , "kk_evv_extend", "kk_evv_lookup"
+  , "kk_optab_create", "kk_optab_set", "kk_optab_get"
   , "printf", "puts", "exit", "exitWith", "malloc", "free"
   , "println_str", "print_str", "putStrLn"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
@@ -2767,6 +2783,8 @@ externalRuntimeArity = Map.fromList
   , ("kk_evv_create", 1), ("kk_evv_set", 3), ("kk_evv_get", 2)
   , ("kk_unhandled_effect", 0)
   , ("kk_handler_exec", 2), ("kk_handler_abort", 2)
+  , ("kk_evv_extend", 3), ("kk_evv_lookup", 2)
+  , ("kk_optab_create", 1), ("kk_optab_set", 3), ("kk_optab_get", 2)
   , ("printf", 2), ("puts", 1), ("exit", 1), ("exitWith", 1)
   , ("println_str", 1), ("print_str", 1), ("putStrLn", 1)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)

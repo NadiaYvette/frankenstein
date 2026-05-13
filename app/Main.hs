@@ -4,6 +4,7 @@ import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.Core.Evidence (evidencePassGlobal, collectGlobalEffects)
+import qualified Frankenstein.Core.EvidenceEvv as EvidenceEvv
 import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, EffectOptStats(..))
 import Frankenstein.Core.DeriveSelectors (deriveSelectors)
 import Frankenstein.Core.FlattenPatterns (flattenPatterns)
@@ -102,10 +103,16 @@ main = do
           allEffectDecls = concatMap progEffects derived
           globalEffects = collectGlobalEffects
             (Program (QName "" (Name "" 0)) [] [] allEffectDecls)
-          -- Run evidence pass on each module using the global registry
+          -- Run evidence pass on each module using the global registry.
+          -- --evidence=plotkin routes through the Plotkin-style pass instead.
+          runEvidence = case flagEvidenceMode flags of
+            EvidencePlotkin -> EvidenceEvv.evidencePassEvv
+            EvidenceInline  -> evidencePassGlobal globalEffects
           progs = if flagEmitEffectMlir flags
                   then derived  -- keep raw EHandle/EPerform for dialect output
-                  else map (evidencePassGlobal globalEffects) derived
+                  else map runEvidence derived
+      when (flagEvidenceMode flags == EvidencePlotkin) $
+        hPutStrLn stderr "[Frankenstein] evidence-mode=plotkin"
       if not (null errs) then
         mapM_ (\(f, e) -> TIO.putStrLn $ "Error [" <> T.pack f <> "]: " <> e) errs
       else do
@@ -139,10 +146,14 @@ data Flags = Flags
   , flagFromJson :: !Bool
   , flagTarget   :: !CompileTarget
   , flagNoSimplify :: !Bool
+  , flagEvidenceMode :: !EvidenceMode
   } deriving (Show)
 
+data EvidenceMode = EvidenceInline | EvidencePlotkin
+  deriving (Show, Eq)
+
 defaultFlags :: Flags
-defaultFlags = Flags False False False False False False "a.out" False TargetNative False
+defaultFlags = Flags False False False False False False "a.out" False TargetNative False EvidenceInline
 
 data Command
   = ShowHelp
@@ -194,6 +205,7 @@ removeArgValues [] = []
 removeArgValues ("-o":_:rest) = removeArgValues rest
 removeArgValues ("--output":_:rest) = removeArgValues rest
 removeArgValues ("--target":_:rest) = removeArgValues rest
+removeArgValues ("--evidence":_:rest) = removeArgValues rest
 removeArgValues (x:rest) = x : removeArgValues rest
 
 parseFlags :: [String] -> Flags
@@ -216,7 +228,21 @@ parseFlags args = Flags
                      ("--target":"wasm":_)   -> TargetWasm32
                      _ -> TargetNative
   , flagNoSimplify = "--no-simplify" `elem` args
+  , flagEvidenceMode =
+      let modes = [ m | a <- args, m <- evidenceArg a ]
+      in case modes of
+           (m:_) -> m
+           []    -> EvidenceInline
   }
+  where
+    evidenceArg "--evidence-plotkin"      = [EvidencePlotkin]
+    evidenceArg "--evidence-inline"       = [EvidenceInline]
+    evidenceArg s | take 11 s == "--evidence=" =
+        case drop 11 s of
+          "plotkin" -> [EvidencePlotkin]
+          "inline"  -> [EvidenceInline]
+          _         -> []
+    evidenceArg _ = []
 
 -- Compilation dispatch
 

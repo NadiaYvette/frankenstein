@@ -166,4 +166,11 @@ int64_t kk_just(int64_t x);
 int64_t kk_handler_exec(int64_t tag, int64_t body_closure);
 int64_t kk_handler_abort(int64_t tag, int64_t value);
 
+/* Plotkin evidence vector dispatch */
+int64_t kk_evv_extend(int64_t parent, int64_t eff_id, int64_t op_table);
+int64_t kk_evv_lookup(int64_t evv, int64_t eff_id);
+int64_t kk_optab_create(int64_t nops);
+int64_t kk_optab_set(int64_t tab, int64_t op_idx, int64_t closure);
+int64_t kk_optab_get(int64_t tab, int64_t op_idx);
+
 #endif /* KK_RUNTIME_H */

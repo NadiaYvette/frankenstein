@@ -18,6 +18,7 @@ library
         Frankenstein.Core.Perceus
         Frankenstein.Core.CycleAnalysis
         Frankenstein.Core.Evidence
+        Frankenstein.Core.EvidenceEvv
         Frankenstein.Core.EffectOpt
         Frankenstein.Core.DeriveSelectors
         Frankenstein.Core.FlattenPatterns

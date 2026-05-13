@@ -72,6 +72,8 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
 #define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" — field 0 is raw fn ptr */
 #define KK_THUNK_TAG   0x4C415A59  /* "LAZY" — field 0: eval flag, field 1: fn/result */
 #define KK_EVV_TAG     0x45565630  /* "EVV0" — all fields are handler fn ptrs */
+#define KK_EVV2_TAG    0x45565632  /* "EVV2" — Plotkin evidence stack: (eff_id, op_table) pairs */
+#define KK_OPTAB_TAG   0x4F505442  /* "OPTB" — operation table for one effect */
 
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
@@ -108,7 +110,16 @@ void kk_drop(int64_t ptr) {
         if (fields[0] != 0)  /* evaluated */
             kk_drop(fields[1]);
     } else if (tag == KK_EVV_TAG) {
-        /* Evidence vectors: all fields are handler fn pointers — skip */
+        /* Evidence vectors (legacy): all fields are handler fn pointers — skip */
+    } else if (tag == KK_EVV2_TAG) {
+        /* Plotkin evv: pairs of (eff_id, op_table). Even slots are integers
+         * (effect ids), odd slots are heap op_tables — drop only the odd. */
+        for (int64_t i = 1; i < nf; i += 2)
+            kk_drop(fields[i]);
+    } else if (tag == KK_OPTAB_TAG) {
+        /* Op tables: each field is a closure heap pointer — drop each. */
+        for (int64_t i = 0; i < nf; i++)
+            kk_drop(fields[i]);
     } else {
         /* Regular constructors: drop all fields */
         for (int64_t i = 0; i < nf; i++)
@@ -795,6 +806,64 @@ int64_t kk_unhandled_effect(void) {
     fprintf(stderr, "frankenstein: unhandled effect operation\n");
     exit(1);
     return 0;
+}
+
+/* ======================================================================
+ * Plotkin-style evidence-vector dispatch (KK_EVV2_TAG)
+ *
+ * An evv is a stack of (effect_id, op_table) pairs stored in adjacent
+ * field slots. Field layout: [eff_id_0, op_table_0, eff_id_1, op_table_1, ...].
+ * A NULL (0) parent represents the empty evv.
+ *
+ * Effect ids are produced by the compiler as deterministic hashes of the
+ * effect name (or by a runtime intern table — TBD). The runtime simply
+ * compares them numerically.
+ *
+ * An op_table is an OPTB-tagged kk_alloc_con whose fields are the closures
+ * for that effect's operations, ordered by the index assigned in the
+ * effect declaration.
+ * ====================================================================== */
+
+/* Build a child evv = parent ++ [(eff_id, op_table)] (top-of-stack last). */
+int64_t kk_evv_extend(int64_t parent, int64_t eff_id, int64_t op_table) {
+    int64_t parent_slots = (parent == 0) ? 0 : (kk_nfields(parent) / 2);
+    int64_t child = kk_alloc_con(KK_EVV2_TAG, (parent_slots + 1) * 2);
+    for (int64_t i = 0; i < parent_slots; i++) {
+        kk_set_field(child, 2*i,   kk_field(parent, 2*i));
+        kk_set_field(child, 2*i+1, kk_field(parent, 2*i+1));
+    }
+    kk_set_field(child, 2*parent_slots,   eff_id);
+    kk_set_field(child, 2*parent_slots+1, op_table);
+    return child;
+}
+
+/* Look up the op_table for the most recently installed handler of eff_id.
+ * Returns 0 if no handler is in scope. */
+int64_t kk_evv_lookup(int64_t evv, int64_t eff_id) {
+    if (evv == 0) return 0;
+    int64_t slots = kk_nfields(evv) / 2;
+    for (int64_t i = slots - 1; i >= 0; i--) {
+        if (kk_field(evv, 2*i) == eff_id) {
+            return kk_field(evv, 2*i+1);
+        }
+    }
+    return 0;
+}
+
+/* Allocate an op_table with `nops` empty slots. */
+int64_t kk_optab_create(int64_t nops) {
+    return kk_alloc_con(KK_OPTAB_TAG, nops);
+}
+
+/* Store a closure at op_idx in the op_table. Returns the table for chaining. */
+int64_t kk_optab_set(int64_t tab, int64_t op_idx, int64_t closure) {
+    kk_set_field(tab, op_idx, closure);
+    return tab;
+}
+
+/* Fetch the closure for op_idx from the op_table. */
+int64_t kk_optab_get(int64_t tab, int64_t op_idx) {
+    return kk_field(tab, op_idx);
 }
 
 /* ======================================================================

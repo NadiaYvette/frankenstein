@@ -164,17 +164,32 @@ look up the handler. Two paths forward:
      `Numeric.`, `Foreign.`).
 
   After these fixes, the stage 1 plotkin self-host binary no longer
-  returns wrong tags — but it now **hits the 30s build.sh
-  timeout** when compiling stage 2 inputs (`Speicherzugriffsfehler`
-  on timeout-induced core dump). All 24 modules still link into a
-  stage 1 binary; the per-module stage 2 compilation either spins
-  or runs slow enough that `timeout 30` kills it. Likely causes:
-  the extra evv plumbing + `drop(evv_p)` Perceus insertions on
-  every fn entry produce a perf pathology, or some interaction
-  triggers an infinite loop. Needs profiling. Inline-mode bootstrap
-  unaffected (still 24/24 + 21/21 + fixed point).
+  returns wrong tags — but it now segfaults with **infinite
+  recursion in `collectGlobalEffects`** when given any stage 2
+  module input (gdb backtrace shows ~100K frames in a single
+  desugarer-generated helper `dszd...`). The helper is the
+  desugared list-comprehension driving `[ (k, ops) | ed <-
+  progEffects prog ]`. It walks the input list checking
+  `kk_tag(arg) == 31636` for nil; if not, recurses on
+  `kk_field(arg, 1)`. The recursion never reaches nil even though
+  the input modules (Core/Types.hs etc.) have empty effect lists.
 
-  DB5 (3-stage fixed point under plotkin) remains open.
+  Hypothesis (unconfirmed): the parsed `Program`'s
+  `progEffects` field is structured wrong under plotkin — possibly
+  a thunk whose `kk_tag` returns the LAZY tag rather than a list
+  constructor tag, or a self-cons cell from a refcount / cycle-
+  candidate interaction. The selector and the helper have the same
+  MLIR shape as inline mode (just with `%evv_p0` threaded through
+  unused), so the difference must come from a downstream
+  interaction — most likely Perceus insertions or thunk-force
+  ordering changes triggered by the extra parameter.
+
+  DB5 (3-stage fixed point under plotkin) remains open. The next
+  diagnostic step would be: inject a printf in `kk_tag` (or the
+  dszd helper) to log the tag at each level of recursion, identify
+  whether the recursion is processing thunks, cycles, or some other
+  malformed value. Inline-mode bootstrap remains 24/24 + 21/21 +
+  fixed point.
 
 ## Files
 

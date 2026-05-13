@@ -171,25 +171,49 @@ look up the handler. Two paths forward:
   desugared list-comprehension driving `[ (k, ops) | ed <-
   progEffects prog ]`. It walks the input list checking
   `kk_tag(arg) == 31636` for nil; if not, recurses on
-  `kk_field(arg, 1)`. The recursion never reaches nil even though
-  the input modules (Core/Types.hs etc.) have empty effect lists.
+  `kk_field(arg, 1)`.
 
-  Hypothesis (unconfirmed): the parsed `Program`'s
-  `progEffects` field is structured wrong under plotkin — possibly
-  a thunk whose `kk_tag` returns the LAZY tag rather than a list
-  constructor tag, or a self-cons cell from a refcount / cycle-
-  candidate interaction. The selector and the helper have the same
-  MLIR shape as inline mode (just with `%evv_p0` threaded through
-  unused), so the difference must come from a downstream
-  interaction — most likely Perceus insertions or thunk-force
-  ordering changes triggered by the extra parameter.
+  Diagnostic via `KK_TAG_TRACE=1` in the runtime (env-gated
+  printf in `kk_tag`) produced the smoking gun. On any non-trivial
+  input, the trace shows ~10 sensible tags (THUNK/CLOS/Either/cons
+  cells), then a run of identical (pointer, tag) pairs:
 
-  DB5 (3-stage fixed point under plotkin) remains open. The next
-  diagnostic step would be: inject a printf in `kk_tag` (or the
-  dszd helper) to log the tag at each level of recursion, identify
-  whether the recursion is processing thunks, cycles, or some other
-  malformed value. Inline-mode bootstrap remains 24/24 + 21/21 +
-  fixed point.
+  ```
+  [kk_tag 10] heap ptr=0x...90181a0 tag=1129074515 (0x434c4f53)
+  [kk_tag 11] heap ptr=0x...90181a0 tag=1129074515 (0x434c4f53)
+  ... 15+ identical hits ...
+  ```
+
+  Tag `0x434c4f53` = `"CLOS"` = `KK_CLOSURE_TAG`. The helper is
+  walking a closure as if it's a list: `kk_field(closure, 1)`
+  reads out-of-bounds memory that happens to keep producing the
+  same closure pointer, so the recursion never terminates.
+
+  Root cause: **somewhere upstream, a Haskell function is
+  undersaturated under plotkin and returns a PAP closure instead
+  of evaluating to its real result** (the `[EffectDecl]` list, or
+  a value containing it). The list-comp helper then receives the
+  PAP, sees it has the CLOS tag (not 31636 for nil), and recurses
+  forever on garbage-but-consistent out-of-bounds reads.
+
+  Concrete diagnostic loop for the next session:
+
+  1. Re-link the stage 1 plotkin binary with the
+     `KK_TAG_TRACE=1`-gated runtime (already committed).
+  2. Run on a small input (e.g. emit-organ of closure.hs) and
+     identify the kk_tag index just before the cycle begins.
+  3. Add a second trace point at the EApp/EVar call site emission
+     in `Emitter.hs` so each call records which (callee, n_args)
+     it expects vs. issues, write that out alongside KK_TAG_TRACE.
+  4. Cross-reference the call site immediately before the
+     suspicious pointer is produced — that's the undersaturated
+     callee. The fix will likely be in `EvidenceEvv` or in the
+     arity-computation path in `Emitter.hs`'s `buildTopFnArity`
+     (which reads `topLamArity` from `defExpr`, not `defType` —
+     they may disagree after a plotkin transform on a CAF/eta-
+     reduced body).
+
+  Inline-mode bootstrap remains 24/24 + 21/21 + fixed point.
 
 ## Files
 

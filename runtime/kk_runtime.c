@@ -149,8 +149,19 @@ int64_t kk_reuse(int64_t ptr) {
 
 /* Read the tag from a boxed value */
 int64_t kk_tag(int64_t ptr) {
-    if (!kk_is_heap_ptr(ptr)) return 0;
-    return *(int64_t*)ptr;
+    if (!kk_is_heap_ptr(ptr)) {
+        if (getenv("KK_TAG_TRACE")) {
+            static int n0 = 0;
+            if (n0 < 100) fprintf(stderr, "[kk_tag %d] non-heap ptr=%ld → 0\n", n0++, ptr);
+        }
+        return 0;
+    }
+    int64_t t = *(int64_t*)ptr;
+    if (getenv("KK_TAG_TRACE")) {
+        static int n1 = 0;
+        if (n1 < 100) fprintf(stderr, "[kk_tag %d] heap ptr=%p tag=%ld (0x%lx)\n", n1++, (void*)ptr, t, t);
+    }
+    return t;
 }
 
 /* Read field[idx] from a boxed value (fields start after the tag) */

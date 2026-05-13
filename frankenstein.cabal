@@ -23,6 +23,7 @@ library
         Frankenstein.Core.FlattenPatterns
         Frankenstein.Core.NormalizePatterns
         Frankenstein.Core.CpsConvert
+        Frankenstein.Core.TypeCheck
         Frankenstein.Debug.DumpProgram
         Frankenstein.MlirEmit.PostProcess
         Frankenstein.Core.ConTags

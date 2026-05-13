@@ -13,6 +13,7 @@ import Frankenstein.Core.EffectOpt (effectOptimize, effectOptimizeWithStats, Eff
   , inlineLocalHandlers, eliminateIdentityHandlers, annotateTailResumptive, isAbortHandler
   , HandlerKind(..), classifyHandler)
 import Frankenstein.Core.CpsConvert (cpsTopLevel)
+import Frankenstein.Core.TypeCheck (typeCheckProgram, TypeError(..))
 import Frankenstein.Core.FlattenPatterns (flattenPatternsExpr)
 import Frankenstein.Core.ConTags (assignProgramTags, collectReferencedCtors)
 import Frankenstein.MercuryBridge.HldsParse
@@ -79,6 +80,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , evidenceTests
   , effectOptTests
   , cpsConvertTests
+  , typeCheckTests
   , linkerTests
   , mlirEmitTests
   , flattenPatternsTests
@@ -1593,4 +1595,94 @@ cpsConvertTests = testGroup "CPS conversion / multi-shot classifier"
       let e = EApp (EVar (mkName "f"))
                 [EApp (EVar (mkName "g")) [ELit (LitInt 1)]]
       in cpsTopLevel (cpsTopLevel e) @?= cpsTopLevel e
+  ]
+
+-------------------------------------------------------------------------------
+-- TypeCheck (IR well-formedness) tests
+-------------------------------------------------------------------------------
+
+typeCheckTests :: TestTree
+typeCheckTests = testGroup "TypeCheck"
+  [ testCase "well-typed: empty program" $
+      let prog = mkProgram "M" "main" []
+      in typeCheckProgram prog @?= []
+
+  , testCase "well-typed: int identity" $
+      let d = mkFunDef "M" "id"
+                (ELam [(mkName "x", intType)] (EVar (mkName "x")))
+                (TFun [(Many, intType)] EffectRowEmpty intType)
+          prog = mkProgram "M" "main" [d]
+      in typeCheckProgram prog @?= []
+
+  , testCase "well-typed: constructor reference resolves" $
+      let pair = ConDecl
+            { conName = mkQName "M" "Pair"
+            , conFields = [(mkName "x", intType), (mkName "y", intType)]
+            , conVis = Public
+            }
+          dd = DataDecl
+            { dataName = mkQName "M" "Pair"
+            , dataParams = []
+            , dataCons = [pair]
+            , dataVis = Public
+            }
+          body = EApp (ECon (mkQName "M" "Pair"))
+                   [ELit (LitInt 1), ELit (LitInt 2)]
+          d = mkFunDef "M" "make"
+                body
+                (TFun [] EffectRowEmpty intType)
+          prog = (mkProgram "M" "main" [d]) { progData = [dd] }
+      in typeCheckProgram prog @?= []
+
+  , testCase "ill-typed: unknown constructor (with module qualifier)" $
+      let body = ECon (mkQName "M" "Bogus")
+          d = mkFunDef "M" "f" body
+                (TFun [] EffectRowEmpty intType)
+          prog = mkProgram "M" "main" [d]
+      in typeCheckProgram prog
+           @?= [UnknownConstructor (mkQName "M" "Bogus")]
+
+  , testCase "ill-typed: pattern arity mismatch" $
+      let pair = ConDecl
+            { conName = mkQName "M" "Pair"
+            , conFields = [(mkName "x", intType), (mkName "y", intType)]
+            , conVis = Public
+            }
+          dd = DataDecl
+            { dataName = mkQName "M" "Pair"
+            , dataParams = []
+            , dataCons = [pair]
+            , dataVis = Public
+            }
+          -- pattern with one sub-pattern instead of two
+          br = Branch (PatCon (mkQName "M" "Pair") [PatWild intType])
+                 Nothing (ELit (LitInt 0))
+          body = ECase (EVar (mkName "scrut")) [br]
+          d = mkFunDef "M" "f" body
+                (TFun [(Many, anyType)] EffectRowEmpty intType)
+          prog = (mkProgram "M" "main" [d]) { progData = [dd] }
+      in typeCheckProgram prog
+           @?= [PatternArityMismatch (mkQName "M" "Pair") 2 1]
+
+  , testCase "ill-typed: function arity mismatch on toplevel call" $
+      let -- 2-arg add definition
+          addDef = mkFunDef "M" "add"
+            (ELam [(mkName "x", intType), (mkName "y", intType)]
+              (ELit (LitInt 0)))
+            (TFun [(Many, intType), (Many, intType)]
+                  EffectRowEmpty intType)
+          -- caller passes only 1 arg
+          caller = mkFunDef "M" "wrong"
+            (EApp (EVar (mkName "add")) [ELit (LitInt 1)])
+            (TFun [] EffectRowEmpty intType)
+          prog = mkProgram "M" "main" [addDef, caller]
+      in typeCheckProgram prog
+           @?= [FnArityMismatch (mkQName "M" "add") 2 1]
+
+  , testCase "ill-typed: empty case has no branches" $
+      let body = ECase (EVar (mkName "x")) []
+          d = mkFunDef "M" "f" body
+                (TFun [(Many, anyType)] EffectRowEmpty intType)
+          prog = mkProgram "M" "main" [d]
+      in typeCheckProgram prog @?= [EmptyCase]
   ]

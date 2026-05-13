@@ -248,4 +248,156 @@ module EFFECTOPT-CLAIMS
     true
   </k> [label(claim-eo-4e)]
 
+  // =================================================================
+  // Group EO5: identity-handler negation — handlers that should NOT
+  // be classified as identity. The recogniser must not be too eager.
+  // =================================================================
+
+  // EO5a: handler whose body applies k to the WRONG variable is not identity
+  claim <k>
+    isIdentityHandler(
+      ELam(
+        param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+        param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+        .ParamList,
+        EApp(EVar(name("k", 0)), EVar(name("y", 0)) , .ExprList)
+      )
+    )
+    =>
+    false
+  </k> [label(claim-eo-5a)]
+
+  // EO5b: handler with only one parameter is not identity (we require
+  // both an input AND a continuation parameter).
+  claim <k>
+    isIdentityHandler(
+      ELam(
+        param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+        .ParamList,
+        EVar(name("x", 0))
+      )
+    )
+    =>
+    false
+  </k> [label(claim-eo-5b)]
+
+  // EO5c: handler that applies the FIRST param (not the second) as the
+  // function is not identity — k must be the callee.
+  claim <k>
+    isIdentityHandler(
+      ELam(
+        param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+        param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+        .ParamList,
+        EApp(EVar(name("x", 0)), EVar(name("k", 0)) , .ExprList)
+      )
+    )
+    =>
+    false
+  </k> [label(claim-eo-5c)]
+
+  // =================================================================
+  // Group EO6: tail-call composition through ELet / ECase.
+  //
+  // isTailCall must propagate through the standard sequencing forms
+  // so that tail-resumptive handlers can have their resume call sit
+  // behind a let-chain or a case branch.
+  // =================================================================
+
+  // EO6a: tail call survives a let with a literal RHS
+  claim <k>
+    isTailCall(name("k", 0),
+      ELet(
+        (bind(name("tmp", 0),
+              TCon(typecon(qname("std/core/types", name("int", 0)), KValue)),
+              ELit(litInt(42)),
+              defVal) , .BindGroup) ;; .BGList,
+        EApp(EVar(name("k", 0)), EVar(name("tmp", 0)) , .ExprList)
+      )
+    )
+    =>
+    true
+  </k> [label(claim-eo-6a)]
+
+  // EO6b: tail call survives an empty case with the call in the body
+  // (degenerate — but the propagation rule fires).
+  claim <k>
+    isTailCall(name("k", 0),
+      ELet(
+        (bind(name("y", 0),
+              TCon(typecon(qname("std/core/types", name("int", 0)), KValue)),
+              ELit(litInt(7)),
+              defVal) , .BindGroup) ;; .BGList,
+        ELet(
+          (bind(name("z", 0),
+                TCon(typecon(qname("std/core/types", name("int", 0)), KValue)),
+                ELit(litInt(8)),
+                defVal) , .BindGroup) ;; .BGList,
+          EApp(EVar(name("k", 0)), EVar(name("z", 0)) , .ExprList)
+        )
+      )
+    )
+    =>
+    true
+  </k> [label(claim-eo-6b)]
+
+  // EO6c: a let whose body is NOT a tail call to k correctly returns false
+  claim <k>
+    isTailCall(name("k", 0),
+      ELet(
+        (bind(name("tmp", 0),
+              TCon(typecon(qname("std/core/types", name("int", 0)), KValue)),
+              ELit(litInt(1)),
+              defVal) , .BindGroup) ;; .BGList,
+        ELit(litInt(0))
+      )
+    )
+    =>
+    false
+  </k> [label(claim-eo-6c)]
+
+  // =================================================================
+  // Group EO7: countPerforms compositional invariants.
+  //
+  // Strengthens EO4 with multi-perform shapes.
+  // =================================================================
+
+  // EO7a: two performs in two argument positions are counted twice
+  claim <k>
+    countPerforms("exn",
+      EApp(EVar(name("plus", 0)),
+        EPerform(qname("exn", name("raise", 0)), .ExprList) ,
+        EPerform(qname("exn", name("raise", 0)), .ExprList) ,
+        .ExprList))
+    =>
+    2
+  </k> [label(claim-eo-7a)]
+
+  // EO7b: a perform inside a let RHS is counted
+  claim <k>
+    countPerforms("exn",
+      ELet(
+        (bind(name("v", 0),
+              TCon(typecon(qname("std/core/types", name("int", 0)), KValue)),
+              EPerform(qname("exn", name("raise", 0)), .ExprList),
+              defVal) , .BindGroup) ;; .BGList,
+        EVar(name("v", 0))
+      ))
+    =>
+    1
+  </k> [label(claim-eo-7b)]
+
+  // EO7c: noPerformsOf is robust under arbitrary let-shaped non-effect bodies
+  claim <k>
+    noPerformsOf("exn",
+      ELet(
+        (bind(name("y", 0),
+              TCon(typecon(qname("std/core/types", name("int", 0)), KValue)),
+              ELit(litInt(1)),
+              defVal) , .BindGroup) ;; .BGList,
+        EApp(EVar(name("f", 0)), EVar(name("y", 0)) , .ExprList)))
+    =>
+    true
+  </k> [label(claim-eo-7c)]
+
 endmodule

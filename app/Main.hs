@@ -36,6 +36,7 @@ import Frankenstein.IdrisBridge.Driver (readIdrisFile)
 import Frankenstein.IdrisBridge.CoreTranslate (translateIdris)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import qualified Frankenstein.MlirEmit.PostProcess as PostProcess
+import qualified Frankenstein.Core.TypeCheck as TC
 import Frankenstein.OrganIR.Consumer (consumeProgram)
 import Frankenstein.OrganIR.Emitter qualified as OrganEmit
 
@@ -66,6 +67,26 @@ main = do
       handleOutput prog flags
     SwiftCrossCheck files -> mapM_ swiftCrossCheck files
     PostProcessMlir files -> mapM_ PostProcess.postProcessFile files
+    TypeCheck files -> do
+      -- Compile each file to Core, then type-check.
+      results <- mapM (compileFile False True) files
+      let (errs, rawProgsList) = partitionResults results
+      mapM_ (\(p, e) -> TIO.putStrLn (T.pack p <> ": " <> e)) errs
+      let prog = case concat rawProgsList of
+            []  -> Program (QName "" (Name "" 0)) [] [] []
+            ps  -> foldr1 mergeProgs ps
+          mergeProgs a b = a
+            { progDefs    = progDefs a ++ progDefs b
+            , progData    = progData a ++ progData b
+            , progEffects = progEffects a ++ progEffects b
+            }
+      let tyErrs = TC.typeCheckProgram prog
+      if null tyErrs
+        then TIO.putStrLn "OK: well-typed."
+        else do
+          mapM_ (TIO.putStrLn . ("ERROR: " <>) . TC.prettyError) tyErrs
+          -- Don't exit non-zero — caller decides; this is a reporting tool.
+          pure ()
     CompileFiles files flags -> do
       results <- mapM (compileFile (flagFromJson flags) (not (flagNoSimplify flags))) files
       -- Run evidence pass with a GLOBAL effect registry (from all modules)
@@ -132,6 +153,7 @@ data Command
   | CompileFiles [FilePath] Flags
   | SwiftCrossCheck [FilePath]
   | PostProcessMlir [FilePath]
+  | TypeCheck [FilePath]
   deriving (Show)
 
 parseArgs :: [String] -> Command
@@ -148,6 +170,9 @@ parseArgs args
   | "--postprocess-mlir" `elem` args =
       let (files, _) = partition (not . isFlag) (removeArgValues args)
       in PostProcessMlir files
+  | "--typecheck" `elem` args =
+      let (files, _) = partition (not . isFlag) (removeArgValues args)
+      in TypeCheck files
   | otherwise =
       let flags = parseFlags args
           (files, _flagArgs) = partition (not . isFlag) (removeArgValues args)

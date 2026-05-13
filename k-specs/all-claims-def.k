@@ -186,7 +186,10 @@ module EFFECTOPT-CHECKERS
   rule countPerforms(M, EApp(F, Args))
     => countPerforms(M, F) +Int countPerformsList(M, Args)
   rule countPerforms(M, ELam(_, Body))    => countPerforms(M, Body)
-  rule countPerforms(M, ELet(_, Body))    => countPerforms(M, Body)
+  rule countPerforms(M, ELet(BGs, Body))
+    => countPerformsBGList(M, BGs) +Int countPerforms(M, Body)
+  rule countPerforms(M, ECase(Scrut, Brs))
+    => countPerforms(M, Scrut) +Int countPerformsBranches(M, Brs)
   rule countPerforms(M, EHandle(_, H, B)) => countPerforms(M, H) +Int countPerforms(M, B)
   rule countPerforms(M, EDelay(E))        => countPerforms(M, E)
   rule countPerforms(M, EForce(E))        => countPerforms(M, E)
@@ -197,6 +200,19 @@ module EFFECTOPT-CHECKERS
   rule countPerformsList(_, .ExprList) => 0
   rule countPerformsList(M, E , Es)
     => countPerforms(M, E) +Int countPerformsList(M, Es)
+
+  syntax Int ::= countPerformsBGList(String, BGList)     [function, symbol(countPerformsBGList)]
+  syntax Int ::= countPerformsBG(String, BindGroup)      [function, symbol(countPerformsBG)]
+  syntax Int ::= countPerformsBranches(String, BranchList) [function, symbol(countPerformsBranches)]
+  rule countPerformsBGList(_, .BGList) => 0
+  rule countPerformsBGList(M, Bg ;; Rest)
+    => countPerformsBG(M, Bg) +Int countPerformsBGList(M, Rest)
+  rule countPerformsBG(_, .BindGroup) => 0
+  rule countPerformsBG(M, bind(_, _, Rhs, _) , Rest)
+    => countPerforms(M, Rhs) +Int countPerformsBG(M, Rest)
+  rule countPerformsBranches(_, .BranchList) => 0
+  rule countPerformsBranches(M, branch(_, _, Body) ; Rest)
+    => countPerforms(M, Body) +Int countPerformsBranches(M, Rest)
 
   // After substitutePerforms runs, all EPerforms for the matched effect are gone.
   syntax Bool ::= noPerformsOf(String, Expr) [function, symbol(noPerformsOf)]

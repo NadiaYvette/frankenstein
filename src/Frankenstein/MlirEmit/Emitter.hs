@@ -288,6 +288,24 @@ emitProgramText prog =
       modPrefix = let m = qnameModule (progName prog)
                     in if T.null m then "" else sanitizeName m <> "_"
       qualMainName = modPrefix <> "_frankenstein_main"
+      -- Main's arity at the MLIR level. After D3 plotkin transform, main
+      -- takes (evv) as its first parameter; for non-plotkin compiles main
+      -- is 0-arg. We read the arity from the renamed Def's type.
+      mainArity = case [ d | d <- renamedDefs
+                           , nameText (qnameName (defName d)) == "_frankenstein_main" ] of
+                    (d:_) -> typeArity (defType d)
+                    _     -> 0
+      typeArity (TForall _ t)    = typeArity t
+      typeArity (TFun args _ _)  = length args
+      typeArity _                = 0
+      -- MLIR call-site signature for main and the args we pass.
+      mainCallSig = if mainArity == 0
+                    then "() -> i64"
+                    else "(" <> T.intercalate ", " (replicate mainArity "i64") <> ") -> i64"
+      mainCallArgs = T.intercalate ", " (replicate mainArity "%c0_evv")
+      mainCallPrelude = if mainArity == 0
+                        then ""
+                        else "    %c0_evv = arith.constant 0 : i64\n"
       -- Top-level names may already be module-mangled by the Linker
       -- (e.g. "Frankenstein.Core.Perceus_perceusExpr") — in that case
       -- sanitizeName alone produces the fully qualified symbol.  Only
@@ -356,14 +374,14 @@ emitProgramText prog =
       mainWrapper = if hasMain
         then if mainPrints
           then T.unlines $ mainHeader ++
-            [ "    func.call @" <> qualMainName <> "() : () -> i64"
+            [ mainCallPrelude <> "    func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
             ]
           else if mainReturnsString
           then T.unlines $ mainHeader ++
-            [ "    %result = func.call @" <> qualMainName <> "() : () -> i64"
+            [ mainCallPrelude <> "    %result = func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
             , "    func.call @kk_println_str(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
@@ -371,14 +389,14 @@ emitProgramText prog =
             ]
           else if mainReturnsADT
           then T.unlines $ mainHeader ++
-            [ "    %result = func.call @" <> qualMainName <> "() : () -> i64"
+            [ mainCallPrelude <> "    %result = func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
             , "    func.call @kk_println_con(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
             ]
           else T.unlines $ mainHeader ++
-            [ "    %result = func.call @" <> qualMainName <> "() : () -> i64"
+            [ mainCallPrelude <> "    %result = func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
             , "    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr"
             , "    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
             , "    %zero = arith.constant 0 : i32"

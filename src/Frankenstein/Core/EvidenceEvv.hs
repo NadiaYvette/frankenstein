@@ -36,34 +36,66 @@ module Frankenstein.Core.EvidenceEvv
 import Frankenstein.Core.Types
 
 import Data.Char (ord)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 
 -- | Apply the Plotkin lowering to every top-level definition.
+--
+-- Each top-level definition gets an extra @evv@ parameter prepended to
+-- its parameter list (D3 — full parameter threading). Every @EApp@
+-- targeting a top-level definition is rewritten to pass the current
+-- @evv@ as its first argument. The C @main@ wrapper passes @0@.
 evidencePassEvv :: Program -> Program
 evidencePassEvv prog = prog
-  { progDefs = map (transformDef effs) (progDefs prog)
+  { progDefs = map (transformDef effs topNames) (progDefs prog)
   }
   where
     effs = progEffects prog
+    topNames = Set.fromList
+      [ qnameToFlat (defName d) | d <- progDefs prog ]
 
--- | Lower one definition. Introduces a fresh @evv0 = 0@ binding (empty
--- evv) and rewrites the body so handles extend it and performs look it
--- up.
-transformDef :: [EffectDecl] -> Def -> Def
-transformDef effs d =
-  d { defExpr = wrapWithEvv (transformExpr effs evvRoot (defExpr d)) }
+-- | Canonical (module, name) representation for matching call sites.
+qnameToFlat :: QName -> (Text, Text)
+qnameToFlat qn = (qnameModule qn, nameText (qnameName qn))
+
+-- | Lower one definition. Adds an @evv@ parameter as the first formal
+-- and rewrites the body to thread it through handles and performs.
+transformDef :: [EffectDecl] -> Set (Text, Text) -> Def -> Def
+transformDef effs topNames d =
+  d { defExpr = prependEvvParam (defExpr d)
+    , defType = prependEvvType  (defType d)
+    }
   where
-    evvRoot = Name "evv0" 0
+    evvName = Name "evv_p" 0
 
-    -- Bind evv0 = 0 (empty evidence vector) at the top of the function.
-    wrapWithEvv inner = ELet [[evvBind]] inner
-    evvBind = Bind evvRoot anyType (ELit (LitInt 0)) DefVal
+    -- For an ELam, add evv as the first formal. For a bare body,
+    -- wrap in a fresh 1-param lambda.
+    prependEvvParam :: Expr -> Expr
+    prependEvvParam = \case
+      ELam params body ->
+        ELam ((evvName, anyType) : params)
+             (transformExpr effs topNames evvName body)
+      body ->
+        ELam [(evvName, anyType)]
+             (transformExpr effs topNames evvName body)
+
+    -- Add evv as the first arrow argument in the declared type. We
+    -- preserve any leading TForall.
+    prependEvvType :: Type -> Type
+    prependEvvType = \case
+      TForall vs t   -> TForall vs (prependEvvType t)
+      TFun args e r  -> TFun ((Many, anyType) : args) e r
+      t              -> TFun [(Many, anyType)] EffectRowEmpty t
 
 -- | Walk an expression, rewriting EHandle and EPerform.
 -- @evv@ names the current in-scope evidence vector EVar.
-transformExpr :: [EffectDecl] -> Name -> Expr -> Expr
-transformExpr effs evv = go
+-- @topNames@ is the set of (module, name) pairs that are top-level
+-- definitions in this Program — call sites against these get @evv@
+-- threaded as their first argument.
+transformExpr :: [EffectDecl] -> Set (Text, Text) -> Name -> Expr -> Expr
+transformExpr effs topNames evv = go
   where
     go expr = case expr of
       EHandle effRow handler body ->
@@ -72,12 +104,23 @@ transformExpr effs evv = go
       EPerform qn args ->
         lowerPerform qn (map go args)
 
+      -- Inject evv as the first arg of every call targeting a top-level
+      -- definition in this program. Calls to runtime helpers (kk_*) and
+      -- to local closures (let-bound variables, lambda params) are not
+      -- rewritten — their callees still take their original signature.
+      EApp (EVar nm) xs
+        | isTopLevel nm ->
+            EApp (EVar nm) (EVar evv : map go xs)
+      EApp (EFunRef qn) xs
+        | isTopLevelQ qn ->
+            EApp (EFunRef qn) (EVar evv : map go xs)
+      EApp f xs    -> EApp (go f) (map go xs)
+
       -- Pure structural recursion below.
       EVar _       -> expr
       ELit _       -> expr
       ECon _       -> expr
       EFunRef _    -> expr
-      EApp f xs    -> EApp (go f) (map go xs)
       ELam ps b    -> ELam ps (go b)
       ELet bgs b   -> ELet [[bd { bindExpr = go (bindExpr bd) } | bd <- bg] | bg <- bgs] (go b)
       ECase s brs  -> ECase (go s)
@@ -90,6 +133,17 @@ transformExpr effs evv = go
       EReuse a b   -> EReuse (go a) (go b)
       EDelay e     -> EDelay (go e)
       EForce e     -> EForce (go e)
+
+    -- An EVar with no module qualifier refers to a top-level fn iff
+    -- its bare name matches one of @topNames@. We check both with-
+    -- and without-module entries because bridges aren't consistent.
+    isTopLevel :: Name -> Bool
+    isTopLevel n =
+      let key = nameText n
+      in any (\(m, nm) -> nm == key) (Set.toList topNames)
+
+    isTopLevelQ :: QName -> Bool
+    isTopLevelQ qn = Set.member (qnameToFlat qn) topNames
 
     lowerHandle effRow handler body =
       let effName = effectRowName effRow
@@ -111,7 +165,7 @@ transformExpr effs evv = go
                          (eApp "kk_evv_extend"
                             [EVar evv, ELit (LitInt effId), EVar opTab])
                          DefVal
-          body'      = transformExpr effs newEvv body
+          body'      = transformExpr effs topNames newEvv body
       in ELet [[opTabBind, opSetBind, evvBind]] body'
 
     lowerPerform qn args =

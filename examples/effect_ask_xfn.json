@@ -1,0 +1,73 @@
+{
+  "schema_version": "0.1.0",
+  "metadata": {
+    "source_language": "haskell",
+    "compiler_version": "frankenstein",
+    "shim_version": "0.1.0"
+  },
+  "module": {
+    "name": "EffectAskXfn",
+    "definitions": [
+      {
+        "name": {"module": "EffectAskXfn", "name": {"text": "inner", "unique": 5}},
+        "type": {
+          "fn": {
+            "args": [],
+            "effect": {"effects": []},
+            "result": {"con": {"qname": {"module": "std", "name": {"text": "int", "unique": 0}}}}
+          }
+        },
+        "expr": {
+          "eperform": {
+            "effect": {"module": "ask", "name": {"text": "get", "unique": 0}},
+            "op": "get"
+          }
+        },
+        "sort": "fun",
+        "visibility": "public",
+        "arity": 0
+      },
+      {
+        "name": {"module": "EffectAskXfn", "name": {"text": "main", "unique": 10}},
+        "type": {
+          "fn": {
+            "args": [],
+            "effect": {"effects": []},
+            "result": {"con": {"qname": {"module": "std", "name": {"text": "int", "unique": 0}}}}
+          }
+        },
+        "expr": {
+          "ehandle": {
+            "effect": {"module": "", "name": {"text": "ask", "unique": 0}},
+            "handler": {
+              "elam": {
+                "params": [{"name": {"text": "x", "unique": 1}}],
+                "body": {"elit": {"int": 99}}
+              }
+            },
+            "body": {
+              "eapp": {
+                "fn": {"evar": {"text": "inner", "unique": 5}},
+                "args": []
+              }
+            }
+          }
+        },
+        "sort": "fun",
+        "visibility": "public",
+        "arity": 0
+      }
+    ],
+    "effect_decls": [
+      {
+        "name": {"module": "", "name": {"text": "ask", "unique": 0}},
+        "operations": [
+          {
+            "name": "get",
+            "type": {"con": {"qname": {"module": "std", "name": {"text": "int", "unique": 0}}}}
+          }
+        ]
+      }
+    ]
+  }
+}

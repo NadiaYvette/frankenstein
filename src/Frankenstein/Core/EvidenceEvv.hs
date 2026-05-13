@@ -50,9 +50,41 @@ import qualified Data.Text as T
 -- per-module: cross-module call sites need to know which callees are
 -- self-hosted (and so receive the evv parameter) versus which are C
 -- shims (linked from outside our progDefs).
+--
+-- Restricted to modules under the @Frankenstein.@ namespace. Calls to
+-- definitions in external packages (organ-ir, base, containers, etc.)
+-- pass through unchanged — those modules are compiled outside our
+-- pipeline and keep their original ABI; injecting evv there would
+-- produce calls the C linker resolves to 1-arg callees.
 collectTopNames :: [Program] -> Set (Text, Text)
 collectTopNames progs = Set.fromList
-  [ qnameToFlat (defName d) | p <- progs, d <- progDefs p ]
+  [ qnameToFlat (defName d)
+  | p <- progs
+  , d <- progDefs p
+  , isFrankensteinModule (qnameModule (defName d))
+  ]
+
+-- | Is this module's ABI safe to change? We exclude known external
+-- packages whose symbols are resolved by the C linker from cabal-
+-- compiled binaries without the plotkin transform. Anything else is
+-- fair game — including the small synthetic modules used by the
+-- effect demos (EffectAskXfn, etc.), which are compiled end-to-end
+-- through Frankenstein.
+isFrankensteinModule :: Text -> Bool
+isFrankensteinModule m = not (any (`T.isPrefixOf` m) externalPrefixes)
+  where
+    externalPrefixes =
+      [ "OrganIR."         -- organ-ir local-path dep
+      , "Data."            -- containers, text, etc.
+      , "GHC."             -- base
+      , "System."          -- base
+      , "Control."         -- base, transformers, mtl
+      , "Text."            -- text, pretty
+      , "Language."        -- ghc itself
+      , "Type."            -- ghc itself
+      , "Numeric."         -- base
+      , "Foreign."         -- base
+      ]
 
 -- | Single-module variant: builds topNames from the program itself.
 -- Used by tests and the single-file CLI path.
@@ -70,10 +102,18 @@ evidencePassEvv prog = evidencePassEvvGlobal (collectTopNames [prog]) prog
 -- passes @0@.
 evidencePassEvvGlobal :: Set (Text, Text) -> Program -> Program
 evidencePassEvvGlobal topNames prog = prog
-  { progDefs = map (transformDef effs topNames) (progDefs prog)
+  { progDefs = map transformOrSkip (progDefs prog)
   }
   where
     effs = progEffects prog
+    -- Only transform defs in the Frankenstein.* namespace. Defs from
+    -- external packages (organ-ir, base, ...) leak in via the bridge
+    -- but must keep their original ABI — the C linker resolves their
+    -- symbols to cabal-compiled binaries without the evv parameter.
+    transformOrSkip d
+      | isFrankensteinModule (qnameModule (defName d)) =
+          transformDef effs topNames d
+      | otherwise = d
 
 -- | Canonical (module, name) representation for matching call sites.
 qnameToFlat :: QName -> (Text, Text)
@@ -160,13 +200,20 @@ transformExpr effs topNames evv = go
       EDelay e     -> EDelay (go e)
       EForce e     -> EForce (go e)
 
-    -- An EVar with no module qualifier refers to a top-level fn iff
-    -- its bare name matches one of @topNames@. We check both with-
-    -- and without-module entries because bridges aren't consistent.
+    -- An EVar refers to a top-level fn iff its name matches one of
+    -- @topNames@. The bridge uses two encodings:
+    --   * unqualified leaf name (e.g. "consumeName")
+    --   * module/name slash-form (e.g. "Frankenstein.OrganIR.Consumer/consumeName")
+    -- We accept either, splitting on the last @/@.
     isTopLevel :: Name -> Bool
     isTopLevel n =
-      let key = nameText n
-      in any (\(m, nm) -> nm == key) (Set.toList topNames)
+      let txt = nameText n
+          (mModule, leaf) = case T.breakOnEnd "/" txt of
+            (pre, suf) | not (T.null pre) -> (Just (T.dropEnd 1 pre), suf)
+            _                             -> (Nothing, txt)
+      in case mModule of
+           Just m  -> Set.member (m, leaf) topNames
+           Nothing -> any (\(_, nm) -> nm == leaf) (Set.toList topNames)
 
     isTopLevelQ :: QName -> Bool
     isTopLevelQ qn = Set.member (qnameToFlat qn) topNames

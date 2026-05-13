@@ -100,7 +100,11 @@ echo "Total unresolved (non-kk, non-libc): $(wc -l < self-host/unresolved.txt)"
 echo ""
 echo "=== Phase 4: Compile drivers + cross-module shims ==="
 clang -O2 -c -o "$OUT/main.o" self-host/main.c -I runtime/
-clang -O2 -c -o "$OUT/driver.o" self-host/driver.c -I runtime/
+DRIVER_CFLAGS="-O2 -I runtime/"
+if [ "${FRANKENSTEIN_EVIDENCE:-}" = "plotkin" ]; then
+  DRIVER_CFLAGS="$DRIVER_CFLAGS -DPLOTKIN_EVIDENCE"
+fi
+clang -c -o "$OUT/driver.o" self-host/driver.c $DRIVER_CFLAGS
 clang -O2 -c -o "$OUT/kk_arena.o" runtime/kk_arena.c -I runtime/
 # Cross-module arity aliases (thin C wrappers with __asm__ labels)
 clang -O2 -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.c

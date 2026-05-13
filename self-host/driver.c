@@ -28,6 +28,29 @@ extern void kk_args_init(int argc, char** argv);
 /*  External declarations for self-hosted functions                    */
 /* ------------------------------------------------------------------ */
 
+/* Under PLOTKIN_EVIDENCE, every Haskell entry-point gains an extra
+ * leading evv (int64) parameter prepended by Frankenstein.Core.EvidenceEvv.
+ * The C-side wrappers below thread evv=0 as the empty evidence vector so
+ * the driver doesn't have to know about plotkin everywhere. */
+
+#ifdef PLOTKIN_EVIDENCE
+extern int64_t frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(int64_t /*evv*/, int64_t);
+extern int64_t frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t /*evv*/, int64_t);
+extern int64_t frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(int64_t /*evv*/);
+extern int64_t frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(int64_t /*evv*/, int64_t);
+extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(int64_t /*evv*/, int64_t, int64_t);
+extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t /*evv*/, int64_t);
+extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t /*evv*/, int64_t);
+extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t /*evv*/, int64_t);
+#define FRK_consumeProgram(s)         frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(0, (s))
+#define FRK_flattenPatterns(p)        frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(0, (p))
+#define FRK_effectOptimize()          frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(0)
+#define FRK_collectGlobalEffects(p)   frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(0, (p))
+#define FRK_evidencePassGlobal(g,p)   frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(0, (g), (p))
+#define FRK_insertPerceus(p)          frankenstein_Frankenstein_Core_Perceus_insertPerceus(0, (p))
+#define FRK_emitProgramText(p)        frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(0, (p))
+#define FRK_dumpProgram(p)            frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(0, (p))
+#else
 /* OrganIR/Consumer.o */
 extern int64_t frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(int64_t);
 
@@ -42,10 +65,19 @@ extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_
 /* Debug helper: deterministic show of a Program for host-vs-self-host
  * differential comparison. Enabled by FRANKENSTEIN_DUMP_AST env var. */
 extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t);
+#define FRK_consumeProgram(s)         frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram((s))
+#define FRK_flattenPatterns(p)        frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns((p))
+#define FRK_effectOptimize()          frankenstein_Frankenstein_Core_EffectOpt_effectOptimize()
+#define FRK_collectGlobalEffects(p)   frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects((p))
+#define FRK_evidencePassGlobal(g,p)   frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal((g), (p))
+#define FRK_insertPerceus(p)          frankenstein_Frankenstein_Core_Perceus_insertPerceus((p))
+#define FRK_emitProgramText(p)        frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText((p))
+#define FRK_dumpProgram(p)            frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram((p))
+#endif
 
 static void maybe_dump_ast(const char* label, int64_t prog) {
     if (!getenv("FRANKENSTEIN_DUMP_AST")) return;
-    int64_t dump = frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(prog);
+    int64_t dump = FRK_dumpProgram(prog);
     if (kk_is_string(dump)) {
         char* s = kk_str_dup_cstr(dump);
         fprintf(stderr, "=== AST after %s ===\n%s\n", label, s ? s : "(null)");
@@ -125,7 +157,7 @@ int main(int argc, char** argv) {
 
     /* OrganIR JSON -> Core IR */
     if (verbose) fprintf(stderr, "Parsing OrganIR (%ld bytes)...\n", (long)json_len);
-    int64_t result = frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(json_text);
+    int64_t result = FRK_consumeProgram(json_text);
 
     /* result is Either String Program.
      * With hash-based tags: Left=50386, Right=11965 (stable across all modules).
@@ -195,7 +227,7 @@ int main(int argc, char** argv) {
 
     if (verbose) fprintf(stderr, "Running flattenPatterns...\n");
     t0 = now_sec();
-    prog = frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(prog);
+    prog = FRK_flattenPatterns(prog);
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  flattenPatterns: %.3fs\n", t1 - t0);
     maybe_dump_ast("flattenPatterns", prog);
@@ -203,7 +235,7 @@ int main(int argc, char** argv) {
     if (verbose) fprintf(stderr, "Running effectOptimize...\n");
     t0 = now_sec();
     {
-        int64_t thunk = frankenstein_Frankenstein_Core_EffectOpt_effectOptimize();
+        int64_t thunk = FRK_effectOptimize();
         int64_t closure = kk_thunk_force(thunk);
         int64_t fp = kk_field(closure, 0);
         typedef int64_t (*fn2_t)(int64_t, int64_t);
@@ -216,8 +248,8 @@ int main(int argc, char** argv) {
     if (verbose) fprintf(stderr, "Running evidencePass...\n");
     t0 = now_sec();
     {
-        int64_t globalEffects = frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(prog);
-        prog = frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(globalEffects, prog);
+        int64_t globalEffects = FRK_collectGlobalEffects(prog);
+        prog = FRK_evidencePassGlobal(globalEffects, prog);
     }
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  evidencePass: %.3fs\n", t1 - t0);
@@ -228,7 +260,7 @@ int main(int argc, char** argv) {
     } else {
         if (verbose) fprintf(stderr, "Running insertPerceus...\n");
         t0 = now_sec();
-        prog = frankenstein_Frankenstein_Core_Perceus_insertPerceus(prog);
+        prog = FRK_insertPerceus(prog);
         t1 = now_sec();
         if (verbose) fprintf(stderr, "  insertPerceus: %.3fs\n", t1 - t0);
         maybe_dump_ast("insertPerceus", prog);
@@ -250,7 +282,7 @@ int main(int argc, char** argv) {
 
     if (verbose) fprintf(stderr, "Running emitProgramText...\n");
     t0 = now_sec();
-    int64_t mlir = frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
+    int64_t mlir = FRK_emitProgramText(prog);
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  emitProgramText: %.3fs\n", t1 - t0);
 

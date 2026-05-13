@@ -121,27 +121,60 @@ look up the handler. Two paths forward:
   `effect_ask`/`effect_state` cases happen to work because the handler
   ignores its formal parameter. A handler that uses both its arg and
   calls resume hasn't been tested.
-- **Bootstrap parity (DB1-DB5, partial)**: Foundation laid —
-  `evidencePassEvvGlobal` takes a cross-module top-names set
-  (`collectTopNames`) so cross-module call sites get evv injected
-  consistently; `self-host/build.sh` honours
-  `FRANKENSTEIN_EVIDENCE=plotkin` and forwards `--evidence=plotkin` to
-  every host-compiler invocation. Result of running the full
-  bootstrap with that env var: all 24 modules emit plotkin MLIR and
-  link into a stage 1 binary (5.69 MB, down from 8.29 MB inline),
-  but the stage 1 binary fails to compile inputs at stage 2 — 0/21
-  E2E tests pass at every subsequent stage, stage 2/3 MLIR doesn't
-  match (no fixed point). The proximate cause: plotkin's +1-arg ABI
-  change reaches every function, and any inconsistency (closure
-  capture, linker arity tables, GHC's pre-existing oversaturation
-  patterns interacting with our prepended evv) propagates as runtime
-  failures. The self-host binary's `main.c` also still calls
-  `evidencePass` (inline) directly — a real plotkin self-host
-  binary would need to call `evidencePassEvv` instead, which means
-  modifying `self-host/main.c` and the Haskell entry-point set.
-  Genuinely multi-session work; the foundation (DB1-DB3) is in
-  place but DB4 (stage 1 e2e parity) and DB5 (3-stage fixed point)
-  remain open.
+- **Bootstrap parity (DB1-DB5, partial)**: Foundation laid and
+  three real ABI bugs fixed.
+
+  - DB1 `evidencePassEvvGlobal` takes a cross-module top-names set
+    (`collectTopNames`) so cross-module call sites get evv injected
+    consistently.
+  - DB2 `self-host/build.sh` honours `FRANKENSTEIN_EVIDENCE=plotkin`
+    and forwards `--evidence=plotkin` to every host-compiler
+    invocation, and `-DPLOTKIN_EVIDENCE` to `clang -c driver.c`.
+  - DB3 Single-module smoke (Core/Types.hs) passes.
+
+  Three bugs found and fixed by working back from the original
+  failure mode (`Unexpected tag from consumeProgram: 1129074515`):
+
+  1. **`self-host/driver.c` passed too few args**. The C-side
+     entry-points (`consumeProgram`, compiler passes, etc.) called
+     the Haskell functions with their original arity. After plotkin
+     they take one extra @evv@ leading arg, so the C calls were
+     undersaturated and returned a PAP closure instead of the real
+     result. Fixed via `-DPLOTKIN_EVIDENCE` macro guard around
+     extern decls and call sites; every C-side entry-point now
+     passes `evv=0` (empty evv) as the first arg under plotkin.
+  2. **`isTopLevel` missed module-qualified EVar names**. The GHC
+     bridge emits `EVar (Name "Frankenstein.OrganIR.Consumer/consumeName" _)`
+     for cross-module references (slash-form), but my pass only
+     compared against the unqualified leaf. Result: cross-module
+     calls weren't getting evv injected, so callees expecting `(evv,
+     args...)` were called with `(args...)`. Fixed by splitting on
+     the last @/@: if a module part is present, exact (module, leaf)
+     match against `topNames`; otherwise fall back to leaf-only
+     matching for backward compatibility.
+  3. **`collectTopNames` swept in external-package modules**. The
+     bridge pulls `OrganIR.Parse`, `Data.Map.Strict`, etc., into
+     `derived` even though they're compiled by cabal (no plotkin)
+     and linked from outside our pipeline. Treating them as
+     plotkinable meant my pass injected evv at call sites for
+     callees whose C-linked symbol still takes the original
+     args. Fixed by filtering `collectTopNames` and `transformDef`
+     to skip a known set of external prefixes (`OrganIR.`, `Data.`,
+     `GHC.`, `System.`, `Control.`, `Text.`, `Language.`, `Type.`,
+     `Numeric.`, `Foreign.`).
+
+  After these fixes, the stage 1 plotkin self-host binary no longer
+  returns wrong tags — but it now **hits the 30s build.sh
+  timeout** when compiling stage 2 inputs (`Speicherzugriffsfehler`
+  on timeout-induced core dump). All 24 modules still link into a
+  stage 1 binary; the per-module stage 2 compilation either spins
+  or runs slow enough that `timeout 30` kills it. Likely causes:
+  the extra evv plumbing + `drop(evv_p)` Perceus insertions on
+  every fn entry produce a perf pathology, or some interaction
+  triggers an infinite loop. Needs profiling. Inline-mode bootstrap
+  unaffected (still 24/24 + 21/21 + fixed point).
+
+  DB5 (3-stage fixed point under plotkin) remains open.
 
 ## Files
 

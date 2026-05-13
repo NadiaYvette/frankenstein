@@ -1,0 +1,170 @@
+{
+  "schema_version": "0.1.0",
+  "metadata": {
+    "source_language": "haskell",
+    "compiler_version": "frankenstein",
+    "shim_version": "0.1.0"
+  },
+  "module": {
+    "name": "EffectNondet",
+    "definitions": [
+      {
+        "name": {
+          "module": "EffectNondet",
+          "name": { "text": "main", "unique": 10 }
+        },
+        "type": {
+          "fn": {
+            "args": [],
+            "effect": { "effects": [] },
+            "result": {
+              "con": {
+                "qname": {
+                  "module": "std",
+                  "name": { "text": "int", "unique": 0 }
+                }
+              }
+            }
+          }
+        },
+        "expr": {
+          "ehandle": {
+            "effect": {
+              "module": "",
+              "name": { "text": "nondet", "unique": 0 }
+            },
+            "handler": {
+              "elam": {
+                "params": [
+                  { "name": { "text": "dummy", "unique": 1 } },
+                  { "name": { "text": "resume", "unique": 2 } }
+                ],
+                "body": {
+                  "elet": {
+                    "binds": [
+                      {
+                        "name": { "text": "r1", "unique": 3 },
+                        "type": {
+                          "con": {
+                            "qname": {
+                              "module": "std",
+                              "name": { "text": "int", "unique": 0 }
+                            }
+                          }
+                        },
+                        "expr": {
+                          "eapp": {
+                            "fn": { "evar": { "text": "resume", "unique": 2 } },
+                            "args": [{ "elit": { "int": 1 } }]
+                          }
+                        }
+                      }
+                    ],
+                    "body": {
+                      "elet": {
+                        "binds": [
+                          {
+                            "name": { "text": "r2", "unique": 4 },
+                            "type": {
+                              "con": {
+                                "qname": {
+                                  "module": "std",
+                                  "name": { "text": "int", "unique": 0 }
+                                }
+                              }
+                            },
+                            "expr": {
+                              "eapp": {
+                                "fn": { "evar": { "text": "resume", "unique": 2 } },
+                                "args": [{ "elit": { "int": 0 } }]
+                              }
+                            }
+                          }
+                        ],
+                        "body": {
+                          "eapp": {
+                            "fn": { "evar": { "text": "+", "unique": 0 } },
+                            "args": [
+                              { "evar": { "text": "r1", "unique": 3 } },
+                              { "evar": { "text": "r2", "unique": 4 } }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "body": {
+              "elet": {
+                "binds": [
+                  {
+                    "name": { "text": "b", "unique": 5 },
+                    "type": {
+                      "con": {
+                        "qname": {
+                          "module": "std",
+                          "name": { "text": "int", "unique": 0 }
+                        }
+                      }
+                    },
+                    "expr": {
+                      "eperform": {
+                        "effect": {
+                          "module": "nondet",
+                          "name": { "text": "choose", "unique": 0 }
+                        },
+                        "op": "choose",
+                        "args": [{ "elit": { "int": 0 } }]
+                      }
+                    }
+                  }
+                ],
+                "body": {
+                  "ecase": {
+                    "scrutinee": { "evar": { "text": "b", "unique": 5 } },
+                    "branches": [
+                      {
+                        "pattern": { "pat_lit": { "int": 1 } },
+                        "body": { "elit": { "int": 10 } }
+                      },
+                      {
+                        "pattern": { "pat_wild": {} },
+                        "body": { "elit": { "int": 20 } }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "sort": "fun",
+        "visibility": "public",
+        "arity": 0
+      }
+    ],
+    "effect_decls": [
+      {
+        "name": {
+          "module": "",
+          "name": { "text": "nondet", "unique": 0 }
+        },
+        "operations": [
+          {
+            "name": "choose",
+            "type": {
+              "con": {
+                "qname": {
+                  "module": "std",
+                  "name": { "text": "int", "unique": 0 }
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

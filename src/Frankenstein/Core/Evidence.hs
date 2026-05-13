@@ -145,35 +145,33 @@ evidenceExpr effs scope nextTag expr = case expr of
     -- reifies the remaining computation as a closure value the handler
     -- can invoke any number of times. See docs/multi-shot-design.md.
     --
-    -- Status (B2-medium): the CPS converter runs and produces a valid
-    -- transformed body, but the downstream lowering of the synthesised
-    -- continuation closure is not yet wired. The handler call shape
-    -- (\v -> rest_of_body) is emitted as a regular ELam — the existing
-    -- lambda-lifting pass in the emitter will allocate it as a closure.
-    -- The handler invokes resume by closure-indirect call, which the
-    -- emitter already supports for EApp on a non-topFns value.
-    --
-    -- TODO (B2-full): wire the handler-binding reference into the CPS
-    -- output (currently uses EFunRef qn as a sentinel — the handler
-    -- is the *evidence*, not a global function). Once wired, the
-    -- nondet demo + K verification claim land. See B2-remaining task.
+    -- The CPS converter emits @EApp (EFunRef qn) (args ++ [contLam])@
+    -- at perform sites. We then substitute @EFunRef qn@ with @EVar
+    -- evName@ (the handler-binding reference) using the freshly-built
+    -- evidence scope, so the call resolves at lowering time.
     | classifyHandler handler == HKMulti ->
         let effName = effectRowName effRow
             evName  = Name ("ev_" <> effName) 0
             (handler', nextTag1) = evidenceExpr effs scope nextTag handler
-            cpsBody = cpsTopLevel body  -- pure transform, no scope work
-            -- Bind the handler as evidence; CPS body references it via
-            -- the sentinel EFunRef qn (which the emitter currently can't
-            -- resolve back to evName — wiring TBD in B2-full).
+            -- Single-op shortcut: bind ev directly, install op-level
+            -- handler reference for the (effName, only-op) pair so
+            -- substEFunRef can replace EFunRef qn → EVar evName.
+            scope0 = insertEvidence effName evName scope
+            scope1 = case lookupEffectDecl effs effName of
+              Just ed | [singleOp] <- effectOps ed ->
+                let opN = nameText (qnameName (opName singleOp))
+                in insertOp effName opN evName scope0
+              _ -> scope0
+            cpsBody  = cpsTopLevel body
+            cpsBody' = substEFunRef scope1 cpsBody
             evBind = Bind
               { bindName = evName
               , bindType = anyType
               , bindExpr = handler'
               , bindSort = DefVal
               }
-            scope' = insertEvidence effName evName scope
-            (cpsBody', nextTag2) = evidenceExpr effs scope' nextTag1 cpsBody
-        in (ELet [[evBind]] cpsBody', nextTag2)
+            (cpsBody'', nextTag2) = evidenceExpr effs scope1 nextTag1 cpsBody'
+        in (ELet [[evBind]] cpsBody'', nextTag2)
 
     -- Abort handler: emit callback-based setjmp/longjmp pattern.
     -- The body is wrapped in a 0-arg lambda and passed to kk_handler_exec
@@ -434,3 +432,41 @@ lookupOpIndex effs effName opN =
 -- | Placeholder type for evidence records
 anyType :: Type
 anyType = TCon (TypeCon (QName "std" (Name "any" 0)) KindValue)
+
+-- | After CPS conversion, replace each 'EFunRef qn' (the sentinel
+-- emitted by 'CpsConvert.cpsExpr' at @EPerform@ sites) with a regular
+-- 'EVar' pointing at the evidence binding installed for that effect's
+-- operation. References to effects not in the current scope are left
+-- alone (they will be resolved by an outer handler, or fall through
+-- to the unresolved-external path in the emitter).
+substEFunRef :: Scope -> Expr -> Expr
+substEFunRef scp = go
+  where
+    go (EFunRef qn) =
+      let eff = qnameModule qn
+          op  = nameText (qnameName qn)
+      in case Map.lookup (eff, op) (scopeOps scp) of
+           Just n  -> EVar n
+           Nothing -> EFunRef qn
+    go (EApp f as)     = EApp (go f) (map go as)
+    go (ELam ps b)     = ELam ps (go b)
+    go (ELet bgs b)    = ELet [[ bnd { bindExpr = go (bindExpr bnd) }
+                                | bnd <- bg ]
+                              | bg <- bgs ] (go b)
+    go (ECase s brs)   = ECase (go s)
+                          [ br { branchBody = go (branchBody br)
+                               , branchGuard = fmap go (branchGuard br) }
+                          | br <- brs ]
+    go (EHandle ef h b)  = EHandle ef (go h) (go b)
+    go (EPerform qn as)  = EPerform qn (map go as)
+    go (ETypeLam tvs e)  = ETypeLam tvs (go e)
+    go (ETypeApp e ts)   = ETypeApp (go e) ts
+    go (ERetain e)       = ERetain  (go e)
+    go (ERelease e)      = ERelease (go e)
+    go (EDrop e)         = EDrop    (go e)
+    go (EReuse e1 e2)    = EReuse (go e1) (go e2)
+    go (EDelay e)        = EDelay (go e)
+    go (EForce e)        = EForce (go e)
+    go e@(EVar _)        = e
+    go e@(ELit _)        = e
+    go e@(ECon _)        = e

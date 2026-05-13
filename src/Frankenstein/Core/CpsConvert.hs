@@ -155,11 +155,29 @@ cpsExprs (x:xs) k =
   cpsExpr x $ \xv ->
     cpsExprs xs $ \xvs -> k (xv : xvs)
 
--- | Bind-group helper. Each binding's RHS is independently CPS-converted
--- (its value flows to its binder); the body of the let then carries the
--- outer continuation.
+-- | Bind-group helper. The proper Plotkin CPS for @let x = M in N@ fuses
+-- the binding's value into the continuation:
+--
+-- > cps[let x = M in N] k  =  cps[M] (\v -> Let x = v in cps[N] k)
+--
+-- This is essential for multi-shot semantics: if M performs an effect,
+-- the continuation captures "the rest of the let" (the body, with x
+-- bound to the perform-result), so the handler can resume that rest
+-- with different values arbitrarily many times.
+--
+-- For recursive bind groups or groups with multiple bindings we fall
+-- back to the simpler treatment (CPS-convert each RHS independently
+-- with @pure@ as the continuation, then ELet). This is unsound for
+-- multi-shot with effectful recursive RHS but matches the existing
+-- single-shot behaviour for those cases — multi-shot lets stay
+-- non-recursive in practice.
 cpsBindGroups :: [BindGroup] -> Expr -> (Expr -> Cps Expr) -> Cps Expr
 cpsBindGroups [] body k = cpsExpr body k
+-- Non-recursive single-binding case: fuse RHS into continuation.
+cpsBindGroups ([Bind nm ty rhs srt] : rest) body k =
+  cpsExpr rhs $ \v -> do
+    inner <- cpsBindGroups rest body k
+    pure (ELet [[Bind nm ty v srt]] inner)
 cpsBindGroups (bg : rest) body k = do
   bg' <- mapM cpsBind bg
   rest' <- cpsBindGroups rest body k

@@ -196,22 +196,55 @@ look up the handler. Two paths forward:
   PAP, sees it has the CLOS tag (not 31636 for nil), and recurses
   forever on garbage-but-consistent out-of-bounds reads.
 
-  Concrete diagnostic loop for the next session:
+  Root cause identified via MLIR inspection (no code fix yet — too
+  invasive for one session):
 
-  1. Re-link the stage 1 plotkin binary with the
-     `KK_TAG_TRACE=1`-gated runtime (already committed).
-  2. Run on a small input (e.g. emit-organ of closure.hs) and
-     identify the kk_tag index just before the cycle begins.
-  3. Add a second trace point at the EApp/EVar call site emission
-     in `Emitter.hs` so each call records which (callee, n_args)
-     it expects vs. issues, write that out alongside KK_TAG_TRACE.
-  4. Cross-reference the call site immediately before the
-     suspicious pointer is produced — that's the undersaturated
-     callee. The fix will likely be in `EvidenceEvv` or in the
-     arity-computation path in `Emitter.hs`'s `buildTopFnArity`
-     (which reads `topLamArity` from `defExpr`, not `defType` —
-     they may disagree after a plotkin transform on a CAF/eta-
-     reduced body).
+  - `unCps :: Cps a -> Int -> (a, Int)` is a newtype selector that
+    GHC simplifies to (effectively) the identity. After GHC, its
+    `defExpr` is a bare reference (no ELam). My plotkin pass wraps
+    it as `\evv_p -> body`, giving `defExpr` arity 1. But
+    `defType` after plotkin says arity 3 (any, Cps, Int). The
+    body becomes a single-arg lambda that returns a closure
+    wrapping `unCps_lambda1`, which is itself the identity over
+    one arg `(clos, p) -> p`.
+
+  - Callers issue `unCps(evv, c, i)` — 3 args. The emitter sees
+    `arity=1`, takes the oversaturated path (`Emitter.hs:1675`):
+    sat-args `[evv]` go to `func.call @unCps`, returning a closure;
+    extra-args `[c, i]` are bundled into a SINGLE multi-arg
+    `llvm.call %fptr(self, c, i)`. But `unCps_lambda1` is a
+    one-arg lambda body `(self, p) -> p`. The `i` argument is
+    silently dropped, and the result is `c` — instead of the
+    intended `unCps(c)(0)` chain.
+
+  - Downstream code (`fst (...)`) interprets the wrong-type value
+    as a tuple, garbage-reads field 0, the result of that gets
+    walked as a list by `Map.fromList`, infinite recursion ensues.
+
+  The emitter's oversaturated path bundles ALL extra args into one
+  llvm.call. This is correct for closure bodies that genuinely
+  take N args at once (e.g. user lambdas `\x y -> body` lambda-
+  lifted to `lam(self, x, y)`). It's WRONG for curried closure
+  chains (`unCps(c)` returns a closure that takes `i`, returning
+  a closure that takes ..., etc.) — those need one closure
+  dispatch per extra arg.
+
+  Multi-session fix design:
+
+  1. Make `Frankenstein.Core.EvidenceEvv` eta-expand defs whose
+     `defExpr` arity is less than `defType` arity (after the evv
+     prepend), so the post-plotkin def has a single uncurried
+     lambda matching its type's arity. Removes the oversaturated
+     dispatch entirely. Subtle: requires generating fresh names
+     and matching argument positions; care needed around CAFs and
+     polymorphic types.
+  2. OR: extend the emitter to distinguish curried vs. uncurried
+     closures via tag bits or a separate "PAP" tag. Bigger change
+     but principled. Curried dispatch loops one-arg-at-a-time;
+     uncurried takes all at once.
+
+  Approach #1 (eta-expansion) is the more contained fix and the
+  natural next step.
 
   Inline-mode bootstrap remains 24/24 + 21/21 + fixed point.
 

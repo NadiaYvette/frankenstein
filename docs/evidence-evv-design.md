@@ -115,19 +115,33 @@ look up the handler. Two paths forward:
 
 ## Known Gaps / Open Work
 
-- **D5: multi-shot via evv-in-continuation**. See above.
-- **D6: K-verify the evv lowering**. Soundness claims that
-  `evidencePassEvv` preserves the operational semantics of
-  `EHandle`/`EPerform` from `organ-ir.k`.
+- **D5: multi-shot via evv-in-continuation** — done; nondet → 30 ✓
+- **D6: K-verify the evv lowering** — done; 15 EVV claims #Top ✓
 - **Tail-resumptive evv** isn't actually exercised yet: the
   `effect_ask`/`effect_state` cases happen to work because the handler
   ignores its formal parameter. A handler that uses both its arg and
   calls resume hasn't been tested.
-- **Bootstrap parity**: the self-hosted compiler hasn't been run
-  through `--evidence=plotkin`. Currently the bootstrap modules don't
-  use `EHandle`/`EPerform`, so the pass is a no-op except for the
-  ABI change (every top-level fn gains an evv parameter — likely
-  breaks linking against the C shim layer).
+- **Bootstrap parity (DB1-DB5, partial)**: Foundation laid —
+  `evidencePassEvvGlobal` takes a cross-module top-names set
+  (`collectTopNames`) so cross-module call sites get evv injected
+  consistently; `self-host/build.sh` honours
+  `FRANKENSTEIN_EVIDENCE=plotkin` and forwards `--evidence=plotkin` to
+  every host-compiler invocation. Result of running the full
+  bootstrap with that env var: all 24 modules emit plotkin MLIR and
+  link into a stage 1 binary (5.69 MB, down from 8.29 MB inline),
+  but the stage 1 binary fails to compile inputs at stage 2 — 0/21
+  E2E tests pass at every subsequent stage, stage 2/3 MLIR doesn't
+  match (no fixed point). The proximate cause: plotkin's +1-arg ABI
+  change reaches every function, and any inconsistency (closure
+  capture, linker arity tables, GHC's pre-existing oversaturation
+  patterns interacting with our prepended evv) propagates as runtime
+  failures. The self-host binary's `main.c` also still calls
+  `evidencePass` (inline) directly — a real plotkin self-host
+  binary would need to call `evidencePassEvv` instead, which means
+  modifying `self-host/main.c` and the Haskell entry-point set.
+  Genuinely multi-session work; the foundation (DB1-DB3) is in
+  place but DB4 (stage 1 e2e parity) and DB5 (3-stage fixed point)
+  remain open.
 
 ## Files
 

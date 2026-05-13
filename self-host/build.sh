@@ -5,6 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 FRKN="cabal-3.16.1.0 -v0 exec -w /usr/lib64/ghc-9.14.1/bin/ghc frankenstein --"
+# Propagate FRANKENSTEIN_EVIDENCE=plotkin (or inline) as a --evidence flag.
+# Default is inline (the historical pipeline; bootstrap baseline).
+EVIDENCE_FLAG=""
+if [ -n "${FRANKENSTEIN_EVIDENCE:-}" ]; then
+  EVIDENCE_FLAG="--evidence=${FRANKENSTEIN_EVIDENCE}"
+fi
 OUT=self-host/obj
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -52,7 +58,7 @@ for src in "${MODULES[@]}"; do
   flat="${base//\//_}"
 
   echo -n "  $rel ... "
-  if $FRKN "$src" --no-simplify --emit-mlir > "$OUT/$flat.mlir" 2>"$OUT/$flat.err"; then
+  if $FRKN "$src" --no-simplify --emit-mlir $EVIDENCE_FLAG > "$OUT/$flat.mlir" 2>"$OUT/$flat.err"; then
     echo -n "mlir "
     if mlir-opt $MLIR_PASSES "$OUT/$flat.mlir" 2>>"$OUT/$flat.err" \
        | mlir-translate --mlir-to-llvmir > "$OUT/$flat.ll" 2>>"$OUT/$flat.err"; then

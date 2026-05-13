@@ -104,9 +104,14 @@ main = do
           globalEffects = collectGlobalEffects
             (Program (QName "" (Name "" 0)) [] [] allEffectDecls)
           -- Run evidence pass on each module using the global registry.
-          -- --evidence=plotkin routes through the Plotkin-style pass instead.
+          -- --evidence=plotkin routes through the Plotkin-style pass.
+          -- Plotkin mode needs a global top-name set so cross-module
+          -- callees receive the evv parameter; runtime symbols (kk_*,
+          -- foreign import ccall targets) are not in topNames and
+          -- pass through unchanged.
+          plotkinTopNames = EvidenceEvv.collectTopNames derived
           runEvidence = case flagEvidenceMode flags of
-            EvidencePlotkin -> EvidenceEvv.evidencePassEvv
+            EvidencePlotkin -> EvidenceEvv.evidencePassEvvGlobal plotkinTopNames
             EvidenceInline  -> evidencePassGlobal globalEffects
           progs = if flagEmitEffectMlir flags
                   then derived  -- keep raw EHandle/EPerform for dialect output

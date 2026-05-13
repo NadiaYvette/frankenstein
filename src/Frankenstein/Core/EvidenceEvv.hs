@@ -30,6 +30,8 @@
 
 module Frankenstein.Core.EvidenceEvv
   ( evidencePassEvv
+  , evidencePassEvvGlobal
+  , collectTopNames
   , hashEffectName
   ) where
 
@@ -43,20 +45,35 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 
--- | Apply the Plotkin lowering to every top-level definition.
+-- | Collect the set of (module, name) pairs of top-level definitions
+-- across a list of programs. Use this when running 'evidencePassEvvGlobal'
+-- per-module: cross-module call sites need to know which callees are
+-- self-hosted (and so receive the evv parameter) versus which are C
+-- shims (linked from outside our progDefs).
+collectTopNames :: [Program] -> Set (Text, Text)
+collectTopNames progs = Set.fromList
+  [ qnameToFlat (defName d) | p <- progs, d <- progDefs p ]
+
+-- | Single-module variant: builds topNames from the program itself.
+-- Used by tests and the single-file CLI path.
+evidencePassEvv :: Program -> Program
+evidencePassEvv prog = evidencePassEvvGlobal (collectTopNames [prog]) prog
+
+-- | Multi-module variant: takes a pre-built global topNames set so
+-- cross-module call sites are recognised as self-hosted. Apply the
+-- Plotkin lowering to every top-level definition of @prog@.
 --
 -- Each top-level definition gets an extra @evv@ parameter prepended to
 -- its parameter list (D3 — full parameter threading). Every @EApp@
--- targeting a top-level definition is rewritten to pass the current
--- @evv@ as its first argument. The C @main@ wrapper passes @0@.
-evidencePassEvv :: Program -> Program
-evidencePassEvv prog = prog
+-- targeting a top-level definition (per @topNames@) is rewritten to
+-- pass the current @evv@ as its first argument. The C @main@ wrapper
+-- passes @0@.
+evidencePassEvvGlobal :: Set (Text, Text) -> Program -> Program
+evidencePassEvvGlobal topNames prog = prog
   { progDefs = map (transformDef effs topNames) (progDefs prog)
   }
   where
     effs = progEffects prog
-    topNames = Set.fromList
-      [ qnameToFlat (defName d) | d <- progDefs prog ]
 
 -- | Canonical (module, name) representation for matching call sites.
 qnameToFlat :: QName -> (Text, Text)

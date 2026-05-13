@@ -74,6 +74,26 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
 #define KK_EVV_TAG     0x45565630  /* "EVV0" — all fields are handler fn ptrs */
 #define KK_EVV2_TAG    0x45565632  /* "EVV2" — Plotkin evidence stack: (eff_id, op_table) pairs */
 #define KK_OPTAB_TAG   0x4F505442  /* "OPTB" — operation table for one effect */
+#define KK_PAP_TAG     0x50415030  /* "PAP0" — partially applied fn with pre-supplied args
+                                    *
+                                    * Layout: [tag, trampoline, wrapped_fn, supplied_0, supplied_1, ...]
+                                    * Field 0: kk_pap_call_N (a trampoline raw fn ptr)
+                                    * Field 1: wrapped_fn (raw .text fn ptr to the actual fn)
+                                    * Field 2..K: pre-supplied args (e.g. evv)
+                                    *
+                                    * Invoked by the standard closure dispatcher
+                                    * (kk_field(c, 0) + llvm.call(c, args...)): the
+                                    * trampoline at field 0 receives (self=PAP, args...)
+                                    * and forwards to wrapped_fn(supplied..., args...).
+                                    *
+                                    * Used by the plotkin emitter: when an EVar fn
+                                    * appears as a value (not as the head of an EApp),
+                                    * the emitter wraps it in a PAP with the current
+                                    * evv_p pre-supplied. HOFs (map, fromList, etc.)
+                                    * then dispatch through the PAP exactly the same
+                                    * way they dispatch any other closure — they don't
+                                    * need to know the function was plotkin-transformed.
+                                    */
 
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
@@ -119,6 +139,14 @@ void kk_drop(int64_t ptr) {
     } else if (tag == KK_OPTAB_TAG) {
         /* Op tables: each field is a closure heap pointer — drop each. */
         for (int64_t i = 0; i < nf; i++)
+            kk_drop(fields[i]);
+    } else if (tag == KK_PAP_TAG) {
+        /* PAP: fields 0 (trampoline) and 1 (wrapped fn) are raw .text
+         * fn pointers — kk_drop on a non-heap value is a no-op, so we
+         * could just drop everything; for clarity, skip those two and
+         * drop fields 2..nfields-1 (the supplied heap values such as
+         * the captured evv). */
+        for (int64_t i = 2; i < nf; i++)
             kk_drop(fields[i]);
     } else {
         /* Regular constructors: drop all fields */
@@ -864,6 +892,64 @@ int64_t kk_evv_lookup(int64_t evv, int64_t eff_id) {
 /* Allocate an op_table with `nops` empty slots. */
 int64_t kk_optab_create(int64_t nops) {
     return kk_alloc_con(KK_OPTAB_TAG, nops);
+}
+
+/* ======================================================================
+ * PAP (partially-applied function) — see KK_PAP_TAG definition for
+ * layout. Trampolines per dispatch arity; allocators per original arity.
+ *
+ * The N in kk_pap_call_N is the number of args the HOF or external
+ * caller passes (i.e. the function's *original* arity before plotkin
+ * prepended evv). The trampoline forwards (evv, args...) to the
+ * wrapped fn pointer, which has signature (evv, args...).
+ *
+ * Why both trampoline and wrapped_fn are needed: the existing closure
+ * dispatcher calls field-0 as `field_0(self, args...)` with `self`
+ * being the closure. That signature doesn't match the wrapped fn,
+ * which expects `(evv, args...)` without self. The trampoline absorbs
+ * the self argument, looks up the actual wrapped_fn and pre-supplied
+ * evv, and issues the final call with the right shape.
+ * ====================================================================== */
+
+/* Trampoline for an original 1-arg fn (now 2-arg with evv prepended).
+ * The closure dispatcher calls us as (self_pap, a). We extract the
+ * wrapped fn and evv from self_pap and call wrapped(evv, a). */
+int64_t kk_pap_call_1(int64_t self, int64_t a) {
+    int64_t fn_word = kk_field(self, 1);
+    int64_t evv     = kk_field(self, 2);
+    int64_t (*fn)(int64_t, int64_t) =
+        (int64_t (*)(int64_t, int64_t))(intptr_t)fn_word;
+    return fn(evv, a);
+}
+
+/* Trampoline for an original 2-arg fn (now 3-arg with evv prepended). */
+int64_t kk_pap_call_2(int64_t self, int64_t a, int64_t b) {
+    int64_t fn_word = kk_field(self, 1);
+    int64_t evv     = kk_field(self, 2);
+    int64_t (*fn)(int64_t, int64_t, int64_t) =
+        (int64_t (*)(int64_t, int64_t, int64_t))(intptr_t)fn_word;
+    return fn(evv, a, b);
+}
+
+/* Trampoline for an original 3-arg fn (now 4-arg with evv prepended). */
+int64_t kk_pap_call_3(int64_t self, int64_t a, int64_t b, int64_t c) {
+    int64_t fn_word = kk_field(self, 1);
+    int64_t evv     = kk_field(self, 2);
+    int64_t (*fn)(int64_t, int64_t, int64_t, int64_t) =
+        (int64_t (*)(int64_t, int64_t, int64_t, int64_t))(intptr_t)fn_word;
+    return fn(evv, a, b, c);
+}
+
+/* Allocate a PAP wrapping fn_ptr with evv pre-supplied, dispatchable
+ * via the existing closure ABI. The trampoline argument is the address
+ * of one of kk_pap_call_N picked by the emitter based on the wrapped
+ * fn's original arity. */
+int64_t kk_pap_alloc(int64_t trampoline, int64_t fn_ptr, int64_t evv) {
+    int64_t pap = kk_alloc_con(KK_PAP_TAG, 3);
+    kk_set_field(pap, 0, trampoline);
+    kk_set_field(pap, 1, fn_ptr);
+    kk_set_field(pap, 2, evv);
+    return pap;
 }
 
 /* Store a closure at op_idx in the op_table. Returns the table for chaining. */

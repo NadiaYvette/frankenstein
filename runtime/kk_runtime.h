@@ -173,4 +173,11 @@ int64_t kk_optab_create(int64_t nops);
 int64_t kk_optab_set(int64_t tab, int64_t op_idx, int64_t closure);
 int64_t kk_optab_get(int64_t tab, int64_t op_idx);
 
+/* PAP (partially-applied function) — wraps a plotkin'd fn so it can
+ * be dispatched as a value through the existing closure ABI. */
+int64_t kk_pap_call_1(int64_t self, int64_t a);
+int64_t kk_pap_call_2(int64_t self, int64_t a, int64_t b);
+int64_t kk_pap_call_3(int64_t self, int64_t a, int64_t b, int64_t c);
+int64_t kk_pap_alloc(int64_t trampoline, int64_t fn_ptr, int64_t evv);
+
 #endif /* KK_RUNTIME_H */

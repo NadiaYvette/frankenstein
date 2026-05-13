@@ -79,13 +79,15 @@ static void roots_ensure_cap(void) {
 #define KK_EVV_TAG     0x45565630  /* "EVV0" */
 #define KK_EVV2_TAG    0x45565632  /* "EVV2" — Plotkin evv stack */
 #define KK_OPTAB_TAG   0x4F505442  /* "OPTB" — op table */
+#define KK_PAP_TAG     0x50415030  /* "PAP0" — partially applied fn */
 #define KK_THUNK_TAG   0x4C415A59  /* "LAZY" */
 #define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" — field 0 is a raw fn ptr */
 
 int kk_can_be_cyclic(int64_t tag) {
-    /* Thunks, evidence vectors, op tables, and closures have acyclic layouts */
+    /* Thunks, evidence vectors, op tables, PAPs, and closures have acyclic layouts */
     if (tag == KK_THUNK_TAG || tag == KK_EVV_TAG || tag == KK_EVV2_TAG
-        || tag == KK_OPTAB_TAG || tag == KK_CLOSURE_TAG) return 0;
+        || tag == KK_OPTAB_TAG || tag == KK_PAP_TAG
+        || tag == KK_CLOSURE_TAG) return 0;
     /* Constructor tags below 0x10000 are user-defined ADT constructors
      * that could potentially contain back-references */
     return 1;

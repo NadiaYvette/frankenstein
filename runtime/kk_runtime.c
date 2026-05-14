@@ -448,6 +448,12 @@ int64_t kk_str_char_len(int64_t s_i) {
 }
 
 int64_t kk_str_concat(int64_t a_i, int64_t b_i) {
+    /* Force in case either operand is a thunk: plotkin-mode code can
+     * deliver a kk_thunk_create_forced-wrapped string here, and reading
+     * `->byte_len` directly off a thunk gets the thunk's field-1
+     * (cached result pointer) interpreted as a length — garbage. */
+    a_i = kk_thunk_force(a_i);
+    b_i = kk_thunk_force(b_i);
     kk_string_t* a = (kk_string_t*)a_i;
     kk_string_t* b = (kk_string_t*)b_i;
     if (a == NULL || a->byte_len == 0) {
@@ -481,6 +487,33 @@ int64_t kk_str_flatten(int64_t s_i) {
     if (s == NULL) return kk_string_empty();
     if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) return s_i;
     int64_t n = s->byte_len;
+    /* Sanity check: a valid kk_string_t can't be larger than the heap.
+     * If byte_len looks like a heap/stack address (>= 16 GB), the
+     * struct is corrupt — likely a layout misuse (e.g. a different
+     * heap object with KK_STRING_MAGIC at offset 0 but different
+     * remaining fields). Print a diagnostic with the full header
+     * contents and the call site for offline analysis. */
+    if (n < 0 || n > (1LL << 34)) {
+        fprintf(stderr,
+            "kk_str_flatten: corrupt kk_string_t at %p\n"
+            "  magic=%#lx rc=%ld byte_len=%ld kind=%d owns=%d\n"
+            "  u.bytes=%p (interpreted as cat: l=%p r=%p)\n",
+            (void*)s_i, (long)s->magic, (long)s->rc, (long)s->byte_len,
+            s->kind, s->owns_bytes,
+            (void*)s->u.bytes, s->u.cat.l, s->u.cat.r);
+        if (s->kind == KK_STR_CONCAT && s->u.cat.l) {
+            kk_string_t* l = s->u.cat.l;
+            fprintf(stderr, "  cat.l @%p: magic=%#lx rc=%ld byte_len=%ld kind=%d\n",
+                (void*)l, (long)l->magic, (long)l->rc, (long)l->byte_len, l->kind);
+        }
+        if (s->kind == KK_STR_CONCAT && s->u.cat.r) {
+            kk_string_t* r = s->u.cat.r;
+            fprintf(stderr, "  cat.r @%p: magic=%#lx rc=%ld byte_len=%ld kind=%d\n",
+                (void*)r, (long)r->magic, (long)r->rc, (long)r->byte_len, r->kind);
+        }
+        fflush(stderr);
+        abort();
+    }
     char* buf = (char*)malloc((size_t)n + 1);
     if (!buf) return 0;
     char* p = buf;

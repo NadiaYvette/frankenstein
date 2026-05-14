@@ -153,14 +153,36 @@ Still missing:
    has this via `text_borrow`; need to do equivalent for the
    list-walking shims (their inputs are lists, not strings).
 
-3. **Audit `kk_str_flatten`**: the round-4 crash shows a valid-tagged
-   KKSTRING that segfaults at field offset 0x10. Either the value's
-   internal layout is corrupt (a shim or runtime helper wrote the
-   wrong bytes) or `kk_str_flatten` reads it incorrectly. Add an
-   integrity check at the top of `kk_str_flatten` that validates
-   `byte_len > 0`, `kind` is in valid range, and one of the union
-   pointers is mapped memory. If it fails, dump the value's
-   refcount, address, and a few field bytes for offline analysis.
+3. **Audit `kk_str_flatten`**: ✅ done. Added validity check that
+   `byte_len < (1 << 34)`. The check fires; the corrupt struct's
+   internal layout reveals the upstream issue (see findings below).
+
+   **Root cause traced**: `kk_str_concat` was building a CAT-node
+   from a `cat.l` whose magic is *not* `KKSTRING` but `KK_CLOSURE_TAG`
+   ("CLOS"). Its `byte_len` field is therefore some closure's field 1,
+   not a length. The concat's resulting `byte_len = l->byte_len +
+   r->byte_len` becomes a huge bogus value; `kk_str_flatten` then
+   tries to `malloc(140TB)` and fails.
+
+   **Why a closure flows in**: the plotkin Core for `sanitizeName`
+   is `\evv eta_p0 -> delay(<expr>)(eta_p0)`. That expression
+   evaluates correctly when fully reached. But its caller does
+   `modPrefix <> sanitizeName m`, and somewhere on the chain the
+   value type expected by `<>` is being satisfied with a *function
+   closure* (a partial-application or PAP returning Text) instead
+   of the Text itself.
+
+   The same root pattern as the earlier `emptyStats` case: a Haskell
+   value-typed expression now compiles to a closure that produces
+   the value, not the value itself. `kk_str_concat` reads from it
+   as if it were a `kk_string_t`, and the layout doesn't match.
+
+   **Mitigation**: ✅ added `kk_thunk_force` at the top of
+   `kk_str_concat`. The force is a no-op when the value is a closure
+   (not a thunk), so this doesn't fix the *closure*-as-value case —
+   only the thunk-as-value case. The remaining bug is closures
+   leaking where Texts belong, which is a source-level / plotkin-
+   pass issue, not a shim-level one.
 
 4. **Address the source of stray thunks**: investigate why plotkin's
    `EDelay` lowering wraps values in `kk_thunk_create_forced` that

@@ -311,14 +311,29 @@ look up the handler. Two paths forward:
 
   Bootstrap remaining gap: **runtime correctness.** All 24 modules
   pass through stage 1 → stage 2 → stage 3 compilation, but the
-  linked stage 1 binary segfaults when run on E2E inputs. Phase 8
-  / 9c / 10c all 0/21. Stage 2 vs stage 3 MLIR doesn't match
-  (0/24), so no fixed point.
+  linked stage 1 binary segfaults when run on E2E inputs.
 
-  The segfault is downstream of the calling convention fix — most
-  likely related to runtime behavior under plotkin's evv-passing,
-  not to MLIR validity. Needs a fresh round of diagnosis (gdb on
-  a small input, KK_TAG_TRACE on the stage 1 binary, etc.).
+  **gdb diagnosis round 1** identified one missing
+  `kk_thunk_force` in the emitter's generic EApp(fn, args)
+  dispatch path. After my eta-expansion turns a point-free CAF
+  like `flattenPatternsExpr = fst . goExpr 0` into an EApp
+  dispatching the result on `eta_p0`, the inner composition
+  expression hits the EDelay path which wraps in
+  `kk_thunk_create_forced`. The generic dispatcher then loaded
+  field 0 of the thunk directly (= the evaluated-flag value 1)
+  and called address 1. Fixed by inserting `kk_thunk_force` before
+  the `kk_field` load. (committed)
+
+  **gdb diagnosis round 2**: with the thunk-force fix, execution
+  reaches the next phase. New crash:
+    main -> effectOptimize -> compose_apply_code
+      -> pap_effectOptimizeWithStats_1 -> effectOptimizeWithStats
+      -> foldDefs -> foldr -> kk_is_nil -> kk_tag -> SEGV
+  `kk_tag` segfaults dereferencing an invalid pointer. Same bug
+  class — a value flowing into a list-walking position that's not
+  actually a proper list. Likely another missing force, or a PAP
+  whose pre-supplied evv is wrong for this fold pattern. Needs
+  further investigation in a future session.
 
   Inline-mode bootstrap remains 24/24 + 21/21 + fixed point.
 

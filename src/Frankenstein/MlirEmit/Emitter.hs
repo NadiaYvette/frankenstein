@@ -1201,17 +1201,24 @@ emitExpr (EApp fn args) = do
       argNames = map snd argResults
       nArgs = length argNames
       argTys = replicate nArgs "i64"
+  -- Force the callee: if fn is a thunk (e.g. produced by an upstream
+  -- EDelay that we wrapped via kk_thunk_create_forced), reading field 0
+  -- directly gives the evaluated flag (1), not the fn pointer. kk_thunk_force
+  -- on a non-thunk is a no-op, so always-force is safe and corrects the
+  -- thunk-as-closure dispatch case.
+  forcedName  <- freshName "v"
   idxZeroName <- freshName "v"
   fptrIntName <- freshName "v"
   fptrPtrName <- freshName "v"
   resultName  <- freshName "v"
-  let closArgList  = T.intercalate ", " (("%" <> fnName) : ["%" <> n | n <- argNames])
+  let closArgList  = T.intercalate ", " (("%" <> forcedName) : ["%" <> n | n <- argNames])
       closArgTypes = T.intercalate ", " ("i64" : argTys)
       extractOps =
-        [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
-        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> fnName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+        [ "%" <> forcedName  <> " = func.call @kk_thunk_force(%" <> fnName <> ") : (i64) -> i64"
+        , "%" <> idxZeroName <> " = arith.constant 0 : i64"
+        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> forcedName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
         , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-        , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+        , "%" <> resultName  <> " = llvm.call %" <> fptrPtrName
           <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
         ]
   pure (fnOps ++ allArgOps ++ extractOps, resultName)

@@ -490,6 +490,10 @@ int64_t ghc_foldable_foldl_3(int64_t f, int64_t z, int64_t xs) {
 
 int64_t ghc_foldable_foldr_3(int64_t f, int64_t z, int64_t xs) __asm__("GHC_Internal_Data_Foldable_foldr$3");
 int64_t ghc_foldable_foldr_3(int64_t f, int64_t z, int64_t xs) {
+    /* Force xs: in plotkin mode the list may arrive as a thunk
+     * (kk_thunk_force is a no-op on non-thunks). See ABI audit
+     * boundary B in docs/plotkin-abi-audit.md. */
+    xs = kk_thunk_force(xs);
     if (kk_is_nil(xs)) return z;
     return call2(f, kk_list_head(xs), ghc_foldable_foldr_3(f, z, kk_list_tail(xs)));
 }

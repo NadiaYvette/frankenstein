@@ -1777,18 +1777,24 @@ emitAppVarGeneral fn args = do
       let rawName = nameToSsa fn
       case Map.lookup rawName aliases of
         Just closName -> do
-          -- Case (a): local closure-indirect call
+          -- Case (a): local closure-indirect call. Force in case the
+          -- bound value is a thunk (kk_thunk_force is a no-op on
+          -- non-thunks); without it, reading field 0 of an unforced
+          -- kk_thunk_create_forced thunk returns the eval flag (1)
+          -- instead of the fn pointer — see ABI audit Boundary C.
+          forcedName  <- freshName "v"
           idxZeroName <- freshName "v"
           fptrIntName <- freshName "v"
           fptrPtrName <- freshName "v"
           resultName  <- freshName "v"
-          let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- argNames])
+          let closArgList = T.intercalate ", " (("%" <> forcedName) : ["%" <> n | n <- argNames])
               closArgTypes = T.intercalate ", " ("i64" : argTypes)
               extractOps =
-                [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
-                , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+                [ "%" <> forcedName  <> " = func.call @kk_thunk_force(%" <> closName <> ") : (i64) -> i64"
+                , "%" <> idxZeroName <> " = arith.constant 0 : i64"
+                , "%" <> fptrIntName <> " = func.call @kk_field(%" <> forcedName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
                 , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-                , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
+                , "%" <> resultName  <> " = llvm.call %" <> fptrPtrName
                   <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
                 ]
           pure (allOps ++ extractOps, resultName)

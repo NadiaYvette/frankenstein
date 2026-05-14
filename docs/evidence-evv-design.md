@@ -329,11 +329,43 @@ look up the handler. Two paths forward:
     main -> effectOptimize -> compose_apply_code
       -> pap_effectOptimizeWithStats_1 -> effectOptimizeWithStats
       -> foldDefs -> foldr -> kk_is_nil -> kk_tag -> SEGV
-  `kk_tag` segfaults dereferencing an invalid pointer. Same bug
-  class — a value flowing into a list-walking position that's not
-  actually a proper list. Likely another missing force, or a PAP
-  whose pre-supplied evv is wrong for this fold pattern. Needs
-  further investigation in a future session.
+  Root cause: my eta-expansion turned `emptyStats :: EffectOptStats`
+  (a CAF) into a 1-arg function `\evv -> emptyStats`. The emitter
+  PAP-wrapped that value-use into a CLOSURE_TAG'd PAP, but
+  `foldDefs` expected the actual `EffectOptStats` value, not a
+  function-returning-it. **Fix**: in EvidenceEvv.transformDef,
+  only add evv-as-parameter when defType is a function type;
+  CAFs get a `let evv_p = 0 in body` wrapper instead.
+
+  **gdb diagnosis round 3**: with the CAF fix, foldDefs got the
+  right stats value but still SEGV in `foldDefs->foldr->is_nil->
+  kk_tag` because `progDefs` was called with a stack-address.
+  Root cause: the C driver called `effectOptimize(0)` (1-arg) but
+  my eta-expansion turned `effectOptimize :: Program -> Program`
+  into a 2-arg `(evv, prog) -> prog`. The undersaturated call left
+  the `prog` register as uninitialized stack memory. **Fix**: add
+  a `#ifdef PLOTKIN_EVIDENCE` branch in `driver.c` that calls
+  `effectOptimize(0, prog)` directly with 2 args (matching the
+  new ABI), bypassing the inline-mode thunk/closure dispatch.
+
+  **gdb diagnosis round 4**: with the driver-eo fix, execution
+  reaches `emitProgramText`. New crash:
+    emitProgramText -> map qualifyDefName -> fmap_apply
+      -> pap_qualifyDefName_2 -> qualifyDefName
+      -> Data.Text.isPrefixOf$2 -> text_is_prefix_of
+      -> kk_str_flatten -> mov 0x10(rax), rbx -> SEGV
+  Args at crash: pfx has valid `KKSTRING` tag, `s` has `LAZY`
+  (thunk) tag. **Partial fix**: added `kk_thunk_force` at the
+  top of `text_borrow` in shim_data_text.c. The force runs but
+  the crash persists at a deeper site — `kk_str_flatten` returns
+  garbage for what should be a valid KKSTRING pointer. Likely
+  another mismatched-layout case: a value reaches the shim
+  appearing to have the right tag but its internal layout differs.
+
+  Status: every fix moves the crash one step further down the
+  pipeline. The failures form a long chain of cumulative
+  layout/ABI mismatches accumulated across many compiler passes
+  in plotkin mode. The remaining work is multi-session.
 
   Inline-mode bootstrap remains 24/24 + 21/21 + fixed point.
 

@@ -57,6 +57,11 @@ static char* text_flatten(int64_t s, int64_t *out_len) {
 typedef struct { int64_t magic; int64_t rc; int64_t byte_len; int32_t kind; int32_t owns; union { const char* bytes; struct { void* l; void* r; } cat; } u; } kk_str_hdr_t;
 static const char* text_borrow(int64_t s, int64_t *out_len) {
     if (!s) { *out_len = 0; return ""; }
+    /* Force in case caller (e.g. plotkin-mode emitProgramText) handed
+     * us a kk_thunk_create_forced thunk; kk_thunk_force is a no-op on
+     * non-thunks. Without this the layout dereference below reads the
+     * thunk header as a kk_str_hdr_t and segfaults. */
+    s = kk_thunk_force(s);
     int64_t flat = kk_str_flatten(s);
     kk_str_hdr_t* h = (kk_str_hdr_t*)flat;
     *out_len = h->byte_len;

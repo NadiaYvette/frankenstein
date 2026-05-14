@@ -144,33 +144,49 @@ qnameToFlat qn = (qnameModule qn, nameText (qnameName qn))
 --   defType: @(any, Text) -> Either ...@   (flat arity 2)
 --   defExpr: @\evv_p txt -> ...@           (lambda arity 2)
 transformDef :: [EffectDecl] -> Set (Text, Text) -> Def -> Def
-transformDef effs topNames d =
-  d { defExpr = newExpr
-    , defType = prependEvvType (defType d)
-    }
+transformDef effs topNames d
+  | isFunctionType (defType d) =
+      d { defExpr = funcExpr
+        , defType = prependEvvType (defType d)
+        }
+  | otherwise =
+      -- CAF (defType is not a function): don't add evv as a parameter
+      -- and don't change defType — callers would mis-PAP the value
+      -- and HOFs would receive a PAP where they expect the stored
+      -- value. Instead, bind a synthetic @evv_p = 0@ at the top of
+      -- the body so internal call sites that reference evv_p still
+      -- resolve. CAFs are computed once and shared, so the empty-evv
+      -- context is correct for non-effectful CAFs (the bootstrap case).
+      d { defExpr =
+            ELet [[Bind evvName anyType (ELit (LitInt 0)) DefVal]]
+              (transformExpr effs topNames evvName (defExpr d))
+        }
   where
     evvName = Name "evv_p" 0
 
-    -- Original defExpr decomposed into outer params and inner body.
-    (existingParams, innerBody) = case defExpr d of
-      ELam ps b -> (ps, b)
-      b         -> ([], b)
+    -- Is the declared type a function type (counting through TForall)?
+    isFunctionType :: Type -> Bool
+    isFunctionType (TForall _ t) = isFunctionType t
+    isFunctionType (TFun {})     = True
+    isFunctionType _             = False
 
-    -- Target arity after the evv prepend = flat type arity + 1.
-    targetArity  = flatTypeArity (defType d) + 1
-    currentArity = 1 + length existingParams
-    missing      = max 0 (targetArity - currentArity)
-
-    -- Fresh eta-expansion params @eta_p0..eta_p(missing-1)@ if needed.
-    etaParams = [ (Name (T.pack ("eta_p" <> show i)) 0, anyType)
-                | i <- [0 .. missing - 1] ]
-    bodyWithEta = case etaParams of
-      []     -> innerBody
-      ps     -> EApp innerBody [EVar n | (n, _) <- ps]
-
-    allParams = (evvName, anyType) : existingParams ++ etaParams
-    newExpr =
-      ELam allParams (transformExpr effs topNames evvName bodyWithEta)
+    -- Function-typed def path: prepend evv as the first formal and
+    -- eta-expand to match the declared flat arrow arity (so callers
+    -- can issue saturated calls).
+    funcExpr =
+      let (existingParams, innerBody) = case defExpr d of
+            ELam ps b -> (ps, b)
+            b         -> ([], b)
+          targetArity  = flatTypeArity (defType d) + 1
+          currentArity = 1 + length existingParams
+          missing      = max 0 (targetArity - currentArity)
+          etaParams = [ (Name (T.pack ("eta_p" <> show i)) 0, anyType)
+                      | i <- [0 .. missing - 1] ]
+          bodyWithEta = case etaParams of
+            []  -> innerBody
+            ps  -> EApp innerBody [EVar n | (n, _) <- ps]
+          allParams = (evvName, anyType) : existingParams ++ etaParams
+      in ELam allParams (transformExpr effs topNames evvName bodyWithEta)
 
 -- | Add @evv@ as the first arrow argument in the declared type. We
 -- preserve any leading 'TForall'.

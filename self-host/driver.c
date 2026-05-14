@@ -36,7 +36,7 @@ extern void kk_args_init(int argc, char** argv);
 #ifdef PLOTKIN_EVIDENCE
 extern int64_t frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(int64_t /*evv*/, int64_t);
 extern int64_t frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t /*evv*/, int64_t);
-extern int64_t frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(int64_t /*evv*/);
+extern int64_t frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(int64_t /*evv*/, int64_t /*prog*/);
 extern int64_t frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(int64_t /*evv*/, int64_t);
 extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(int64_t /*evv*/, int64_t, int64_t);
 extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t /*evv*/, int64_t);
@@ -44,7 +44,7 @@ extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_
 extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t /*evv*/, int64_t);
 #define FRK_consumeProgram(s)         frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(0, (s))
 #define FRK_flattenPatterns(p)        frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(0, (p))
-#define FRK_effectOptimize()          frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(0)
+#define FRK_effectOptimize_full(p)    frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(0, (p))
 #define FRK_collectGlobalEffects(p)   frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(0, (p))
 #define FRK_evidencePassGlobal(g,p)   frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(0, (g), (p))
 #define FRK_insertPerceus(p)          frankenstein_Frankenstein_Core_Perceus_insertPerceus(0, (p))
@@ -235,11 +235,23 @@ int main(int argc, char** argv) {
     if (verbose) fprintf(stderr, "Running effectOptimize...\n");
     t0 = now_sec();
     {
+#ifdef PLOTKIN_EVIDENCE
+        /* Plotkin mode: effectOptimize is eta-expanded by
+         * EvidenceEvv.transformDef into a real 2-arg function
+         * `(evv, prog) -> prog`. Call it directly with both args; no
+         * thunk/PAP indirection. */
+        prog = FRK_effectOptimize_full(prog);
+#else
+        /* Inline mode: effectOptimize is the GHC-eta-reduced point-free
+         * CAF `fst . effectOptimizeWithStats` — returns a thunk wrapping
+         * the composition closure. Force it, then dispatch on prog
+         * through the standard closure ABI. */
         int64_t thunk = FRK_effectOptimize();
         int64_t closure = kk_thunk_force(thunk);
         int64_t fp = kk_field(closure, 0);
         typedef int64_t (*fn2_t)(int64_t, int64_t);
         prog = ((fn2_t)(intptr_t)fp)(closure, prog);
+#endif
     }
     t1 = now_sec();
     if (verbose) fprintf(stderr, "  effectOptimize: %.3fs\n", t1 - t0);

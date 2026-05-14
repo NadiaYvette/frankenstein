@@ -84,7 +84,7 @@ data EmitState = EmitState
   , esExtRuntimeFns    :: !(Set Text)             -- cached externalRuntimeFns (avoid per-call Set.fromList)
   , esExtRuntimeArity  :: !(Map Text Int)         -- cached externalRuntimeArity
   , esCurrentEvv       :: !(Maybe Text)           -- SSA name of the in-scope evv (set in plotkin-transformed defs); used to pre-supply evv when emitting a plotkin'd top-level fn as a value, so HOFs invoke through the trampoline path that re-injects the captured evv
-  , esLambdaDepth      :: !Int                    -- nesting depth of lambda-lift (0 at the top-level def's body, incremented inside each lifted lambda); used by emitFnAsValue to decide whether the identity alias for evv_p0 is a real param ref (depth 0) or a stale outer-scope name (depth > 0, must come from a capture-rebind)
+  , esScopeSsa         :: !(Set Text)             -- SSA names valid in the current MLIR function's scope (params + captures + closure self); saved at every function-entry boundary (emitDef, emitLambdaLift, emitBindAsTopFn). emitFnAsValue uses this to decide whether the resolved evv SSA is reachable from the current emission point — if not, the PAP is allocated without pre-supplied evv (the trampoline reads 0 from the unset field, which is safe for non-effectful callees in bootstrap modules).
   }
 
 type Emit a = State EmitState a
@@ -242,24 +242,22 @@ ensurePapWrapper fnName arity nSupplied = do
 -- 'evv' so the PAP's remaining-arity matches the HOF's call shape.
 emitFnAsValue :: Text -> Map Text Int -> Emit ([Text], Text)
 emitFnAsValue fnName arityMap = do
-  curEvv  <- gets esCurrentEvv
-  aliases <- gets esAliases
-  depth   <- gets esLambdaDepth
+  curEvv    <- gets esCurrentEvv
+  aliases   <- gets esAliases
+  scopeSsa  <- gets esScopeSsa
   let arity        = Map.findWithDefault 1 fnName arityMap
       isPlotkinFn  = "Frankenstein_" `T.isInfixOf` fnName
-      -- At top-level (depth 0), the def's first param IS evv_p0 and the
-      -- identity alias is valid. Inside a lifted lambda (depth > 0), the
-      -- outer identity alias leaks through the lambda-lifter's
-      -- insert-without-shadow approach, but evv_p0 is NOT actually in
-      -- the lambda's scope unless the lambda lifter captured it. We
-      -- detect a capture by the alias mapping to something other than
-      -- the original name. Identity-mapped evv inside a lambda means
-      -- the lifter didn't capture it — skip injection there.
+      -- Resolve evv through the alias map (handles capture rebinds in
+      -- lifted lambdas) and verify the resolved SSA is in the current
+      -- MLIR function's scope. If it's an outer-scope name leaked
+      -- through the alias map's insert-without-shadow, fall back to
+      -- the no-evv path: the PAP's trampoline reads 0 from the
+      -- unset evv field, which is the empty-evv sentinel — safe for
+      -- non-effectful callees (the common bootstrap case).
       resolved =
         case curEvv >>= \e -> Map.lookup e aliases of
-          Just r | depth == 0 -> Just r
-                 | r /= maybe "" id curEvv -> Just r  -- captured-rebind
-          _ -> Nothing
+          Just r | Set.member r scopeSsa -> Just r
+          _                              -> Nothing
   case resolved of
     Just evvSsa | isPlotkinFn && arity > 0 ->
       emitFnAsValueWithArgs fnName arity [evvSsa]
@@ -371,7 +369,7 @@ emitProgramText prog =
                          extRtFns
                          extRtArity
                          Nothing
-                         0
+                         Set.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -622,7 +620,7 @@ emitProgramWithEffects prog =
                          extRtFns
                          extRtArity
                          Nothing
-                         0
+                         Set.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -736,7 +734,7 @@ emitProgramWasm prog =
                          extRtFns
                          extRtArity
                          Nothing
-                         0
+                         Set.empty
       (bodyText, finalState) = runState (emitDefs renamedDefs) initState
       liftedFns = T.unlines (reverse (esLiftedFns finalState))
       externDecls = Map.toList (esExternDecls finalState)
@@ -973,9 +971,11 @@ emitDef def = do
             [ "%" <> nameToSsa pn <> ": i64" | (pn, _) <- params ]
           mlirRetTy = "i64"
       -- Install parameters as identity aliases so EVar lookups find them.
-      savedA   <- gets esAliases
-      savedEvv <- gets esCurrentEvv
-      let paramAliases = [ (nameToSsa pn, nameToSsa pn) | (pn, _) <- params ]
+      savedA     <- gets esAliases
+      savedEvv   <- gets esCurrentEvv
+      savedScope <- gets esScopeSsa
+      let paramSsas    = [ nameToSsa pn | (pn, _) <- params ]
+          paramAliases = [ (s, s) | s <- paramSsas ]
           -- Detect plotkin-transformed defs: their first parameter is named
           -- "evv_p" (per Frankenstein.Core.EvidenceEvv.transformDef). Record
           -- the SSA name so EVar-as-value emission can pre-supply evv to PAPs
@@ -987,10 +987,12 @@ emitDef def = do
       modify (\s -> s { esAliases    = foldr (\(k,v) m -> Map.insert k v m)
                                               (esAliases s) paramAliases
                        , esCurrentEvv = curEvv
+                       , esScopeSsa   = Set.fromList paramSsas
                        })
       bodyText <- emitBody body mlirRetTy
       modify (\s -> s { esAliases    = savedA
                        , esCurrentEvv = savedEvv
+                       , esScopeSsa   = savedScope
                        })
       pure $ T.unlines
         [ "  func.func @" <> qualName <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {"
@@ -2046,11 +2048,16 @@ emitLambdaLift params body = do
   let capAliases = zip (map nameToSsa captured) capFresh
       extraCapAliases = zip extraCapsUniq extraCapFresh
       paramAliases = zip (map (nameToSsa . fst) params) paramFresh
-  savedDepth <- gets esLambdaDepth
+  savedScope <- gets esScopeSsa
+  -- The new MLIR function's scope: the closure self, all capture-loaded
+  -- SSAs, all rebound params. Names from the outer function are NOT in
+  -- scope inside this lambda's body.
+  let lambdaScope = Set.fromList
+        ( closFresh : capFresh ++ extraCapFresh ++ paramFresh )
   modify (\s -> s { esAliases = foldr (\(k,v) m -> Map.insert k v m)
                                       (esAliases s)
                                       (capAliases ++ extraCapAliases ++ paramAliases)
-                   , esLambdaDepth = savedDepth + 1
+                   , esScopeSsa = lambdaScope
                    })
   -- Build prologue ops that extract captured fields from %closure.
   -- Each capture must be retained: if the closure is called multiple times
@@ -2065,9 +2072,9 @@ emitLambdaLift params body = do
         | (i, cfn) <- zip [(1::Int)..length allCapFresh] allCapFresh
         ]
   (bodyOps, bodyResult) <- emitExpr body
-  -- Restore alias map and lambda depth (body-local context shouldn't leak out).
-  modify (\s -> s { esAliases     = savedAliases
-                   , esLambdaDepth = savedDepth
+  -- Restore alias map and scope set (body-local context shouldn't leak out).
+  modify (\s -> s { esAliases  = savedAliases
+                   , esScopeSsa = savedScope
                    })
   -- Closure ABI: all regular params flow as i64 through the closure dispatch,
   -- matching the call site's assumption. Ignore per-param types.
@@ -2506,20 +2513,24 @@ emitBindAsTopFn modPfx bnd = do
           mlirArgs = T.intercalate ", " (capArgs ++ paramArgs)
           mlirRetTy = "i64"
       -- Install identity aliases for captures + parameters.
-      -- Bump esLambdaDepth so emitFnAsValue knows the outer scope's
-      -- identity-aliased SSAs (evv_p0, etc.) are NOT in scope here —
-      -- only this promoted fn's parameters and captures are.
+      -- The promoted top-level fn is a NEW MLIR function, so its
+      -- scope contains only its captures (now as params) and its
+      -- own params — the outer lambda's body-local SSAs are NOT
+      -- accessible from here. Replacing esScopeSsa ensures
+      -- emitFnAsValue doesn't synthesize references to outer-scope
+      -- SSAs that would fail MLIR region-isolation.
       savedA     <- gets esAliases
-      savedDepth <- gets esLambdaDepth
-      let capAliases = [ (k, k) | k <- capSsaKeys ]
-          paramAliases = [ (nameToSsa pn, nameToSsa pn) | (pn, _) <- params ]
-      modify (\s -> s { esAliases     = foldr (\(k,v) m -> Map.insert k v m)
-                                              (esAliases s) (capAliases ++ paramAliases)
-                       , esLambdaDepth = savedDepth + 1
+      savedScope <- gets esScopeSsa
+      let paramSsas    = [ nameToSsa pn | (pn, _) <- params ]
+          capAliases   = [ (k, k) | k <- capSsaKeys ]
+          paramAliases = [ (s, s) | s <- paramSsas ]
+      modify (\s -> s { esAliases  = foldr (\(k,v) m -> Map.insert k v m)
+                                           (esAliases s) (capAliases ++ paramAliases)
+                       , esScopeSsa = Set.fromList (capSsaKeys ++ paramSsas)
                        })
       bodyText <- emitBody body mlirRetTy
-      modify (\s -> s { esAliases     = savedA
-                       , esLambdaDepth = savedDepth
+      modify (\s -> s { esAliases  = savedA
+                       , esScopeSsa = savedScope
                        })
       -- Emit as a lifted function (deduplicated by name).
       addLiftedFnOnce qualN $ T.unlines

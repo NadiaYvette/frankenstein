@@ -295,21 +295,30 @@ look up the handler. Two paths forward:
   E2E: 0/21 — the linked stage 1 binary still has issues even
   for modules that built clean.
 
-  Remaining blocker: **promoted let-rec functions**. The emitter
-  promotes inner recursive `let`-bound lambdas (e.g.
-  `frankenstein_dszd...`) to top-level via `emitBindAsTopFn`. The
-  promoted body is emitted with an alias map that still
-  references the OUTER lambda's capture SSAs (`%cap913` etc.).
-  When `emitFnAsValue` fires inside such a promoted body and
-  injects evv resolved through that map, the resulting MLIR
-  references an SSA defined in a different function — MLIR
-  region-isolation failure ("using value defined outside the
-  region").
+  **Per-function in-scope SSA set (IMPLEMENTED).** Replaced the
+  alias-map + lambda-depth heuristic with a proper
+  `esScopeSsa :: Set Text` field saved/restored at every function-
+  entry boundary (`emitDef`, `emitLambdaLift`, `emitBindAsTopFn`).
+  `emitFnAsValue` only injects evv if the resolved SSA is actually
+  in `esScopeSsa`. If not (e.g. outer lambda's capture leaked into
+  a promoted let-rec via the alias map's insert-without-shadow),
+  the injection is skipped — PAP is allocated with evv-slot=0,
+  which the trampoline reads as the empty-evv sentinel (safe for
+  non-effectful callees, the common bootstrap case).
 
-  The architecturally correct fix is to track a per-function
-  "in-scope SSA names" set in `EmitState` and gate injection
-  on actual membership rather than the current alias-map +
-  lambda-depth heuristic. Too invasive for one session; deferred.
+  Result: Phase 1 compiles 24/24 cleanly. Stage 2 24/24. Stage 3
+  24/24 (no MLIR validation failures anywhere in the pipeline).
+
+  Bootstrap remaining gap: **runtime correctness.** All 24 modules
+  pass through stage 1 → stage 2 → stage 3 compilation, but the
+  linked stage 1 binary segfaults when run on E2E inputs. Phase 8
+  / 9c / 10c all 0/21. Stage 2 vs stage 3 MLIR doesn't match
+  (0/24), so no fixed point.
+
+  The segfault is downstream of the calling convention fix — most
+  likely related to runtime behavior under plotkin's evv-passing,
+  not to MLIR validity. Needs a fresh round of diagnosis (gdb on
+  a small input, KK_TAG_TRACE on the stage 1 binary, etc.).
 
   Inline-mode bootstrap remains 24/24 + 21/21 + fixed point.
 

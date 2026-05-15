@@ -431,11 +431,11 @@ loadStage1Cache dir = do
 -- to rewrite (the other err output shows '13 by PAP closure, 55 unfixed' —
 -- the unfixed ones produce private decls but no link errors in practice).
 fixDollar0Refs :: Map FilePath Text -> Text -> Text
-fixDollar0Refs _stage1 src
+fixDollar0Refs stage1 src
   | not ("$0()" `T.isInfixOf` src) = src
   | otherwise =
       let lns      = T.lines src
-          fixes    = collectDollar0Fixes lns
+          fixes    = collectDollar0Fixes stage1 lns
       in if null fixes
            then src
            else applyDollar0Fixes fixes lns
@@ -444,17 +444,17 @@ data Dollar0Fix
   = RenameFix !Int !Text !Text !Text  -- lineIdx, resultVar, correctVar, varName
   | PapFix    !Int !Text !Text !Text !Int
        -- lineIdx, resultVar, varName, papName, papNparams
+  | ExternPapFix !Int !Text !Text !Int
+       -- lineIdx, resultVar, varName, arity (discovered via stage1 cache).
+       -- Generates a synthesized 'pap_extern_frankenstein_<varName>_0' wrapper
+       -- and matching extern decl injected at module scope.
 
-collectDollar0Fixes :: [Text] -> [Dollar0Fix]
-collectDollar0Fixes lns =
+collectDollar0Fixes :: Map FilePath Text -> [Text] -> [Dollar0Fix]
+collectDollar0Fixes stage1 lns =
   let indexedLns = zip [0..] lns
       mkFix (i, line) = do
         (_indent, resultVar, varName) <- parseDollar0 line
         let (_funcName, funcStart) = findEnclosingFunc lns i
-            -- _funcName is reserved for the stage1 cross-reference strategy,
-            -- which this port omits. The known-function set in
-            -- 'knownFunctions' covers the OrganIR/Consumer.mlir cases the
-            -- bootstrap needs (13/13 PAP-closure fixes).
             byUnique = fixByTrailingUnique varName lns i funcStart
         case byUnique of
           Just correctVar -> Just (RenameFix i resultVar correctVar varName)
@@ -463,9 +463,32 @@ collectDollar0Fixes lns =
                 case findPapWrapper varName lns of
                   Just (papName, nparams) ->
                     Just (PapFix i resultVar varName papName nparams)
-                  Nothing -> Nothing
-            | otherwise -> Nothing
+                  Nothing -> tryExtern resultVar varName i
+            | otherwise -> tryExtern resultVar varName i
+      tryExtern resultVar varName i =
+        case findExternalArity varName stage1 of
+          Just arity | arity > 0 ->
+            Just (ExternPapFix i resultVar varName arity)
+          _ -> Nothing
   in mapMaybe mkFix indexedLns
+
+-- | Scan the stage1 MLIR cache for a 'func.func @frankenstein_<varName>(...)'
+-- declaration and return its i64 parameter count. Used to synthesize PAP
+-- wrappers for cross-module Frankenstein refs that aren't in the local
+-- known-function set but DO have a discoverable arity in a sibling module.
+findExternalArity :: Text -> Map FilePath Text -> Maybe Int
+findExternalArity varName stage1 =
+  let target = "func.func @frankenstein_" <> varName <> "("
+      tryText txt = case T.breakOn target txt of
+        (_, rest) | not (T.null rest) ->
+          let afterOpen = T.drop (T.length target) rest
+              (params, _) = T.breakOn ")" afterOpen
+              trimmed = T.strip params
+          in if T.null trimmed
+               then Just 0
+               else Just (countCommaSep trimmed)
+        _ -> Nothing
+  in firstJust tryText (Map.elems stage1)
 
 -- | Parse @<indent>%<resultVar> = func.call \@frankenstein_<varName>$0() : ...@
 parseDollar0 :: Text -> Maybe (Text, Text, Text)
@@ -568,6 +591,7 @@ applyDollar0Fixes :: [Dollar0Fix] -> [Text] -> Text
 applyDollar0Fixes fixes lns =
   let fixedVarNames = Set.fromList [ vn | RenameFix _ _ _ vn <- fixes ]
                    <> Set.fromList [ vn | PapFix _ _ vn _ _ <- fixes ]
+                   <> Set.fromList [ vn | ExternPapFix _ _ vn _ <- fixes ]
       -- Build per-function rename map
       renamesByFunc :: Map Int (Map Text Text)
       renamesByFunc = foldl' addRename Map.empty fixes
@@ -585,10 +609,82 @@ applyDollar0Fixes fixes lns =
              Just fs -> Map.insertWith Map.union fs
                          (Map.singleton ("%" <> resVar) papClosVar) m
              Nothing -> m
+      addRename m (ExternPapFix i resVar _vn _arity) =
+        let (_, mFs) = findEnclosingFunc lns i
+            papClosVar = "%_pap" <> tshow i <> "_clos"
+        in case mFs of
+             Just fs -> Map.insertWith Map.union fs
+                         (Map.singleton ("%" <> resVar) papClosVar) m
+             Nothing -> m
       deleteLines = Set.fromList [ i | RenameFix i _ _ _ <- fixes ]
-      papInsertions = Map.fromList [ (i, mkPapBlock i papName nparams)
-                                   | PapFix i _ _ papName nparams <- fixes ]
-  in renderFixed lns fixedVarNames renamesByFunc deleteLines papInsertions
+      papInsertions = Map.fromList $
+        [ (i, mkPapBlock i papName nparams)
+        | PapFix i _ _ papName nparams <- fixes ]
+        ++
+        [ (i, mkPapBlock i (externPapName vn) arity)
+        | ExternPapFix i _ vn arity <- fixes ]
+      -- Distinct (varName, arity) pairs needing synthesized wrappers + extern decls.
+      externNeeds :: Map Text Int
+      externNeeds = Map.fromList
+        [ (vn, arity) | ExternPapFix _ _ vn arity <- fixes ]
+      withModuleInjections =
+        Map.foldrWithKey
+          (\vn ar acc -> injectExternWrapper vn ar acc)
+          (renderFixed lns fixedVarNames renamesByFunc deleteLines papInsertions)
+          externNeeds
+  in withModuleInjections
+
+-- | The synthesized wrapper symbol name for a cross-module Frankenstein
+-- value-position reference. Mirrors emitPapClosure's wrapper naming
+-- ('pap_frankenstein_NAME_0') with an 'extern_' tag so it never collides
+-- with the regular per-call-site wrappers.
+externPapName :: Text -> Text
+externPapName vn = "pap_extern_frankenstein_" <> vn <> "_0"
+
+-- | Inject a private extern declaration AND a synthesized PAP wrapper for
+-- @frankenstein_<vn>@ with the given arity into a module's MLIR text. The
+-- wrapper forwards (clos, r0..r_{arity-1}) -> @frankenstein_<vn>(r0..)@.
+injectExternWrapper :: Text -> Int -> Text -> Text
+injectExternWrapper vn arity src =
+  let symbol     = "frankenstein_" <> vn
+      paramTys   = T.intercalate ", " (replicate arity "i64")
+      sigStr     = "(" <> paramTys <> ") -> i64"
+      papName    = externPapName vn
+      remParams  = T.intercalate ", "
+        [ "%r" <> tshow i <> ": i64" | i <- [0 .. arity - 1] ]
+      remArgs    = T.intercalate ", "
+        [ "%r" <> tshow i | i <- [0 .. arity - 1] ]
+      externDecl = "  func.func private @" <> symbol <> sigStr
+      wrapper    = T.unlines
+        [ "  func.func private @" <> papName
+            <> "(%clos: i64" <> (if arity > 0 then ", " <> remParams else "")
+            <> ") -> i64 {"
+        , "    %result = func.call @" <> symbol
+            <> "(" <> remArgs <> ") : " <> sigStr
+        , "    func.return %result : i64"
+        , "  }"
+        ]
+      blob       = "\n" <> externDecl <> "\n" <> wrapper
+      -- Skip extern decl if already present.
+      hasDecl    = ("@" <> symbol <> "(") `T.isInfixOf` src
+                || ("@" <> symbol <> " ") `T.isInfixOf` src
+      hasWrapper = ("@" <> papName) `T.isInfixOf` src
+      addition
+        | hasWrapper = ""
+        | hasDecl    = "\n" <> wrapper
+        | otherwise  = blob
+  in if T.null addition
+       then src
+       else insertAtModuleClose addition src
+
+-- | Insert text immediately before the LAST '}' character in the module
+-- text. We keep the rest of the formatting intact and only inject at the
+-- module-scope close.
+insertAtModuleClose :: Text -> Text -> Text
+insertAtModuleClose inject src =
+  case lastIndexOf "}" src of
+    Just idx -> T.take idx src <> inject <> "\n" <> T.drop idx src
+    Nothing  -> src <> inject  -- defensive; well-formed MLIR always has a closing brace
 
 mkPapBlock :: Int -> Text -> Int -> [Text]
 mkPapBlock counter papName nparams =

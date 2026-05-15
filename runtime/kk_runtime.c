@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <execinfo.h>
 #include "kk_runtime.h"
 #include "kk_cycle.h"
 #include "kk_arena.h"
@@ -447,6 +448,22 @@ int64_t kk_str_char_len(int64_t s_i) {
     return kk_str_char_count_rec((kk_string_t*)s_i);
 }
 
+/* Print symbolic backtrace for the current C stack. Used to localize the
+ * call site that fed a non-string value into kk_str_concat. */
+static void kk_dump_backtrace(const char* label) {
+    void* frames[32];
+    int n = backtrace(frames, 32);
+    fprintf(stderr, "%s: backtrace (%d frames):\n", label, n);
+    char** sym = backtrace_symbols(frames, n);
+    if (sym) {
+        for (int i = 0; i < n; i++) {
+            fprintf(stderr, "  [%2d] %s\n", i, sym[i]);
+        }
+        free(sym);
+    }
+    fflush(stderr);
+}
+
 int64_t kk_str_concat(int64_t a_i, int64_t b_i) {
     /* Force in case either operand is a thunk: plotkin-mode code can
      * deliver a kk_thunk_create_forced-wrapped string here, and reading
@@ -454,6 +471,44 @@ int64_t kk_str_concat(int64_t a_i, int64_t b_i) {
      * (cached result pointer) interpreted as a length — garbage. */
     a_i = kk_thunk_force(a_i);
     b_i = kk_thunk_force(b_i);
+    /* Validate magic on both inputs. A non-KKSTRING-magic value here is
+     * almost always a closure-as-value leak: somewhere upstream a function
+     * value (PAP / CLOS) was passed through `<>` as if it were a Text.
+     * Print a backtrace so the offending call site is identifiable. */
+    if (a_i != 0) {
+        int64_t* hdr = (int64_t*)a_i;
+        if (hdr[0] != KK_STRING_MAGIC) {
+            fprintf(stderr, "kk_str_concat: non-string input a @%p, magic=%#lx\n",
+                    (void*)a_i, (long)hdr[0]);
+            /* Closure-like layout: dump fn ptr (field 0 in standard tag,
+             * which is hdr[2] in our header layout: tag, rc, field_0…) and
+             * resolve it via dladdr so we know WHICH function the closure
+             * points to. */
+            fprintf(stderr, "  hdr: [tag=%#lx rc=%ld f0=%#lx f1=%#lx f2=%#lx]\n",
+                    (long)hdr[0], (long)hdr[1], (long)hdr[2],
+                    (long)hdr[3], (long)hdr[4]);
+            fprintf(stderr, "  f0 (closure fn ptr) -> resolve with: "
+                    "nm <binary> | awk '$1<=%lx && next_addr>%lx' "
+                    "(after sort)\n", (long)hdr[2], (long)hdr[2]);
+            kk_dump_backtrace("kk_str_concat.a");
+            abort();
+        }
+    }
+    if (b_i != 0) {
+        int64_t* hdr = (int64_t*)b_i;
+        if (hdr[0] != KK_STRING_MAGIC) {
+            fprintf(stderr, "kk_str_concat: non-string input b @%p, magic=%#lx\n",
+                    (void*)b_i, (long)hdr[0]);
+            fprintf(stderr, "  hdr: [tag=%#lx rc=%ld f0=%#lx f1=%#lx f2=%#lx]\n",
+                    (long)hdr[0], (long)hdr[1], (long)hdr[2],
+                    (long)hdr[3], (long)hdr[4]);
+            fprintf(stderr, "  f0 (closure fn ptr) -> resolve with: "
+                    "nm <binary> | awk '$1<=%lx && next_addr>%lx' "
+                    "(after sort)\n", (long)hdr[2], (long)hdr[2]);
+            kk_dump_backtrace("kk_str_concat.b");
+            abort();
+        }
+    }
     kk_string_t* a = (kk_string_t*)a_i;
     kk_string_t* b = (kk_string_t*)b_i;
     if (a == NULL || a->byte_len == 0) {

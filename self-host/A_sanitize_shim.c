@@ -109,10 +109,19 @@ static int64_t tram_sanitize(int64_t clos, int64_t s) {
 /* ------------------------------------------------------------------ */
 /*  Override: frankenstein_Frankenstein_MlirEmit_Emitter_sanitizeName   */
 /*                                                                      */
-/*  Returns a closure that, when called with a Text arg, sanitizes it.  */
-/*  The original returns kk_thunk_create_forced(concatMap(encodeChar)). */
-/*  We return the same shape: a forced thunk wrapping a closure.        */
+/*  Inline mode: 0-arg call, returns a forced-thunk wrapping a 1-field   */
+/*  closure (the caller dispatches the closure on the Text arg).        */
+/*  Plotkin mode: called as (evv, text), returns sanitized Text directly */
+/*  (the plotkin pass eta-expanded the def, so the call is saturated).  */
 /* ------------------------------------------------------------------ */
+#ifdef PLOTKIN_EVIDENCE
+int64_t c_sanitizeName(int64_t evv, int64_t text)
+    __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_sanitizeName");
+int64_t c_sanitizeName(int64_t evv, int64_t text) {
+    (void)evv;
+    return sanitize_name_c(text);
+}
+#else
 int64_t c_sanitizeName(void)
     __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_sanitizeName");
 int64_t c_sanitizeName(void) {
@@ -120,19 +129,25 @@ int64_t c_sanitizeName(void) {
     kk_set_field(c, 0, (int64_t)(intptr_t)&tram_sanitize);
     return kk_thunk_create_forced(c);
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Override: frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa      */
 /*                                                                      */
 /*  nameToSsa n = sanitizeName (nameText n) <> T.pack (show (nameUnique n))  */
 /*                                                                      */
-/*  The compiled version's alias-map lookup fails because T.pack/show   */
-/*  or <> produce inconsistent keys. This C version is deterministic:   */
-/*  field 0 = nameText, field 1 = nameUnique (raw int64, strict).      */
+/*  Plotkin mode: extra leading evv arg (ignored).                      */
 /* ------------------------------------------------------------------ */
+#ifdef PLOTKIN_EVIDENCE
+int64_t c_nameToSsa(int64_t evv, int64_t name)
+    __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa");
+int64_t c_nameToSsa(int64_t evv, int64_t name) {
+    (void)evv;
+#else
 int64_t c_nameToSsa(int64_t name)
     __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa");
 int64_t c_nameToSsa(int64_t name) {
+#endif
     int64_t text   = kk_field(name, 0);  /* nameText   :: !Text */
     int64_t unique = kk_field(name, 1);  /* nameUnique :: !Int  */
 
@@ -143,12 +158,17 @@ int64_t c_nameToSsa(int64_t name) {
 }
 
 /* Also override encodeChar for defence in depth.
- * The actual compiled symbol unique is ...48837 (confirmed by nm on
- * MlirEmit_Emitter.o). This override ensures the deterministic C
- * implementation is used even if sanitizeName is bypassed somehow. */
+ * Plotkin mode: extra leading evv arg (ignored). */
+#ifdef PLOTKIN_EVIDENCE
+int64_t c_encodeChar(int64_t evv, int64_t cp)
+    __asm__("frankenstein_encodeCharzd6989586621679048837_u6989586621679048837");
+int64_t c_encodeChar(int64_t evv, int64_t cp) {
+    (void)evv;
+#else
 int64_t c_encodeChar(int64_t cp)
     __asm__("frankenstein_encodeCharzd6989586621679048837_u6989586621679048837");
 int64_t c_encodeChar(int64_t cp) {
+#endif
     int elen;
     const char* enc = encode_char(cp, &elen);
     if (enc) {

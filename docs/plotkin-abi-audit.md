@@ -190,6 +190,210 @@ Still missing:
    skip the thunk wrap in cases where the consumer is known to be a
    shim (i.e., an external symbol)?
 
+## Closure-as-value leak audit (round 5)
+
+Goal: identify every spot where the Plotkin pass + emitter combine
+to push a closure (CLOS / PAP) into a slot the consumer reads as a
+concrete value (Text, ADT, Int, …).
+
+### L1 — Plotkin pass: `EApp` injection ignores callee kind
+
+`Frankenstein.Core.EvidenceEvv.transformExpr` (`src/Frankenstein/Core/EvidenceEvv.hs:232-237`):
+
+```haskell
+EApp (EVar nm) xs
+  | isTopLevel nm ->
+      EApp (EVar nm) (EVar evv : map go xs)
+```
+
+The injection fires for *every* `EApp` whose head is a top-level
+Frankenstein name. It does **not** check whether the callee is
+function-typed. For a CAF (concrete-typed) top-level — e.g.
+`emptyStats :: Stats` — any source-level `EApp emptyStats xs` (which
+the bridge can produce via type-coercion-loaded Core or via
+optimization quirks) becomes a 1+ arg call to a 0-arity symbol.
+
+Combined with the emitter's oversaturated dispatch path
+(`Emitter.hs:1735-1766`), the result is: read `field 0` of the CAF's
+value (e.g. a Stats heap pointer) and call it as a function pointer.
+That is a textbook closure-as-value confusion.
+
+Fix candidates:
+- Filter `isTopLevel` by also requiring `isFunctionType (defType d)`
+  (i.e., plotkin only injects evv into calls whose callee is
+  function-typed). This requires threading a `Map Name Type` of
+  top-level types through `transformExpr` — straightforward.
+- Alternatively, the emitter could special-case "arity-0 callee +
+  non-empty args" by calling the CAF with 0 args, then continuing
+  the dispatch loop using the *value* as an opaque heap pointer
+  through the closure-indirect path — but this is a workaround that
+  papers over the type-shape mismatch.
+
+### L2 — Eta-expansion uses `flatTypeArity`, not value-shape
+
+`Frankenstein.Core.EvidenceEvv.transformDef` (`EvidenceEvv.hs:146-189`)
+eta-expands function-typed defs to match `flatTypeArity (defType d)`.
+
+```haskell
+targetArity  = flatTypeArity (defType d) + 1
+currentArity = 1 + length existingParams
+missing      = max 0 (targetArity - currentArity)
+```
+
+`flatTypeArity` walks `TFun` arrows directly: it does NOT step into
+type synonyms / newtypes / Forall-bound aliases. Concretely:
+
+```haskell
+newtype Cps a = Cps { unCps :: forall r. (a -> r) -> r }
+
+runCps :: Cps a -> a
+runCps cps = unCps cps id
+```
+
+`flatTypeArity` of `Cps a -> a` is 1. But the *value* `runCps x`
+returns is itself callable (because `a` is parametric). A source
+expression `runCps x someArg` would become — after plotkin —
+`runCps evv x someArg` (3 args) against a plotkin'd arity-2
+`runCps`. The emitter hits the oversaturated path; force the result;
+read field 0; dispatch.
+
+For normal types this works (the runCps result is a real closure
+holding the lambda body). The hazard is when the returned value's
+runtime layout is **not** `[fptr, captures…]` — e.g. it has been
+boxed by an upstream `kk_thunk_create_forced` (`EDelay` lowering).
+The `kk_thunk_force` at `Emitter.hs:1751` covers the thunk case.
+But if the returned value is itself a *constructor* (a record
+containing closures, accessed via field N where N≠0), reading
+field 0 yields the wrong word.
+
+### L3 — `emitFnAsValue` pre-supplies evv to a CAF
+
+`Emitter.hs:243-265`. The `arity > 0` guard correctly steers CAFs
+(arity 0 in `buildTopFnArity` because their `defExpr` is `ELet`,
+not `ELam`) to the no-evv branch. But `arityMap` is built per-module
+(`Emitter.hs:360`); **cross-module** Frankenstein top-level
+references fall through to the default `arity = 1` (`Emitter.hs:248`).
+
+For a cross-module CAF reference:
+- `qualSanitized` (with module prefix) won't be in this module's
+  `arityMap` → default 1.
+- `isPlotkinFn` (`"Frankenstein_" `T.isInfixOf` fnName`) is true.
+- Emits a 1-arg PAP wrapper that calls `@CAF_symbol(captured_evv)`
+  — but the actual MLIR signature is `() -> i64`. Arity mismatch
+  → undefined behavior in `mlir-translate` / linker.
+
+For a cross-module function reference:
+- Default `arity = 1` is **wrong**: the real plotkin arity is
+  `1 + flatTypeArity(defType)`, which could be 3, 4, …
+- The 1-arg PAP wrapper calls the symbol with 1 arg (just evv)
+  but the symbol expects 2+ args → again a sig mismatch.
+
+Fix: build a **global** arityMap (analogous to `collectTopNames`)
+that covers every Frankenstein module in the link set, threaded
+through `emitProgramText`'s `EmitState` setup. Same shape as
+`topNames`: pre-computed once and passed in.
+
+### L4 — `kk_thunk_create_forced` over a closure
+
+`Emitter.hs` lowering of `EDelay` (around line 1257 per the audit
+above) wraps an expression in `kk_thunk_create_forced(expr)`. If
+`expr` evaluates to a CLOS-tagged value (a PAP) rather than a
+KKSTRING / ADT, the thunk's payload is a closure. Forcing returns
+the closure unchanged. Subsequent code that reads it as Text /
+ADT sees a CLOS layout.
+
+This is not new under plotkin per se — `EDelay` predates the
+plotkin work. But plotkin's eta-expansion and evv-injection
+*increase* the rate at which closure-valued expressions appear
+mid-pipeline, so the latent hazard now fires more often.
+
+Fix candidate: when lowering `EDelay e`, peek at `e`. If it's
+trivially a fully-applied call site whose callee is plotkin'd
+top-level, the result is a real heap value and `kk_thunk_create_forced`
+is harmless. If `e` is an unsaturated app (would produce a PAP),
+defer the thunk wrap so the PAP itself flows to the consumer
+unchanged (the consumer is presumably set up to call it).
+
+### Concrete failing path in current bootstrap
+
+The `kk_str_flatten` crash with `cat.l` tag = `0x434C4F53` (CLOS) is
+consistent with either L3 or L1 firing somewhere in
+`emitProgramText`'s `modPrefix` chain:
+
+```haskell
+modPrefix = let m = qnameModule (progName prog)
+              in if T.null m then "" else sanitizeName m <> "_"
+```
+
+`progName` is a record accessor; `qnameModule` is too. If one of
+these is a plotkin'd top-level fn somewhere in the link set and the
+emitter's local arityMap misses it, L3 produces a malformed PAP that
+is fed into the `<>` chain → eventually reaches `kk_str_concat`'s
+catch-all branch in `append_impl`, which calls `kk_str_concat` on
+the CLOS pointer → reads garbage `byte_len` → `kk_str_flatten`
+trips the validity check.
+
+### Round 5 follow-up — L3a attempt result
+
+L3a fix landed (PostProcess.hs `ExternPapFix` strategy):
+auto-synthesizes PAP wrappers + extern decls for any
+`@frankenstein_<sym>$0()` call whose arity can be recovered from
+the stage1 MLIR cache. Builds cleanly; inline `--demo` regression
+passes.
+
+**Did not reduce the Phase 9 crash.** Inspecting stage-2 MLIR after
+the fix, the remaining unresolved `$0()` references are NOT
+Frankenstein-prefixed — they are legitimate shim symbols like
+`Data_Text_Internal_empty$0`, `GHC_Internal_Classes_not$0`,
+`Data_Set_Internal_empty$0`, `GHC_Types_Var_isTyVar$0`. Each is
+defined in `shim_*.c` with a matching `__asm__` symbol and links
+correctly.
+
+So the CLOS-as-Text leak in `kk_str_concat` is NOT from this
+specific class. L3 as initially diagnosed was the wrong lever.
+
+### Refined hypothesis
+
+The crashing `cat.l` layout reads:
+- `magic = 0x434C4F53` (CLOS)
+- `rc    = 4196513` (= 0x400321 — unusual; not a typical rc value)
+- `byte_len = 562949953421313` (= 0x2000000000001 — near-2^49,
+  plausibly a function-pointer projection)
+- `kind  = 0x4C415A59` (= "LAZY" — i.e. THUNK_TAG)
+
+Reading these offsets against the closure layout:
+- `field 0` (offset 16) reads as `byte_len` → that's a function pointer.
+- `field 1` (offset 24) reads as `kind` → that's a captured value
+  whose tag is `LAZY`.
+
+So the runtime value is a **closure whose capture is a thunk**.
+That matches the lambda-lifted-closure-with-thunk-payload pattern,
+not a cross-module value-position ref. Candidates:
+
+1. A `let`-bound function value (lifted lambda with captures) where
+   one of the captures is a thunk produced by `EDelay` →
+   `kk_thunk_create_forced`. The function value is passed through
+   `<>` somewhere, hitting `append_impl`'s catch-all → `kk_str_concat`.
+2. A `compose`-style HOF returning a closure that *holds* a thunk,
+   and the consumer expected a Text result.
+
+### Recommended next steps
+
+1. ~~Build a global arityMap~~ (attempted as L3a — didn't fix the
+   observed crash; left in place because it removes a separate class
+   of latent breakage).
+
+2. **Type-aware evv injection** in `transformExpr`: keep a
+   `Set (Text, Text)` of CAF-typed top-level names alongside
+   `topNames`; for those, skip the evv-injection branch and emit
+   `EApp (EVar nm) xs` unchanged. The CAF's body still gets the
+   `let evv_p = 0 in ...` wrapper, so internal evv use is fine.
+
+3. **Diagnostic instrumentation**: print which top-level symbol is
+   being wrapped as a PAP in `emitFnAsValue` (one log line per
+   plotkin'd value-position emission). Re-run the bootstrap; the
+   last symbol before the kk_str_flatten crash is the smoking gun.
+
 ## Verification
 
 After each fix, run:

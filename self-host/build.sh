@@ -123,8 +123,10 @@ clang -O2 -c -o "$OUT/shim_data_char.o" self-host/shim_data_char.c -I runtime/
 clang -O2 -c -o "$OUT/shim_ghc_list.o" self-host/shim_ghc_list.c -I runtime/
 # System.Directory / FilePath / Process / Text.Printf shims
 clang -O2 -c -o "$OUT/shim_system.o" self-host/shim_system.c -I runtime/
-# C sanitizeName override (fixes non-deterministic encodeChar corruption)
-clang -O2 -c -o "$OUT/A_sanitize_shim.o" self-host/A_sanitize_shim.c -I runtime/
+# C sanitizeName override (fixes non-deterministic encodeChar corruption).
+# Receives DRIVER_CFLAGS so -DPLOTKIN_EVIDENCE flows through and the shim's
+# arity matches the plotkin-injected (evv, …) calling convention.
+clang -c -o "$OUT/A_sanitize_shim.o" self-host/A_sanitize_shim.c $DRIVER_CFLAGS
 echo "Driver + shims compiled."
 
 echo ""

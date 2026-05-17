@@ -355,12 +355,15 @@ compile_stage() {
     # (>1MB OrganIR JSON) are automatically split into parts of ~40 defs each,
     # compiled separately, and merged.
     _json_size=$(stat -c%s "$ORGAN_DIR/$flat.organ.json")
-    # In plotkin mode, splitting breaks correctness: each part's plotkin
-    # pass only sees its own defs in topNames, so cross-part Frankenstein
-    # call sites don't get evv injected. Disable splitting for plotkin
-    # mode (trades compile time for correctness — to be revisited via
-    # embedded global topNames in the splitter).
-    if [ "${FRANKENSTEIN_EVIDENCE:-}" != "plotkin" ] && [ "$_json_size" -gt 1000000 ]; then
+    # Splitting was disabled in plotkin mode earlier (round 6) because
+    # each part's plotkin pass only saw its own defs in topNames. The
+    # round-6 isTopLevel + round-9 emitFnAsValue fixes now use the
+    # isFrankensteinModule prefix heuristic for cross-module recognition
+    # and pre-supply evv to all non-runtime non-builtin callees. This
+    # SHOULD make per-part splitting work. Re-enabling here as a test;
+    # if it regresses, we'll need the proper L3b (embed global arity in
+    # .organ.json) to fix it cleanly.
+    if [ "$_json_size" -gt 1000000 ]; then
       # Auto-split by JSON byte size: target ~400KB per part so that large
       # definitions (emitAppVar=936KB, emitExpr=377KB, etc.) each get their
       # own part. JSON is minified (separators=(',',':')) to reduce parser

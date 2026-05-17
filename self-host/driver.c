@@ -39,6 +39,10 @@ extern int64_t frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(in
 extern int64_t frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(int64_t /*evv*/, int64_t /*prog*/);
 extern int64_t frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(int64_t /*evv*/, int64_t);
 extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(int64_t /*evv*/, int64_t, int64_t);
+/* Plotkin-style evidence pass: single-program variant builds topNames
+ * internally from the program's own defs. Symbol provided by
+ * Core/EvidenceEvv.hs (added to self-host MODULES). */
+extern int64_t frankenstein_Frankenstein_Core_EvidenceEvv_evidencePassEvv(int64_t /*evv*/, int64_t);
 extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t /*evv*/, int64_t);
 extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t /*evv*/, int64_t);
 extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t /*evv*/, int64_t);
@@ -46,7 +50,11 @@ extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t /
 #define FRK_flattenPatterns(p)        frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(0, (p))
 #define FRK_effectOptimize_full(p)    frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(0, (p))
 #define FRK_collectGlobalEffects(p)   frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(0, (p))
-#define FRK_evidencePassGlobal(g,p)   frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(0, (g), (p))
+/* In plotkin mode, route to evidencePassEvv (Plotkin/Pretnar) so the
+ * emitted MLIR has evv-injected ABI matching the shim layer's
+ * -DPLOTKIN_EVIDENCE compile-time arity. The first arg (globalEffects)
+ * is unused by the plotkin pass — discarded by the macro. */
+#define FRK_evidencePassGlobal(g,p)   (((void)(g)), frankenstein_Frankenstein_Core_EvidenceEvv_evidencePassEvv(0, (p)))
 #define FRK_insertPerceus(p)          frankenstein_Frankenstein_Core_Perceus_insertPerceus(0, (p))
 #define FRK_emitProgramText(p)        frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(0, (p))
 #define FRK_dumpProgram(p)            frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(0, (p))

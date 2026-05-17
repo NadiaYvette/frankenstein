@@ -20,6 +20,8 @@ MODULES=(
   src/Frankenstein/Core/Types.hs
   src/Frankenstein/Core/Perceus.hs
   src/Frankenstein/Core/Evidence.hs
+  src/Frankenstein/Core/CpsConvert.hs
+  src/Frankenstein/Core/EvidenceEvv.hs
   src/Frankenstein/Core/EffectOpt.hs
   src/Frankenstein/Core/ConTags.hs
   src/Frankenstein/Core/Linker.hs
@@ -353,7 +355,12 @@ compile_stage() {
     # (>1MB OrganIR JSON) are automatically split into parts of ~40 defs each,
     # compiled separately, and merged.
     _json_size=$(stat -c%s "$ORGAN_DIR/$flat.organ.json")
-    if [ "$_json_size" -gt 1000000 ]; then
+    # In plotkin mode, splitting breaks correctness: each part's plotkin
+    # pass only sees its own defs in topNames, so cross-part Frankenstein
+    # call sites don't get evv injected. Disable splitting for plotkin
+    # mode (trades compile time for correctness — to be revisited via
+    # embedded global topNames in the splitter).
+    if [ "${FRANKENSTEIN_EVIDENCE:-}" != "plotkin" ] && [ "$_json_size" -gt 1000000 ]; then
       # Auto-split by JSON byte size: target ~400KB per part so that large
       # definitions (emitAppVar=936KB, emitExpr=377KB, etc.) each get their
       # own part. JSON is minified (separators=(',',':')) to reduce parser

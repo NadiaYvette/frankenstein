@@ -256,7 +256,12 @@ transformExpr effs topNames evv = go
       EForce e     -> EForce (go e)
 
     -- An EVar refers to a top-level fn iff its name matches one of
-    -- @topNames@. The bridge uses two encodings:
+    -- @topNames@, OR its qualified name has a Frankenstein-prefixed
+    -- module (cross-module case in per-module self-host compilation,
+    -- where the callee's def isn't in this program's topNames but IS
+    -- plotkin-transformed in its own module).
+    --
+    -- The bridge uses two encodings:
     --   * unqualified leaf name (e.g. "consumeName")
     --   * module/name slash-form (e.g. "Frankenstein.OrganIR.Consumer/consumeName")
     -- We accept either, splitting on the last @/@.
@@ -268,10 +273,12 @@ transformExpr effs topNames evv = go
             _                             -> (Nothing, txt)
       in case mModule of
            Just m  -> Set.member (m, leaf) topNames
+                   || isFrankensteinModule m  -- cross-module Frankenstein callee
            Nothing -> any (\(_, nm) -> nm == leaf) (Set.toList topNames)
 
     isTopLevelQ :: QName -> Bool
     isTopLevelQ qn = Set.member (qnameToFlat qn) topNames
+                  || isFrankensteinModule (qnameModule qn)
 
     -- An EFunRef qn is an effect-op reference iff qn.module names a
     -- declared effect in this program. The CPS converter generates

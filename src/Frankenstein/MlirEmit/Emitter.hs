@@ -261,6 +261,16 @@ emitFnAsValue fnName arityMap = do
   case resolved of
     Just evvSsa | isPlotkinFn && arity > 0 ->
       emitFnAsValueWithArgs fnName arity [evvSsa]
+    _ | isPlotkinFn && arity > 0 -> do
+      -- Fallback: when no in-scope evv is resolvable (e.g. inside a lifted
+      -- lambda whose self-host-emitted body lost track of the outer evv
+      -- capture), pre-supply 0 as the empty-evv sentinel. The PAP wrapper
+      -- still has the right arity (matching plotkin defs), so HOFs invoking
+      -- it via call1/call2 get a saturated dispatch. The captured 0 is
+      -- safe for non-effectful callees (the bootstrap case).
+      zeroSsa <- freshName "v_zero_evv"
+      (ops, ret) <- emitFnAsValueWithArgs fnName arity [zeroSsa]
+      pure ( ("%" <> zeroSsa <> " = arith.constant 0 : i64") : ops, ret )
     _ ->
       emitFnAsValueWithArgs fnName arity []
 
@@ -428,7 +438,11 @@ emitProgramText prog =
             , "  }"
             ]
           else T.unlines $ mainHeader ++
-            [ mainCallPrelude <> "    %result = func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
+            [ mainCallPrelude <> "    %result_raw = func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
+            -- Force in case main's body is wrapped in kk_thunk_create_forced
+            -- (EDelay lowering). Without this, printf prints the thunk pointer
+            -- as a giant integer.
+            , "    %result = func.call @kk_thunk_force(%result_raw) : (i64) -> i64"
             , "    %fmtaddr = llvm.mlir.addressof @fmt_int : !llvm.ptr"
             , "    llvm.call @printf(%fmtaddr, %result) vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
             , "    %zero = arith.constant 0 : i32"

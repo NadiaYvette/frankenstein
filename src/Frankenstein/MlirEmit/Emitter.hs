@@ -245,8 +245,26 @@ emitFnAsValue fnName arityMap = do
   curEvv    <- gets esCurrentEvv
   aliases   <- gets esAliases
   scopeSsa  <- gets esScopeSsa
+  extRt     <- gets esExtRuntimeFns
   let arity        = Map.findWithDefault 1 fnName arityMap
-      isPlotkinFn  = "Frankenstein_" `T.isInfixOf` fnName
+      -- A top-level fn that's been plotkin-transformed in the current
+      -- Program. Under plotkin mode (esCurrentEvv is Just), every
+      -- Frankenstein top-level def gets an evv-prepended ABI — INCLUDING
+      -- user-module fns like HigherOrder_addN, Closure_..., etc. The
+      -- earlier "Frankenstein_" infix check was too narrow and silently
+      -- dropped pre-supply for user examples, breaking HOFs.
+      --
+      -- Exclusions (NOT plotkin-transformed, so DON'T pre-supply):
+      --   * extRuntimeFns (kk_*, mercury_*, etc.)
+      --   * builtin wrappers (__kk_builtin_add/sub/eq/... — synthesized
+      --     by builtinWrapperSpec for binary ops used as values; they
+      --     keep their original arithmetic arity)
+      --   * intra-module $N split-compilation wrappers (those carry the
+      --     original undecorated arity for split-compiled .organ.json)
+      isPlotkinFn  = case curEvv of
+        Just _ -> not (Set.member fnName extRt)
+                  && not ("__kk_builtin_" `T.isPrefixOf` fnName)
+        Nothing -> False
       -- Resolve evv through the alias map (handles capture rebinds in
       -- lifted lambdas) and verify the resolved SSA is in the current
       -- MLIR function's scope. If it's an outer-scope name leaked

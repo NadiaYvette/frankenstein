@@ -527,7 +527,9 @@ parseKkFieldProducer ssaNoPct line = do
   rest1 <- T.stripPrefix "%" stripped
   let (n, rest2) = T.span isIdentChar rest1
   if n /= ssaNoPct then Nothing else do
-    rest3 <- T.stripPrefix " = func.call @kk_field(%" (T.stripStart rest2)
+    -- rest2 starts with " = func.call @kk_field(%...". DO NOT pre-strip:
+    -- the prefix needs that leading space (same hazard as parseDollar0).
+    rest3 <- T.stripPrefix " = func.call @kk_field(%" rest2
     let (scrut, rest4) = T.span isIdentChar rest3
     rest5 <- T.stripPrefix ", %" rest4
     let (idx, _) = T.span isIdentChar rest5
@@ -541,7 +543,8 @@ parseConstIdx ssaNoPct line = do
   rest1 <- T.stripPrefix "%" stripped
   let (n, rest2) = T.span isIdentChar rest1
   if n /= ssaNoPct then Nothing else do
-    rest3 <- T.stripPrefix " = arith.constant " (T.stripStart rest2)
+    -- rest2 starts with " = arith.constant N". DO NOT pre-strip.
+    rest3 <- T.stripPrefix " = arith.constant " rest2
     let (numT, _) = T.span isDigit rest3
     readInt numT
 

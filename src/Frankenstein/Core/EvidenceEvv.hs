@@ -180,7 +180,19 @@ transformDef effs topNames d
           targetArity  = flatTypeArity (defType d) + 1
           currentArity = 1 + length existingParams
           missing      = max 0 (targetArity - currentArity)
-          etaParams = [ (Name (T.pack ("eta_p" <> show i)) 0, anyType)
+          -- Put the index in the Name's `unique` field rather than
+          -- appending it to the text via `++` or `<>`. Two reasons:
+          --   * `<>` on String triggers Semigroup-class dispatch through
+          --     an unshimmed dictionary symbol (zdfSemigroupList) in the
+          --     self-host bootstrap — segfaults on HOF examples.
+          --   * `++` (zpzp$2) on a [Char] cons-list "eta_p" with a
+          --     kk_string result of `show i` produces a malformed
+          --     mixed-type list whose sanitizer truncates at the join,
+          --     yielding "eta_p" for ALL i — duplicate parameter names.
+          -- The unique field is a real Int (passed via kk_str_show_int)
+          -- and nameToSsa naturally appends it, so distinct i values
+          -- give distinct SSA names without any string concat in source.
+          etaParams = [ (Name (T.pack "eta_p") i, anyType)
                       | i <- [0 .. missing - 1] ]
           bodyWithEta = case etaParams of
             []  -> innerBody

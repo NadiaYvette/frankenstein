@@ -448,6 +448,11 @@ data Dollar0Fix
        -- lineIdx, resultVar, varName, arity (discovered via stage1 cache).
        -- Generates a synthesized 'pap_extern_frankenstein_<varName>_0' wrapper
        -- and matching extern decl injected at module scope.
+  | ReExtractFix !Int !Text !Text !Text !Int
+       -- lineIdx, resultVar, varName, scrutinee SSA, field index.
+       -- For pattern binders whose alias exists out-of-scope (in a sibling
+       -- scf.if branch): replicate the kk_field(scrutinee, idx) extraction
+       -- at the call site so the same Name value is recovered.
 
 collectDollar0Fixes :: Map FilePath Text -> [Text] -> [Dollar0Fix]
 collectDollar0Fixes stage1 lns =
@@ -463,14 +468,82 @@ collectDollar0Fixes stage1 lns =
                 case findPapWrapper varName lns of
                   Just (papName, nparams) ->
                     Just (PapFix i resultVar varName papName nparams)
-                  Nothing -> tryExtern resultVar varName i
-            | otherwise -> tryExtern resultVar varName i
+                  Nothing -> tryReExtractThenExtern resultVar varName i funcStart
+            | otherwise -> tryReExtractThenExtern resultVar varName i funcStart
+      tryReExtractThenExtern resultVar varName i funcStart =
+        case findReExtractTarget varName lns i funcStart of
+          Just (scrut, idx) ->
+            Just (ReExtractFix i resultVar varName scrut idx)
+          Nothing -> tryExtern resultVar varName i
       tryExtern resultVar varName i =
         case findExternalArity varName stage1 of
           Just arity | arity > 0 ->
             Just (ExternPapFix i resultVar varName arity)
           _ -> Nothing
   in mapMaybe mkFix indexedLns
+
+-- | For an unresolved @\@frankenstein_<varName>$0()@ pattern binder that has
+-- a matching @// let <varName-suffix> = %ssa@ alias somewhere in the function
+-- (potentially in a sibling scf.if branch), recover (scrutinee, field_idx)
+-- from the kk_field call that produced %ssa. The fix then re-emits the same
+-- kk_field at the call site so the binder's value is reconstructed in the
+-- current branch's scope.
+findReExtractTarget :: Text -> [Text] -> Int -> Maybe Int -> Maybe (Text, Int)
+findReExtractTarget varName lns callLine funcStart = do
+  uniq <- trailingDigits varName
+  let searchStart = fromMaybe 0 funcStart
+      funcEnd = findFuncEnd lns searchStart
+      windowLns = take (funcEnd - searchStart) (drop searchStart lns)
+      indexed = zip [searchStart ..] windowLns
+  -- Find any alias-comment whose name ends with the same trailing digits.
+  -- We accept the FIRST such alias (anywhere in the function), regardless
+  -- of scope, since we only need it for its kk_field pattern.
+  let aliasHit = firstJust
+        (\(j, l) -> case parseAliasComment l of
+            Just (an, ssa)
+              | uniq `T.isSuffixOf` an
+              , not ("_" `T.isPrefixOf` an) -> Just (j, ssa)
+            _ -> Nothing)
+        indexed
+  (aliasLine, aliasSsa) <- aliasHit
+  let ssaNoPct = fromMaybe aliasSsa (T.stripPrefix "%" aliasSsa)
+  -- The producer of aliasSsa is typically the line just above the alias:
+  --   %ssa = func.call @kk_field(%scrut, %idx) : (i64, i64) -> i64
+  -- with %idx defined a few lines above as an arith.constant.
+  let producerSearch = take 10 (reverse (take aliasLine lns))  -- last 10 lines before alias
+  (scrut, idxVar) <- firstJust (parseKkFieldProducer ssaNoPct) producerSearch
+  -- Resolve idxVar (which is an SSA name like "%v392") to its constant value
+  -- by scanning further back for "%idx = arith.constant N : i64".
+  let idxNoPct = fromMaybe idxVar (T.stripPrefix "%" idxVar)
+      constSearch = take 20 (reverse (take aliasLine lns))
+  idx <- firstJust (parseConstIdx idxNoPct) constSearch
+  Just (scrut, idx)
+
+-- | Match a line of the form
+--   "%<ssa> = func.call @kk_field(%<scrut>, %<idx>) : ..." and return (scrut, idx).
+parseKkFieldProducer :: Text -> Text -> Maybe (Text, Text)
+parseKkFieldProducer ssaNoPct line = do
+  let stripped = T.stripStart line
+  rest1 <- T.stripPrefix "%" stripped
+  let (n, rest2) = T.span isIdentChar rest1
+  if n /= ssaNoPct then Nothing else do
+    rest3 <- T.stripPrefix " = func.call @kk_field(%" (T.stripStart rest2)
+    let (scrut, rest4) = T.span isIdentChar rest3
+    rest5 <- T.stripPrefix ", %" rest4
+    let (idx, _) = T.span isIdentChar rest5
+    Just (scrut, idx)
+
+-- | Match a line of the form
+--   "%<ssa> = arith.constant <N> : i64" and return N if name matches.
+parseConstIdx :: Text -> Text -> Maybe Int
+parseConstIdx ssaNoPct line = do
+  let stripped = T.stripStart line
+  rest1 <- T.stripPrefix "%" stripped
+  let (n, rest2) = T.span isIdentChar rest1
+  if n /= ssaNoPct then Nothing else do
+    rest3 <- T.stripPrefix " = arith.constant " (T.stripStart rest2)
+    let (numT, _) = T.span isDigit rest3
+    readInt numT
 
 -- | Scan the stage1 MLIR cache for a 'func.func @frankenstein_<varName>(...)'
 -- declaration and return its i64 parameter count. Used to synthesize PAP
@@ -497,7 +570,11 @@ parseDollar0 line =
   in do
     rest1 <- T.stripPrefix "%" rest0
     let (resultVar, rest2) = T.span isIdentChar rest1
-    rest3 <- T.stripPrefix " = func.call @frankenstein_" (T.stripStart rest2)
+    -- rest2 starts with " = func.call @frankenstein_...". Match WITHOUT
+    -- pre-stripping whitespace: the prefix already includes a leading
+    -- space, and stripStart would consume that space leaving "= func.call..."
+    -- which fails the prefix match.
+    rest3 <- T.stripPrefix " = func.call @frankenstein_" rest2
     let (varName, rest4) = T.break (== '$') rest3
     rest5 <- T.stripPrefix "$0()" rest4
     if " : () -> i64" `T.isPrefixOf` rest5
@@ -592,6 +669,7 @@ applyDollar0Fixes fixes lns =
   let fixedVarNames = Set.fromList [ vn | RenameFix _ _ _ vn <- fixes ]
                    <> Set.fromList [ vn | PapFix _ _ vn _ _ <- fixes ]
                    <> Set.fromList [ vn | ExternPapFix _ _ vn _ <- fixes ]
+                   <> Set.fromList [ vn | ReExtractFix _ _ vn _ _ <- fixes ]
       -- Build per-function rename map
       renamesByFunc :: Map Int (Map Text Text)
       renamesByFunc = foldl' addRename Map.empty fixes
@@ -616,6 +694,9 @@ applyDollar0Fixes fixes lns =
              Just fs -> Map.insertWith Map.union fs
                          (Map.singleton ("%" <> resVar) papClosVar) m
              Nothing -> m
+      -- ReExtractFix: replace the bad call with kk_field, keep the original
+      -- resultVar name so subsequent uses don't need renaming.
+      addRename m (ReExtractFix _ _ _ _ _) = m
       deleteLines = Set.fromList [ i | RenameFix i _ _ _ <- fixes ]
       papInsertions = Map.fromList $
         [ (i, mkPapBlock i papName nparams)
@@ -623,6 +704,9 @@ applyDollar0Fixes fixes lns =
         ++
         [ (i, mkPapBlock i (externPapName vn) arity)
         | ExternPapFix i _ vn arity <- fixes ]
+        ++
+        [ (i, mkReExtractBlock i resVar scrut idx)
+        | ReExtractFix i resVar _vn scrut idx <- fixes ]
       -- Distinct (varName, arity) pairs needing synthesized wrappers + extern decls.
       externNeeds :: Map Text Int
       externNeeds = Map.fromList
@@ -633,6 +717,19 @@ applyDollar0Fixes fixes lns =
           (renderFixed lns fixedVarNames renamesByFunc deleteLines papInsertions)
           externNeeds
   in withModuleInjections
+
+-- | Replace a bogus @\@frankenstein_<vn>$0()@ call with the kk_field
+-- extraction that the pattern compiler should have emitted. Keeps the
+-- original SSA name so downstream uses link up.
+mkReExtractBlock :: Int -> Text -> Text -> Int -> [Text]
+mkReExtractBlock counter resVar scrut idx =
+  let pfx = "_rx" <> tshow counter
+      indent = "    "
+  in [ indent <> "// FIXED by ReExtractFix: was @frankenstein_<binder>$0()"
+     , indent <> "%" <> pfx <> "_idx = arith.constant " <> tshow idx <> " : i64"
+     , indent <> "%" <> resVar <> " = func.call @kk_field(%" <> scrut
+         <> ", %" <> pfx <> "_idx) : (i64, i64) -> i64"
+     ]
 
 -- | The synthesized wrapper symbol name for a cross-module Frankenstein
 -- value-position reference. Mirrors emitPapClosure's wrapper naming

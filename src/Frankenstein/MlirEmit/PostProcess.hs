@@ -636,14 +636,23 @@ parseAliasComment line = do
   Just (name, "%" <> ssa)
 
 -- | Brace-depth walk: definition is in scope iff we never close more braces
--- than we open between def_line and use_line.
+-- than we open between def_line and use_line. The check must be INTRA-LINE:
+-- a line like `} else {` flashes depth = -1 mid-line before returning to 0,
+-- and we need to catch that — otherwise sibling scf.if branches falsely
+-- appear in scope and we rewrite a use site to reference an SSA that's
+-- only defined in a different branch.
 isInScope :: [Text] -> Int -> Int -> Bool
 isInScope lns defLine useLine =
   let between = drop (defLine + 1) (take useLine lns)
-      step d c = case c of
-        '{' -> d + 1
-        '}' -> d - 1
-        _   -> d
+      -- Make `step` sticky: once depth goes negative, it stays negative.
+      -- That way the per-line `foldl'` propagates a transient negative
+      -- through the rest of the line and the line-end check catches it.
+      step d c
+        | d < 0     = -1
+        | otherwise = case c of
+            '{' -> d + 1
+            '}' -> d - 1
+            _   -> d
       go d _   | d < 0 = False
       go d []          = d >= 0
       go d (l:ls)      = go (T.foldl' step d l) ls
@@ -813,8 +822,13 @@ renderFixed
   -> Map Int [Text]          -- PAP insertions
   -> Text
 renderFixed lns fixedVarNames renamesByFunc deleteLines papInsertions =
-  T.unlines (snd (foldl' step (Nothing :: Maybe (Int, Int, Map Text Text), [])
-                             (zip [0..] lns)))
+  -- `step` PREPENDS to the accumulator (`note : accRev`, `l' : accRev`, etc.)
+  -- to keep the per-line cost O(1), so the final accumulator is in REVERSE
+  -- iteration order. Must reverse before joining or the entire output file
+  -- comes out line-by-line backwards — a bug that hid silently until
+  -- round 7's parseDollar0 parser fix made this code path actually run.
+  T.unlines (reverse (snd (foldl' step (Nothing :: Maybe (Int, Int, Map Text Text), [])
+                                       (zip [0..] lns))))
   where
     step (curRange, accRev) (i, l)
       -- Strip private decls for fixed names

@@ -116,3 +116,18 @@ executable frankenstein
         filepath
     hs-source-dirs:   app
     default-language: GHC2024
+
+executable frankenstein-diff-tester
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:
+        base >= 4.17 && < 5,
+        QuickCheck,
+        bytestring,
+        process,
+        temporary,
+        directory,
+        filepath,
+        containers
+    hs-source-dirs:   tools/diff-tester
+    default-language: GHC2024

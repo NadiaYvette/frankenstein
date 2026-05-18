@@ -407,3 +407,47 @@ stage 2/3 MLIR matches byte-for-byte (fixed point).
 
 Inline-mode bootstrap remains 24/24 + 21/21 + fixed point as the
 non-regression baseline.
+
+## DB5 closing summary (rounds 6-12)
+
+Final state under `FRANKENSTEIN_EVIDENCE=plotkin`: **21/21 E2E parity at Phase 8 (stage 1), Phase 9c (stage 2), Phase 10c (stage 3)**. Strict MLIR byte-equality fixed-point stabilized at **9-11/26**.
+
+### Commits
+
+| Round | Commit | Headline |
+|---|---|---|
+| 5 | `f74c712` | A_sanitize_shim plotkin arity → Phase 8 0/21 → 21/21 |
+| 6 | `6308751` | EvidenceEvv wired, isTopLevel cross-module, emitFnAsValue 0-evv fallback, main wrapper thunk-force, split disabled. Stage 2/3 0/21 → 2/21 |
+| 7 | `ebe1253` | parseDollar0 `T.stripStart` bug → 2/21 → 18/21 across stages |
+| 8 | `eb953c1` | etaParams unique-field naming (was producing dup `%eta_p0` params) → 18/21 → 19/21 |
+| 9 | `49e3590` | emitFnAsValue isPlotkinFn widened (user-module fns recognized) → 19/21 → 21/21 |
+| 10 | `0c461f7` | Split-compile re-enabled (L3b obsolete) |
+| 11 | `d066980` | renderFixed missing-reverse + isInScope intra-line negative depth |
+| 12 | `aea4313` | parseKkFieldProducer / parseConstIdx — same stripStart bug as round 7 |
+
+### What we learned
+
+1. **Class of bugs: latent post-process parsers**. Three separate `T.stripStart` calls in `PostProcess.hs` parsers silently consumed leading spaces the prefix matchers needed. The parsers always returned `Nothing`, silently disabling whole strategies for many rounds.
+
+2. **Class of bugs: accumulator without final reverse**. `renderFixed` built its line accumulator via O(1) prepends but joined without a final `reverse` — entire MLIR file came out backwards. Only fired after round 7 activated the code path.
+
+3. **Class of bugs: ABI mismatch between Haskell and C shims**. `A_sanitize_shim.c`'s C functions ignored the `evv` arg that plotkin's eta-expansion added, returning inline-mode closure values where Text was expected.
+
+4. **Class of bugs: emitter pre-supply gate**. `emitFnAsValue`'s `"Frankenstein_" isInfixOf` check excluded user-module fns from PAP evv pre-supply — HOFs invoking those fns produced wrong-arity dispatch.
+
+5. **Class of bugs: free-var analysis in lambda lifts**. `esCurrentEvv` tracking gets lost inside lifted lambdas; emit decisions depend on accumulator state at lift time.
+
+### Why fixed-point gap remains
+
+The strict 26/26 fixed-point target requires the stage 1 binary's compiled emitter to behave byte-for-byte identically to the host (GHC-compiled) emitter. The remaining ~15-17 modules diverge in:
+
+- **classifyBranches** mis-classifying single-PatCon cases (see `single_ctor_test`)
+- **Lambda-lift free-var sets** differing between stages (e.g. `cpsExpr_lambda1027` with 2 captures in stage 3 vs `cpsExpr_lambda1035` with 3 captures in stage 2 for the same source)
+- **SSA-numbering cascading offsets** from upstream emit variance
+- **Split-merged modules** failing mlir-opt at stage 3 (separate ABI issue with merged-part wrapper naming)
+
+The most promising specific bug class is **pattern-guard miscompilation**: Haskell's `case x | g1, g2 -> ...` arms with chained `<-` pattern-binding guards don't lower correctly in self-compiled Frankenstein. Rewriting `classifyBranches`'s guard chain to use Bool guards over where-bound helpers did NOT fix this (round attempted, reverted) — suggesting the bug class is broader than the guard-chain rewrite addresses.
+
+### Closing call
+
+DB5 marked substantially complete. 21/21 E2E behavioral parity is the durable user-visible win. The 9-11/26 fixed-point gap is foundational pattern-compiler-correctness work — see `docs/strict-fixed-point.md` for the next investigation arc.

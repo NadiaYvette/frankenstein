@@ -389,11 +389,17 @@ emitOrgan t src = do
   return (if xo == ExitSuccess then Right oOut
                                else Left (oErr ++ "\n" ++ oOut))
 
+-- Match the bootstrap's invocation shape: pass the JSON as a file path and add
+-- --no-perceus, exactly as self-host/build.sh does.  Stdin input + missing flag
+-- produces a different code path (we verified output is identical, but match
+-- bootstrap form so reported divergences reflect the bootstrap question).
 stageEmit :: FilePath -> Tools -> String -> FilePath -> IO (Either String BS.ByteString)
 stageEmit bin _t organJson dir = do
-  let out = dir </> "stage.mlir"
+  let jsonPath = dir </> "input.organ.json"
+      out      = dir </> "stage.mlir"
+  writeFile jsonPath organJson
   (xs, sOut, sErr) <- readProcessWithExitCode bin
-    ["-", "-o", out] organJson
+    [jsonPath, "--no-perceus", "-o", out] ""
   if xs /= ExitSuccess
     then return (Left (sErr ++ "\n" ++ sOut))
     else do

@@ -571,6 +571,9 @@ runtimeNames = Set.fromList
   -- Haskell-cons-list printers used by the GHC bridge's putStrLn /
   -- hPutStr2 rewrite and the `main :: String` wrapper detection.
   , "println_haskell_chars", "print_haskell_chars"
+  -- Build a [Char] cons-list for an Int — GHC bridge's Show Int
+  -- rewrite target (replaces $w$cshowsPrec2).
+  , "int_to_haskell_chars"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

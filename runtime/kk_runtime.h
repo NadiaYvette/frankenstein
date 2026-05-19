@@ -37,6 +37,10 @@ void    kk_println_con(int64_t v);
 void    kk_print_haskell_chars(int64_t list);
 void    kk_println_haskell_chars(int64_t list);
 
+/* Build a [Char] cons-list for decimal-formatted n, prepending onto
+ * tail.  Used by the GHC bridge to implement Show Int. */
+int64_t kk_int_to_haskell_chars(int64_t n, int64_t tail);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

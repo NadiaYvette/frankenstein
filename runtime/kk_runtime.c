@@ -313,6 +313,55 @@ void kk_println_haskell_chars(int64_t list) {
     putchar('\n');
 }
 
+/* Build a Haskell [Char] cons-list for the decimal representation of n.
+ * `tail` is the list to prepend digits onto (showsPrec-style).
+ *
+ * Used by the GHC bridge to intercept `show :: Int -> String` and
+ * the lower-level `showsPrec :: Int -> Int -> ShowS` calls.  We
+ * ignore the precedence argument (callers typically pass 0 or 11);
+ * the only observable difference is parenthesisation of negatives in
+ * application contexts, which we model by always parenthesising
+ * negative numbers when precedence >= 6 — see kk_int_show_at_prec.
+ */
+int64_t kk_int_to_haskell_chars(int64_t n, int64_t tail) {
+    /* Build a cons-cell for a single char. */
+    #define CONS_CELL(c, t) ({                                  \
+        int64_t _cell = kk_alloc_con(KK_HASKELL_CONS_TAG, 2);  \
+        kk_set_field(_cell, 0, (c));                            \
+        kk_set_field(_cell, 1, (t));                            \
+        _cell;                                                   \
+    })
+    int64_t result = tail;
+    int neg = (n < 0);
+    int64_t v = neg ? -n : n;
+    /* Build digit chars in reverse (least significant first), then
+     * prepend onto result so the high-significance digit ends up at
+     * the head of the list. */
+    char buf[24];  /* 2^63 ≈ 19 digits + sign + slack */
+    int len = 0;
+    if (v == 0) {
+        buf[len++] = '0';
+    } else {
+        while (v > 0) {
+            buf[len++] = (char)('0' + (v % 10));
+            v /= 10;
+        }
+    }
+    if (neg) {
+        buf[len++] = '-';
+    }
+    /* Now prepend each byte in iteration order (which walks from
+     * least-significant up through sign), since we want the head of
+     * the list to be the most significant char.  We build from the
+     * end so each cons points at the previously-built tail. */
+    for (int i = 0; i < len; i++) {
+        result = CONS_CELL((int64_t)(unsigned char)buf[i], result);
+    }
+    return result;
+    #undef CONS_CELL
+}
+
+
 /* First-class strings — rope-based, UTF-8.
  *
  * A Frankenstein string is a heap-allocated kk_string_t header. The

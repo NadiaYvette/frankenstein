@@ -605,6 +605,7 @@ emitProgramText prog =
     , "  func.func private @kk_println_con(i64) -> ()"
     , "  func.func private @kk_println_haskell_chars(i64) -> ()"
     , "  func.func private @kk_print_haskell_chars(i64) -> ()"
+    , "  func.func private @kk_int_to_haskell_chars(i64, i64) -> i64"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
     , "  func.func private @kk_nil() -> i64"
@@ -769,6 +770,7 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_println_con(i64) -> ()"
     , "  func.func private @kk_println_haskell_chars(i64) -> ()"
     , "  func.func private @kk_print_haskell_chars(i64) -> ()"
+    , "  func.func private @kk_int_to_haskell_chars(i64, i64) -> i64"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
@@ -886,6 +888,7 @@ emitProgramWasm prog =
     , "  func.func private @kk_println_con(i64) -> ()"
     , "  func.func private @kk_println_haskell_chars(i64) -> ()"
     , "  func.func private @kk_print_haskell_chars(i64) -> ()"
+    , "  func.func private @kk_int_to_haskell_chars(i64, i64) -> i64"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -1573,6 +1576,17 @@ emitAppVarWith2 fn a b
       resultName <- freshName "v"
       pure (aOps ++ bOps ++
         [ "%" <> resultName <> " = func.call @kk_str_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- int_to_haskell_chars(value, tail) → kk_int_to_haskell_chars.  Used
+  -- by the GHC bridge as the rewrite target for Show Int (via the
+  -- $w$cshowsPrec2 worker name).  Builds a [Char] cons-list with the
+  -- decimal representation prepended onto the tail list.
+  | n == "int_to_haskell_chars" = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_int_to_haskell_chars(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
         ], resultName)
   | n `elem` ["str_eq", "==s", "bytes_eq"] = do
       (aOps, aName) <- emitExpr a
@@ -3017,6 +3031,7 @@ externalRuntimeFns = Set.fromList
   , "printf", "puts", "exit", "exitWith", "malloc", "free"
   , "println_str", "print_str", "putStrLn"
   , "println_haskell_chars", "print_haskell_chars"
+  , "int_to_haskell_chars"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
   , "read_line", "getLine", "read_file", "write_file"
   , "args_count", "args_get", "args_progname"
@@ -3041,6 +3056,7 @@ externalRuntimeArity = Map.fromList
   , ("printf", 2), ("puts", 1), ("exit", 1), ("exitWith", 1)
   , ("println_str", 1), ("print_str", 1), ("putStrLn", 1)
   , ("println_haskell_chars", 1), ("print_haskell_chars", 1)
+  , ("int_to_haskell_chars", 2)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
   , ("show_int", 1)
   , ("read_line", 0), ("getLine", 0)

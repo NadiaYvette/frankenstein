@@ -88,6 +88,10 @@ rm -rf /tmp/frankenstein-mercury-*/
 run_hello "chained-mercury"   $'first\nsecond\nthird' "examples/chained_io.m"
 
 echo ""
+echo "--- Show / print integers ---"
+run_hello "show-haskell"      $'0\n42\n-7\n210' "examples/show_int.hs"
+
+echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then
     echo "  ALL HELLOS PASS ($PASS/$((PASS+FAIL)))"

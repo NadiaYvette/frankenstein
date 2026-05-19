@@ -42,11 +42,15 @@ BRIDGE_rust_strings, BRIDGE_mercury_strings) took the same session.
 
 Chained IO actions (3-line do-blocks / sequential calls) also work for
 Haskell, Rust, and Mercury — see `examples/chained_io.{hs,rs,m}`.
-The test driver now runs 8/8 hellos.
+
+Haskell `show :: Int -> String` and `print :: Int -> IO ()` work via
+the GHC bridge's `isShowIntWorker` intercept — see
+`examples/show_int.hs`.  Test driver runs 9/9 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-formatted output (e.g. `show`/`Display` typeclass machinery), file/stdin
-handles, complex ADT deconstruction, full UTF-8 re-encoding.
+Rust `println!("{}", x)` placeholders (Display trait machinery),
+Haskell `Show` for non-Int types (lists, Maybe, custom datatypes),
+file/stdin handles, full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

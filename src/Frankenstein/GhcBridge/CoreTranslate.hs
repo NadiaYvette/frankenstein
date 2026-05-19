@@ -220,6 +220,25 @@ trExpr (App f a) =
                        then "print_haskell_chars"
                        else "println_haskell_chars"
           in F.EApp (F.EVar (F.Name (T.pack fnName) 0)) [trExpr stringArg]
+    -- GHC.Internal.Show worker for Show Int:
+    --   $w$cshowsPrec2 :: Int# -> Int -> ShowS  (= [Char] -> [Char])
+    -- The simplifier specialises `show n` and `showsPrec p n s` to a
+    -- call shape App (App (App (Var $w$cshowsPrec2) precInt) intArg) tailList.
+    -- We route this to int_to_haskell_chars (which builds the decimal
+    -- cons-list onto the tail), ignoring precedence — the only
+    -- observable difference is paren around negatives in showsPrec p
+    -- contexts, which everyday Haskell rarely needs.  The intArg is
+    -- usually `IS n#` (Integer) or `I# n#` (Int); unbox it here so
+    -- the runtime function sees the raw integer rather than a heap
+    -- pointer to a boxed constructor.
+    (Var v, args)
+      | isShowIntWorker v
+      , let valueArgs = filter (\x -> not (isDictArg x)
+                                       && not (isRealWorldArg x)
+                                       && not (isTypeArg x)) args
+      , Just (intArg, tailArg) <- pickShowArgs (getOccString v) valueArgs ->
+          F.EApp (F.EVar (F.Name "int_to_haskell_chars" 0))
+                 [unboxIntCon intArg, trExpr tailArg]
     -- General case: strip dictionary arguments and realWorld# state tokens
     (fun, args) ->
       let args' = filter (\x -> not (isDictArg x) && not (isRealWorldArg x)) args
@@ -401,6 +420,55 @@ ghcIoOutputRuntime v =
        ("GHC.Internal.IO.Handle.Text", "hPutStr2")    -> Just "hPutStr2"
        ("GHC.IO.Handle.Text",          "hPutStr2")    -> Just "hPutStr2"
        _                                              -> Nothing
+
+-- | True for the GHC.Internal.Show worker that implements showsPrec
+-- for Int (and related types that share the worker after specialisation).
+-- The simplifier rewrites `show :: Int -> String` and
+-- `showsPrec p :: Int -> ShowS` to this 3-arg worker call.
+isShowIntWorker :: Var -> Bool
+isShowIntWorker v =
+  let occ = getOccString v
+      mmod = case nameModule_maybe (varName v) of
+               Just m  -> moduleNameString (moduleName m)
+               Nothing -> ""
+      -- $fShowCallStack_itos' is the unwrapped "int to string" emitter
+      -- (2-arg: value + tail) that GHC pulls in for some specialised
+      -- show calls (e.g. `show (e :: Int)` after CSE pre-computes the
+      -- value).  It's the same shape as $w$cshowsPrec2 minus the
+      -- precedence arg.
+      isItos = occ == "$fShowCallStack_itos'"
+  in (mmod == "GHC.Internal.Show" || mmod == "GHC.Show")
+     && (occ `elem`
+        [ "$w$cshowsPrec2"        -- worker for Show Int
+        , "$wshowSignedInt"       -- inlined showSignedInt
+        ]
+        || isItos)
+
+-- | Strip the boxed-Integer / boxed-Int constructor application around a
+-- raw integer literal.  GHC's simplifier wraps Int/Integer literals in
+-- @IS n#@ (Integer's small-integer case) or @I# n#@ (Int).  When we
+-- forward the value to a runtime helper that wants the raw payload,
+-- peel away the constructor here.  Falls back to ordinary translation
+-- when the arg doesn't match.
+unboxIntCon :: CoreExpr -> F.Expr
+unboxIntCon e = case collectArgs e of
+  (Var v, [Lit l]) | getOccString v `elem` intLikeBoxers ->
+    F.ELit (translateLit l)
+  (Var v, [inner]) | getOccString v `elem` intLikeBoxers ->
+    trExpr inner
+  _ -> trExpr e
+  where
+    intLikeBoxers = ["IS", "I#", "C#"]
+
+-- | Pick (intArg, tailArg) from a Show-Int worker call.  The two
+-- common shapes:
+--   $w$cshowsPrec2 prec value tail   (3 args, drop the precedence)
+--   $fShowCallStack_itos' value tail (2 args, no precedence)
+pickShowArgs :: String -> [CoreExpr] -> Maybe (CoreExpr, CoreExpr)
+pickShowArgs name args = case (name, args) of
+  ("$fShowCallStack_itos'", [v, t])     -> Just (v, t)
+  (_, [_prec, v, t])                    -> Just (v, t)
+  _                                     -> Nothing
 
 -- | Is this variable a State# RealWorld state token?
 -- Used to detect the state component of unboxed tuples from IO/FFI operations.

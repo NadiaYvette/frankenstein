@@ -780,7 +780,8 @@ details.
   `printf`/`Text.Printf`, GADT-style data declarations.
 
 - **BRIDGE_rust_strings**: Rust `println!(...)` works for plain string
-  literals and i64-arg format placeholders (`println!("answer = {}", n)`).
+  literals, i64-arg format placeholders, and string (`&str`) args —
+  including the leading-placeholder form (`println!("{} = {}", a, b)`).
   The bridge elides `Arguments::<'_>::from_str`/`from_str_nonconst`
   (thin Arguments wrappers) and pairs `Arguments::<'_>::new(template, args)`
   with a `rust_args_pack` runtime cell; `std::io::_print` becomes
@@ -792,10 +793,13 @@ details.
   `core::fmt::rt::Argument::<'_>::new_display::<T>` is elided to
   unwrap the value.  `_N.0` field access goes through
   `rust_field_safe` which dispatches between heap-tuple kk_field
-  reads and WithOverflow-flattened identity returns.  See
-  `examples/rust_fmt.rs`.  Still blocked: non-i64 placeholders
-  (the dispatcher hard-codes %ld); Debug `{:?}` format spec;
-  field-spec syntax (`{:.2}`, `{:>5}`, etc.).
+  reads (with kk_retain on the extracted value, since Perceus may
+  drop the parent tuple before the field is consumed) and
+  WithOverflow-flattened identity returns.  Per-arg dispatch via
+  `kk_is_string` selects between kk_print_str and printf("%ld").
+  See `examples/rust_fmt.rs`.  Still blocked: Debug `{:?}` format
+  spec; field-spec syntax (`{:.2}`, `{:>5}`, etc.); non-i64
+  numeric types (i32/u64/f64).
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

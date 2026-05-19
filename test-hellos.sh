@@ -103,7 +103,7 @@ run_hello "show-mixed"        $'Red\nGreen\nBlue\nPoint 3 4\nCircle 10\nRectangl
 
 echo ""
 echo "--- Rust formatted println! ---"
-run_hello "rust-fmt"          $'a=41 b=101\nanswer = 142' "examples/rust_fmt.rs"
+run_hello "rust-fmt"          $'a=41 b=101\nanswer = 142\nhello, frankenstein\nfrankenstein = 142' "examples/rust_fmt.rs"
 
 echo ""
 echo "========================================"

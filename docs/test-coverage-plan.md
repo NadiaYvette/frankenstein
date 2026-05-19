@@ -56,8 +56,8 @@ with i64 placeholders — see `examples/rust_fmt.rs`.  Test driver
 runs 14/14 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-non-i64 Rust format placeholders, file/stdin handles, full UTF-8
-re-encoding.
+Rust Debug `{:?}` format and field-spec syntax (`{:.2}`), non-i64
+numeric format types, file/stdin handles, full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

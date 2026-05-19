@@ -449,7 +449,32 @@ static unsigned char* kk_rust_decode_template(int64_t template_str,
     return out;
 }
 
+/* Print a single println!-arg, dispatching on its runtime shape:
+ *   - kk_string (magic header) → print bytes
+ *   - small heap pointer that is a ":" / "[]" cons-list head we
+ *     interpret as a [Char] / Haskell-style string → walked as chars
+ *   - bool (0 or 1, but checked via type tag — currently not yet
+ *     plumbed) → "true" / "false"
+ *   - otherwise → printf("%ld") (assume i64)
+ *
+ * The dispatch is best-effort: it can mis-classify large int values
+ * that happen to point at valid heap structure, but in practice
+ * println! args are small ints (counters, IDs) or strings. */
+static void kk_rust_print_one_arg(int64_t v) {
+    if (kk_is_string(v)) {
+        kk_print_str(v);
+        return;
+    }
+    printf("%ld", (long)v);
+}
+
 int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
+    /* Template encoding (Rust 2024+):
+     *   template := piece* '\x00'
+     *   piece    := '\xc0'                 (placeholder, consumes one arg)
+     *            |  <len> <byte>{len}      (literal piece)
+     * The two piece kinds interleave freely.  Either kind can appear
+     * first or last (before the NUL terminator). */
     size_t total;
     unsigned char* buf = kk_rust_decode_template(template_str, &total);
     if (!buf) return 0;
@@ -457,17 +482,17 @@ int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
     const unsigned char* end = p + total;
     int arg_idx = 0;
     while (p < end) {
-        unsigned char len = *p++;
-        if (len == 0) break;
-        size_t n = (p + len > end) ? (size_t)(end - p) : (size_t)len;
-        fwrite(p, 1, n, stdout);
-        p += n;
-        if (p >= end) break;
-        if (*p == 0xc0) {
-            p++;  /* skip placeholder marker */
+        unsigned char b = *p++;
+        if (b == 0) break;                              /* terminator */
+        if (b == 0xc0) {                                /* placeholder */
             int64_t v = kk_args_extract(args_struct, arg_idx);
-            printf("%ld", (long)v);
+            kk_rust_print_one_arg(v);
             arg_idx++;
+        } else {                                        /* literal piece, len=b */
+            size_t len = b;
+            size_t n = (p + len > end) ? (size_t)(end - p) : len;
+            fwrite(p, 1, n, stdout);
+            p += n;
         }
     }
     free(buf);
@@ -499,10 +524,18 @@ int64_t kk_rust_print_dispatch(int64_t v) {
  * latter case matches CheckedAdd/Mul-style WithOverflow tuples that
  * the bridge pre-flattens to plain arithmetic (the "base" is already
  * the result i64, not a tuple cell).  The former handles genuine
- * RvAggregate-constructed tuples. */
+ * RvAggregate-constructed tuples.
+ *
+ * When extracting a heap field, we kk_retain the result before
+ * returning so it survives a subsequent drop of `base` — Perceus
+ * sometimes inserts the parent drop before the field is consumed
+ * (the bridge's `_N = _M.K` pattern produces an alias whose
+ * lifetime extends past the parent's last use). */
 int64_t kk_rust_field_safe(int64_t base, int64_t idx) {
     if (kk_is_heap_ptr(base)) {
-        return kk_field(base, idx);
+        int64_t v = kk_field(base, idx);
+        kk_retain(v);
+        return v;
     }
     return base;
 }

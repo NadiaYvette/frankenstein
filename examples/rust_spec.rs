@@ -43,4 +43,9 @@ pub fn main() {
     println!("[{:+}]", n);       //  [+42]     explicit + for non-negative
     println!("[{:+}]", neg);     //  [-7]      negative unchanged
     println!("[{:+05}]", n);     //  [+0042]   sign + zero-pad
+    let big = id(255);
+    println!("[{:#x}]", big);    //  [0xff]    alt form: hex with prefix
+    println!("[{:#o}]", big);    //  [0o377]   alt form: octal
+    println!("[{:#b}]", big);    //  [0b11111111]   alt form: binary
+    println!("[{:#010x}]", big); //  [0x000000ff]   alt + zero-pad
 }

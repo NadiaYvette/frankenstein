@@ -816,11 +816,13 @@ details.
   with placeholder markers `c0`/`c1`/`c3`/`c5`/`c7` selecting which
   extras are present (bits encoded: `c[bits 0..2]` where bit 0=spec,
   bit 1=width, bit 2=precision-value).  See `examples/rust_spec.rs`.
-  `{:+}` sign flag applies correctly: prepends `+` to non-negative
-  numerics (negative numbers keep their `-`), composes with width
-  (`{:+5}` on 42 → `  +42`), precision (`{:+.5}` on 42 → `+00042`),
-  and zero-pad (`{:+05}` on 42 → `+0042`).  Still blocked: alternate
-  form (`{:#x}`), non-i64 numeric types (i32/u64/f64), float
+  `{:+}` sign flag and `{:#x}` alternate form apply correctly.  Sign
+  flag prepends `+` to non-negative numerics (composes with width,
+  precision, zero-pad).  Alt form prepends `0x` (lower-hex and
+  upper-hex), `0o` (octal), `0b` (binary) and composes with all
+  earlier features — `{:#010x}` on 255 → `0x000000ff` (prefix at
+  the front, zeros between prefix and digits, total width 10).
+  Still blocked: non-i64 numeric types (i32/u64/f64), float
   `{:.N}` decimal places, `{:?}` for ADTs.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`

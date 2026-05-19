@@ -659,25 +659,63 @@ static int kk_rust_arg_is_numeric(int64_t v) {
     return 1;  /* raw i64 = number */
 }
 
+/* Return the alternate-form prefix string for a radix-tagged arg
+ * (or NULL if no prefix applies).  Used by kk_rust_print_arg_with_spec
+ * to prepend `0x` / `0o` / `0b` when `#` flag is set. */
+static const char* kk_rust_alt_prefix(int64_t v) {
+    if (!kk_is_heap_ptr(v) || kk_nfields(v) != 1) return NULL;
+    int64_t tag = kk_tag(v);
+    if (tag == KK_RUST_HEX_LO_TAG) return "0x";
+    if (tag == KK_RUST_HEX_HI_TAG) return "0x";  /* lowercase prefix per Rust convention */
+    if (tag == KK_RUST_OCT_TAG)    return "0o";
+    if (tag == KK_RUST_BIN_TAG)    return "0b";
+    return NULL;
+}
+
 /* Print one arg with the given spec applied: render to buffer, apply
- * the `+` sign flag (if numeric and non-negative), precision
- * (truncate for strings; min-digits for ints), then pad to `width`
- * using `fill` chars on the chosen alignment side. */
+ * the `#` alt-form prefix (radix tags only), the `+` sign flag (if
+ * numeric and non-negative), precision (truncate for strings;
+ * min-digits for ints), then pad to `width` using `fill` chars on
+ * the chosen alignment side. */
 static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
     size_t len = 0;
     char* rendered = kk_rust_render_one_arg(v, &len);
     if (!rendered) return;
     int is_num = kk_rust_arg_is_numeric(v);
+    /* Apply `#` alt-form: prepend radix prefix to the rendered
+     * buffer before any other transformations.  The prefix length is
+     * tracked separately so the zero-pad path can peel it off and
+     * insert zeros between prefix and digits (matching Rust's
+     * `{:#010x}` → "0x000000ff" placement). */
+    size_t prefix_len = 0;
+    if (spec->alt_form) {
+        const char* pfx = kk_rust_alt_prefix(v);
+        if (pfx) {
+            size_t plen = strlen(pfx);
+            char* withpfx = (char*)malloc(len + plen + 1);
+            if (withpfx) {
+                memcpy(withpfx, pfx, plen);
+                memcpy(withpfx + plen, rendered, len);
+                withpfx[len + plen] = 0;
+                free(rendered);
+                rendered = withpfx;
+                len = len + plen;
+                prefix_len = plen;
+            }
+        }
+    }
     /* Apply `+` sign flag: prepend '+' if numeric and not already
-     * signed (i.e. doesn't start with '-' or '+').  Done before
-     * precision so the sign joins the digit count properly. */
-    if (spec->plus_sign && is_num && len > 0
-        && rendered[0] != '-' && rendered[0] != '+')
+     * signed (i.e. doesn't start with '-' or '+').  Skip the prefix
+     * region so the sign sits between prefix and digits.  Done
+     * before precision so the sign joins the digit count properly. */
+    if (spec->plus_sign && is_num && len > prefix_len
+        && rendered[prefix_len] != '-' && rendered[prefix_len] != '+')
     {
         char* signed_buf = (char*)malloc(len + 2);
         if (signed_buf) {
-            signed_buf[0] = '+';
-            memcpy(signed_buf + 1, rendered, len);
+            memcpy(signed_buf, rendered, prefix_len);
+            signed_buf[prefix_len] = '+';
+            memcpy(signed_buf + prefix_len + 1, rendered + prefix_len, len - prefix_len);
             signed_buf[len + 1] = 0;
             free(rendered);
             rendered = signed_buf;
@@ -692,17 +730,19 @@ static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
         if (!is_num) {
             if (spec->precision < len) len = spec->precision;
         } else {
-            /* Find digit start (skip leading sign). */
-            size_t digit_start = 0;
-            if (len > 0 && (rendered[0] == '-' || rendered[0] == '+'))
-                digit_start = 1;
+            /* Find digit start: skip leading radix prefix (`0x`/`0o`/`0b`)
+             * and any sign character ('-' / '+'). */
+            size_t digit_start = prefix_len;
+            if (len > digit_start
+                && (rendered[digit_start] == '-' || rendered[digit_start] == '+'))
+                digit_start += 1;
             size_t digit_count = len - digit_start;
             if (spec->precision > digit_count) {
                 size_t extra = spec->precision - digit_count;
                 size_t new_len = len + extra;
                 char* padded = (char*)malloc(new_len + 1);
                 if (padded) {
-                    if (digit_start) padded[0] = rendered[0];
+                    memcpy(padded, rendered, digit_start);
                     for (size_t i = 0; i < extra; i++) padded[digit_start + i] = '0';
                     memcpy(padded + digit_start + extra, rendered + digit_start, digit_count);
                     padded[new_len] = 0;
@@ -729,16 +769,24 @@ static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
         fill = '0';
         eff_align = 1;  /* zero-pad implies right-align */
     }
-    /* Sign-aware zero-pad: if rendered starts with '-' or '+', emit the
-     * sign first, then pad with '0', then the digits. */
-    if (spec->zero_pad && is_num && len > 0
-        && (rendered[0] == '-' || rendered[0] == '+'))
-    {
-        putchar(rendered[0]);
-        for (size_t i = 0; i < pad; i++) putchar('0');
-        fwrite(rendered + 1, 1, len - 1, stdout);
-        free(rendered);
-        return;
+    /* Sign-/prefix-aware zero-pad: emit any radix prefix and sign
+     * first, then pad with '0', then the digits.  The "fixed front"
+     * is everything before the actual digits — `0x` + optional sign,
+     * or just sign, or just prefix. */
+    if (spec->zero_pad && is_num) {
+        size_t fixed_front = prefix_len;
+        if (len > fixed_front
+            && (rendered[fixed_front] == '-' || rendered[fixed_front] == '+'))
+        {
+            fixed_front += 1;
+        }
+        if (fixed_front > 0) {
+            fwrite(rendered, 1, fixed_front, stdout);
+            for (size_t i = 0; i < pad; i++) putchar('0');
+            fwrite(rendered + fixed_front, 1, len - fixed_front, stdout);
+            free(rendered);
+            return;
+        }
     }
     switch (eff_align) {
         case 0:  /* left */

@@ -759,9 +759,23 @@ details.
   branches the captures aren't materialised, so the call passes only
   1 arg.  Workaround: split each ADT into its own module.
 
+  Show for 2-tuples `(Int, Int)` works via:
+    - `showList__1` = `','` added to knownShowCharCAF (the
+      inter-element separator).
+    - `$fShowCallStack_$sgo` recognised by `isShowTupleSgo` and
+      rewritten as `closure(tail)` (the third-arg tail-applier).
+
+  Known limitations:
+    - Tuples ≥ 3 elements lose trailing components: GHC's Show
+      (a, b, c) emits an IR shape with curried lambda application
+      (`int_to_haskell_chars(2, r)(:(')', s))`) that drops the third
+      argument in our bridge.  Bridge IR investigation needed.
+    - Multiple tuple `print` calls in one module trigger additional
+      unshimmed CAFs (`$fShowCallStack8`, `showList__3`, etc.).
+      Workaround: one print per module.
+
   Still blocked: reading stdin/files, formatted output via
-  `printf`/`Text.Printf`, Show for tuples (would need additional
-  `$fShowTuple*` CAF entries), GADT-style data declarations.
+  `printf`/`Text.Printf`, GADT-style data declarations.
 
 - **BRIDGE_rust_strings**: Rust `println!(...)` now works for plain
   string literals: the bridge elides `Arguments::<'_>::from_str` (a thin

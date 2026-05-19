@@ -48,13 +48,15 @@ the GHC bridge's `isShowIntWorker` intercept — see
 `examples/show_int.hs`.  Show for [Int] and Maybe Int works via
 `isShowIntListMethod` + `knownShowCAF` — see `examples/show_compound.hs`.
 `deriving Show` for user ADTs works for the three common shapes —
-see `examples/show_derived.hs`.  Test driver runs 11/11 hellos.
+see `examples/show_derived.hs`.  Show for 2-tuples works — see
+`examples/show_tuple.hs`.  Test driver runs 12/12 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
 Rust `println!("{}", x)` placeholders (Display trait machinery),
 Haskell mixing enum + with-args ADTs in one module (lambda-lifting
-helper-name collision), Show for tuples, file/stdin handles, full
-UTF-8 re-encoding.
+helper-name collision), Show for tuples ≥ 3 elements (bridge IR
+drops trailing args in curried-lambda position), file/stdin handles,
+full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

@@ -281,6 +281,19 @@ trExpr (App f a) =
       , [listArg, tailArg] <- valueArgs ->
           F.EApp (F.EVar (F.Name "int_list_to_haskell_chars" 0))
                  [trExpr listArg, trExpr tailArg]
+    -- GHC.Internal.Show.$fShowCallStack_$sgo: tuple-format helper that
+    -- applies its closure arg to the tail.  Call shape:
+    --   $sgo(showFn, _separator, tail) → showFn(tail)
+    -- The middle arg is a list-CAF reference (the inter-element
+    -- separator) — we drop it since the call site already inserts
+    -- the separator via showList__1 before the $sgo invocation.
+    (Var v, args)
+      | isShowTupleSgo v
+      , let valueArgs = filter (\x -> not (isDictArg x)
+                                       && not (isRealWorldArg x)
+                                       && not (isTypeArg x)) args
+      , [closureArg, _sep, tailArg] <- valueArgs ->
+          F.EApp (trExpr closureArg) [trExpr tailArg]
     -- General case: strip dictionary arguments and realWorld# state tokens
     (fun, args) ->
       let args' = filter (\x -> not (isDictArg x) && not (isRealWorldArg x)) args
@@ -496,6 +509,9 @@ knownShowCharCAF v =
        "$fShowCallStack2"    -> Just ')'
        "$fShowCallStack3"    -> Just '('
        "$fShowCallStack4"    -> Just ','     -- between tuple elements
+       -- showList__1 is the tuple/list element separator ',' inlined
+       -- by GHC's tuple Show specialiser.
+       "showList__1"         -> Just ','
        _                     -> Nothing
      else Nothing
 
@@ -546,6 +562,19 @@ isShowIntListMethod v =
                Nothing -> ""
   in (mmod == "GHC.Internal.Show" || mmod == "GHC.Show")
      && occ == "$fShowInt_$cshowList"
+
+-- | True for the GHC tuple-format helper $fShowCallStack_$sgo, used
+-- by the specialised Show (a, b) instance.  Three args: showFn,
+-- inter-element separator (we drop), and tail.  Behaves as
+-- @showFn(tail)@.
+isShowTupleSgo :: Var -> Bool
+isShowTupleSgo v =
+  let occ = getOccString v
+      mmod = case nameModule_maybe (varName v) of
+               Just m  -> moduleNameString (moduleName m)
+               Nothing -> ""
+  in (mmod == "GHC.Internal.Show" || mmod == "GHC.Show")
+     && occ == "$fShowCallStack_$sgo"
 
 isShowIntWorker :: Var -> Bool
 isShowIntWorker v =

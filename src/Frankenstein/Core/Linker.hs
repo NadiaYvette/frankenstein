@@ -585,6 +585,7 @@ runtimeNames = Set.fromList
   -- Rust formatted-println! runtime helpers (Arguments::new pack +
   -- std::io::_print dispatch).
   , "rust_args_pack", "rust_print_dispatch", "rust_field_safe"
+  , "rust_arg_debug"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

@@ -394,7 +394,8 @@ int64_t kk_dummy_show_caf(int64_t) __attribute__((alias("dummy_show_caf")));
  * from_str path, no formatting); a packed cell is walked by
  * kk_rust_print_args. */
 
-#define KK_RUST_FMT_TAG  0xC0FF1E  /* arbitrary distinguishing tag */
+#define KK_RUST_FMT_TAG     0xC0FF1E  /* packed (template, args) cell tag */
+#define KK_RUST_DEBUG_TAG   0xDEB07A  /* per-arg Debug-formatter wrapper */
 
 int64_t kk_rust_args_pack(int64_t template_str, int64_t args_struct) {
     int64_t cell = kk_alloc_con(KK_RUST_FMT_TAG, 2);
@@ -449,23 +450,69 @@ static unsigned char* kk_rust_decode_template(int64_t template_str,
     return out;
 }
 
-/* Print a single println!-arg, dispatching on its runtime shape:
- *   - kk_string (magic header) → print bytes
- *   - small heap pointer that is a ":" / "[]" cons-list head we
- *     interpret as a [Char] / Haskell-style string → walked as chars
- *   - bool (0 or 1, but checked via type tag — currently not yet
- *     plumbed) → "true" / "false"
- *   - otherwise → printf("%ld") (assume i64)
+/* Print a kk_string with Rust's Debug-style quoting: wrap in double
+ * quotes and escape \n / \t / \r / \" / \\ inside.  Other control
+ * characters fall through to printf %02x — close enough to Rust's
+ * Debug output for hello-world purposes. */
+static void kk_rust_print_str_debug(int64_t s) {
+    putchar('"');
+    char* buf = kk_str_dup_cstr(s);
+    if (buf) {
+        int64_t n = kk_str_len(s);
+        for (int64_t i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)buf[i];
+            switch (c) {
+                case '\n': fputs("\\n", stdout); break;
+                case '\t': fputs("\\t", stdout); break;
+                case '\r': fputs("\\r", stdout); break;
+                case '\"': fputs("\\\"", stdout); break;
+                case '\\': fputs("\\\\", stdout); break;
+                default:
+                    if (c >= 0x20 && c < 0x7f) {
+                        putchar(c);
+                    } else {
+                        printf("\\x%02x", c);
+                    }
+                    break;
+            }
+        }
+        free(buf);
+    }
+    putchar('"');
+}
+
+/* Print a single println!-arg.  Dispatches on its runtime shape:
+ *   - Debug-tagged cell  → unwrap and use Debug formatter
+ *   - kk_string          → Display: print bytes verbatim
+ *   - otherwise          → Display: printf("%ld") (assume i64)
  *
- * The dispatch is best-effort: it can mis-classify large int values
- * that happen to point at valid heap structure, but in practice
- * println! args are small ints (counters, IDs) or strings. */
+ * The Display dispatch via kk_is_string is best-effort; in practice
+ * println! args are small ints or kk_strings, so the heuristic is
+ * accurate. */
 static void kk_rust_print_one_arg(int64_t v) {
+    if (kk_is_heap_ptr(v) && kk_tag(v) == KK_RUST_DEBUG_TAG && kk_nfields(v) == 1) {
+        int64_t inner = kk_field(v, 0);
+        if (kk_is_string(inner)) {
+            kk_rust_print_str_debug(inner);
+        } else {
+            /* Debug == Display for Int and most non-string types. */
+            printf("%ld", (long)inner);
+        }
+        return;
+    }
     if (kk_is_string(v)) {
         kk_print_str(v);
         return;
     }
     printf("%ld", (long)v);
+}
+
+/* Wrap an arg for Debug formatting.  Used by the Rust bridge as the
+ * rewrite target for core::fmt::rt::Argument::<'_>::new_debug::<T>. */
+int64_t kk_rust_arg_debug(int64_t v) {
+    int64_t cell = kk_alloc_con(KK_RUST_DEBUG_TAG, 1);
+    kk_set_field(cell, 0, v);
+    return cell;
 }
 
 int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
@@ -547,6 +594,8 @@ int64_t rust_print_dispatch(int64_t)
   __attribute__((alias("kk_rust_print_dispatch")));
 int64_t rust_field_safe(int64_t, int64_t)
   __attribute__((alias("kk_rust_field_safe")));
+int64_t rust_arg_debug(int64_t)
+  __attribute__((alias("kk_rust_arg_debug")));
 
 /* List append for Haskell [Char] cons-lists: a ++ b.
  * Walks a (collecting into a buffer), then prepends each element onto

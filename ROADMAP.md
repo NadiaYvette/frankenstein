@@ -797,9 +797,14 @@ details.
   drop the parent tuple before the field is consumed) and
   WithOverflow-flattened identity returns.  Per-arg dispatch via
   `kk_is_string` selects between kk_print_str and printf("%ld").
-  See `examples/rust_fmt.rs`.  Still blocked: Debug `{:?}` format
-  spec; field-spec syntax (`{:.2}`, `{:>5}`, etc.); non-i64
-  numeric types (i32/u64/f64).
+  Debug `{:?}` format works for ints and strings: the bridge wraps
+  `Argument::<'_>::new_debug::<T>` with a runtime
+  KK_RUST_DEBUG_TAG cell, and the dispatcher applies a Debug
+  formatter (surrounding `"…"` quotes and `\n`/`\t`/`\"`/`\\`
+  escapes for strings; identity to %ld for ints).  See
+  `examples/rust_fmt.rs` and `examples/rust_dbg.rs`.  Still blocked:
+  field-spec syntax (`{:.2}`, `{:>5}`, etc.); non-i64 numeric types
+  (i32/u64/f64).
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

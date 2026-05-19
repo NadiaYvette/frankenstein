@@ -67,6 +67,13 @@ int64_t kk_rust_print_dispatch(int64_t v);
  * value reads through the same intrinsic. */
 int64_t kk_rust_field_safe(int64_t base, int64_t idx);
 
+/* Wrap an arg for Rust's `{:?}` Debug format.  The runtime
+ * dispatcher in kk_rust_print_one_arg unwraps these and applies the
+ * Debug formatter (quotes around strings, escape control chars).
+ * For non-string types Debug == Display.  Used by the Rust bridge
+ * as the rewrite target for Argument::<'_>::new_debug::<T>. */
+int64_t kk_rust_arg_debug(int64_t v);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

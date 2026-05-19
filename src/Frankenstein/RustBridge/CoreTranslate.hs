@@ -389,7 +389,13 @@ translateTermExpr body visited term _raw = case term of
           -- is a thin wrapper around the value — elide it so the
           -- argument's raw i64 reaches the Arguments::new args array.
           (_, (a:_)) | "Argument::<'_>::new_display" `T.isInfixOf` funcName -> a
-          (_, (a:_)) | "Argument::<'_>::new_debug" `T.isInfixOf` funcName -> a
+          -- Debug format: wrap with a marker cell so the runtime
+          -- picks the debug formatter (quotes around strings,
+          -- escape special chars, etc.).  For Int the formatter
+          -- happens to match Display, but the runtime still
+          -- handles the wrapped case correctly via tag dispatch.
+          (_, (a:_)) | "Argument::<'_>::new_debug" `T.isInfixOf` funcName ->
+            EApp (EVar (Name "rust_arg_debug" 0)) [a]
           -- Arguments::<'_>::new::<N, M>(template, args) builds a
           -- packed (template, args) cell at runtime.  std::io::_print
           -- below dispatches: if the value is a kk_string the

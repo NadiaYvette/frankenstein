@@ -495,29 +495,64 @@ findReExtractTarget varName lns callLine funcStart = do
       funcEnd = findFuncEnd lns searchStart
       windowLns = take (funcEnd - searchStart) (drop searchStart lns)
       indexed = zip [searchStart ..] windowLns
-  -- Find any alias-comment whose name ends with the same trailing digits.
-  -- We accept the FIRST such alias (anywhere in the function), regardless
-  -- of scope, since we only need it for its kk_field pattern.
-  let aliasHit = firstJust
-        (\(j, l) -> case parseAliasComment l of
-            Just (an, ssa)
-              | uniq `T.isSuffixOf` an
-              , not ("_" `T.isPrefixOf` an) -> Just (j, ssa)
-            _ -> Nothing)
-        indexed
-  (aliasLine, aliasSsa) <- aliasHit
-  let ssaNoPct = fromMaybe aliasSsa (T.stripPrefix "%" aliasSsa)
-  -- The producer of aliasSsa is typically the line just above the alias:
-  --   %ssa = func.call @kk_field(%scrut, %idx) : (i64, i64) -> i64
-  -- with %idx defined a few lines above as an arith.constant.
-  let producerSearch = take 10 (reverse (take aliasLine lns))  -- last 10 lines before alias
-  (scrut, idxVar) <- firstJust (parseKkFieldProducer ssaNoPct) producerSearch
-  -- Resolve idxVar (which is an SSA name like "%v392") to its constant value
-  -- by scanning further back for "%idx = arith.constant N : i64".
-  let idxNoPct = fromMaybe idxVar (T.stripPrefix "%" idxVar)
-      constSearch = take 20 (reverse (take aliasLine lns))
-  idx <- firstJust (parseConstIdx idxNoPct) constSearch
-  Just (scrut, idx)
+  -- Find an alias-comment whose name ends with the same trailing digits AND
+  -- whose corresponding kk_field producer is in scope at the call site.
+  -- Earlier versions accepted the first match anywhere in the function and
+  -- produced references to SSA values defined in closed sibling scf.if
+  -- regions ("use of undeclared SSA value name" mlir-opt errors).
+  let aliasHits =
+        [ (j, ssa)
+        | (j, l) <- indexed
+        , Just (an, ssa) <- [parseAliasComment l]
+        , uniq `T.isSuffixOf` an
+        , not ("_" `T.isPrefixOf` an)
+        ]
+  firstJust (tryAlias lns callLine) aliasHits
+  where
+    tryAlias :: [Text] -> Int -> (Int, Text) -> Maybe (Text, Int)
+    tryAlias lns' cl (aliasLine, aliasSsa) = do
+      let ssaNoPct = fromMaybe aliasSsa (T.stripPrefix "%" aliasSsa)
+      -- Producer lives in the 10 lines before the alias comment.  Track the
+      -- producer's line index so we can scope-check it against the call site.
+      let producerWindow =
+            [ (aliasLine - k - 1, lns' !! (aliasLine - k - 1))
+            | k <- [0 .. 9], aliasLine - k - 1 >= 0 ]
+      (producerLineIdx, scrut, idxVar) <- firstJust
+        (\(idx, line) -> case parseKkFieldProducer ssaNoPct line of
+            Just (s, iv) -> Just (idx, s, iv)
+            Nothing      -> Nothing)
+        producerWindow
+      -- Reject the fix if the producer line is not reachable from the call
+      -- site (i.e., its enclosing scf.if region has closed before cl).
+      if not (ssaInScopeAt lns' producerLineIdx cl)
+        then Nothing
+        else do
+          let idxNoPct = fromMaybe idxVar (T.stripPrefix "%" idxVar)
+              constSearch = take 20 (reverse (take aliasLine lns'))
+          idx <- firstJust (parseConstIdx idxNoPct) constSearch
+          Just (scrut, idx)
+
+-- | Walk the brace balance between two line indices, character by
+-- character.  An SSA value declared at line @declLine@ is in scope at
+-- line @useLine@ iff the relative brace depth (starting at 0 right after
+-- declLine) never goes negative before reaching useLine.  Character-level
+-- scanning is necessary because lines like `} else {` close the @if@
+-- branch's scope mid-line even though the line's net brace delta is 0.
+ssaInScopeAt :: [Text] -> Int -> Int -> Bool
+ssaInScopeAt lns declLine useLine
+  | declLine >= useLine = False
+  | otherwise           =
+      let between = take (useLine - declLine - 1) (drop (declLine + 1) lns)
+          flat    = T.unpack (T.intercalate " " between)
+      in walk 0 flat
+  where
+    walk _   []     = True
+    walk rel (c:cs) = case c of
+      '{' -> walk (rel + 1) cs
+      '}' -> let r' = rel - 1
+             in if r' < 0 then False else walk r' cs
+      _   -> walk rel cs
+
 
 -- | Match a line of the form
 --   "%<ssa> = func.call @kk_field(%<scrut>, %<idx>) : ..." and return (scrut, idx).
@@ -672,7 +707,15 @@ findPapWrapper varName lns =
           then do
             rest3 <- T.stripPrefix "(" rest2
             let (params, _) = T.break (== ')') rest3
-                ncount = length (filter (== "i64") (map T.strip (T.splitOn "," params)))
+                -- Params have form "%<name>: i64, %<name>: i64, ...".
+                -- Earlier `filter (== "i64") (splitOn ",")` matched zero
+                -- because each segment is "%clos: i64" not "i64", causing
+                -- mkPapBlock to emit `(): -> i64` cast for the function
+                -- pointer that mlir-opt rejects as a type mismatch with the
+                -- actual `(i64, i64, ...) -> i64` wrapper.
+                segs    = map T.strip (T.splitOn "," params)
+                isI64Param s = ": i64" `T.isSuffixOf` s || s == "i64"
+                ncount  = length (filter isI64Param segs)
             Just (name, ncount)
           else Nothing) lns
 
@@ -714,7 +757,11 @@ applyDollar0Fixes fixes lns =
         [ (i, mkPapBlock i papName nparams)
         | PapFix i _ _ papName nparams <- fixes ]
         ++
-        [ (i, mkPapBlock i (externPapName vn) arity)
+        -- arity + 1 because the synthesized wrapper has signature
+        -- (%clos: i64, %r0: i64, ..., %r{arity-1}: i64) -> i64.  The
+        -- mkPapBlock cast must match the actual wrapper definition or
+        -- mlir-opt rejects the func.constant as a type mismatch.
+        [ (i, mkPapBlock i (externPapName vn) (arity + 1))
         | ExternPapFix i _ vn arity <- fixes ]
         ++
         [ (i, mkReExtractBlock i resVar scrut idx)
@@ -774,10 +821,15 @@ injectExternWrapper vn arity src =
         , "  }"
         ]
       blob       = "\n" <> externDecl <> "\n" <> wrapper
-      -- Skip extern decl if already present.
-      hasDecl    = ("@" <> symbol <> "(") `T.isInfixOf` src
-                || ("@" <> symbol <> " ") `T.isInfixOf` src
-      hasWrapper = ("@" <> papName) `T.isInfixOf` src
+      -- Skip extern decl / wrapper if already DEFINED (not just referenced
+      -- by a call or comment).  Earlier this checked `@symbol` anywhere,
+      -- which matched comments + use sites and silently suppressed the
+      -- injection — producing MLIR with use-without-definition that
+      -- mlir-opt rejects ("reference to undefined function").
+      hasDecl    = ("func.func private @" <> symbol) `T.isInfixOf` src
+                || ("func.func @" <> symbol)         `T.isInfixOf` src
+      hasWrapper = ("func.func private @" <> papName) `T.isInfixOf` src
+                || ("func.func @" <> papName)         `T.isInfixOf` src
       addition
         | hasWrapper = ""
         | hasDecl    = "\n" <> wrapper

@@ -39,9 +39,14 @@ All five hellos now use the natural source form for their language and
 print real strings.  The original Phase A "easy five" was a 1-3h scope
 estimate; closing the three follow-up string-ABI gaps (BRIDGE_haskell_strings,
 BRIDGE_rust_strings, BRIDGE_mercury_strings) took the same session.
+
+Chained IO actions (3-line do-blocks / sequential calls) also work for
+Haskell, Rust, and Mercury — see `examples/chained_io.{hs,rs,m}`.
+The test driver now runs 8/8 hellos.
+
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-chained IO actions, formatted output, file/stdin handles, complex
-ADT deconstruction.
+formatted output (e.g. `show`/`Display` typeclass machinery), file/stdin
+handles, complex ADT deconstruction, full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

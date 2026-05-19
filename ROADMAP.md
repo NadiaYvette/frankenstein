@@ -704,19 +704,22 @@ details.
   in the self-hosted binary non-deterministically corrupts characters
   (closure dispatch or UTF-8 iteration). Mitigated by `A_sanitize_shim.c`.
 
-- **BRIDGE_haskell_strings**: Both `main :: String` and
-  `main = putStrLn "..."` now print natively.  `main :: String` routes
-  through `kk_println_haskell_chars` (cons-list walker using the
+- **BRIDGE_haskell_strings**: `main :: String`, `main = putStrLn "..."`,
+  and chained `do { … }` blocks all print natively.  `main :: String`
+  routes through `kk_println_haskell_chars` (cons-list walker using the
   hash-based tags `stableConTag "[]" = 31636` and `stableConTag ":" = 46589`).
   `putStrLn` (which GHC inlines to `hPutStr2 stdout list True` from
   `GHC.Internal.IO.Handle.Text`) is intercepted by `ghcIoOutputRuntime`
   in `Frankenstein.GhcBridge.CoreTranslate` and rewritten to a direct
-  `println_haskell_chars` / `print_haskell_chars` call (the latter when
-  the `addNewline` flag is False).  Codepoints > 127 are written as raw
-  bytes (Latin-1ish); full UTF-8 re-encoding is future work.  Still
-  blocked: chained IO (`do { putStrLn …; putStrLn … }`), reading
-  stdin/files, formatted output — all require modelling the IO state
-  thread and shimming more handle machinery.
+  `println_haskell_chars` / `print_haskell_chars` call.  Multi-step
+  `do`-blocks work because GHC keeps an explicit `\s -> ...` lambda
+  binding the state token; `applyMainIfFunctionAlias` detects when the
+  user's `main` is just an `EVar` reference to a lambda-bodied helper
+  and rewrites the alias to apply it with a dummy state arg.  Codepoints
+  > 127 are written as raw bytes (Latin-1ish); full UTF-8 re-encoding
+  is future work.  Still blocked: `show`/`Show` typeclass machinery
+  (`putStrLn (show 42)` needs `GHC.Internal.Show.zdwzdcshowsPrec2` etc.),
+  reading stdin/files, formatted output via `printf`/`Text.Printf`.
 
 - **BRIDGE_rust_strings**: Rust `println!(...)` now works for plain
   string literals: the bridge elides `Arguments::<'_>::from_str` (a thin

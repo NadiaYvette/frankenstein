@@ -50,6 +50,8 @@ import GHC.Types.FieldLabel (flLabel)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -66,7 +68,8 @@ import qualified Data.Word as W
 -- Takes the module name, the Core bindings, and the module's TyCons.
 translateProgram :: Text -> CoreProgram -> [TyCon] -> Either Text F.Program
 translateProgram modName binds tyCons =
-  let defs = filter (not . isDictDef) (concatMap translateTopBind binds)
+  let rawDefs = filter (not . isDictDef) (concatMap translateTopBind binds)
+      defs = applyMainIfFunctionAlias rawDefs
       -- Merge locally-defined TyCons with those referenced in expressions
       -- (e.g. [], Bool, Maybe from the standard library)
       referencedTyCons = collectReferencedTyCons binds
@@ -78,6 +81,44 @@ translateProgram modName binds tyCons =
     , F.progData    = dataDecls
     , F.progEffects = []
     }
+
+-- | GHC compiles `main :: IO () = do { … }` to two defs:
+--     main$N :: State# RealWorld -> (# State# RealWorld, () #)
+--     main$N = \s -> ...
+--     ModName.main = main$N
+-- where the user's main is just an alias for the IO-action function.
+-- The MLIR emitter sees the alias body as `EVar main$N` and emits a
+-- closure (PAP) — which is never invoked, so do-block bodies silently
+-- produce no output.  Detect this shape and rewrite the alias to apply
+-- the function with a dummy state arg (we don't model the State#
+-- token), so the user's main actually runs.
+--
+-- We check the *body shape* of the referenced def, not the declared
+-- type, because IO-typed bindings can have a function-shaped type but
+-- still expand to a delayed value (e.g. `main = putStrLn "x"` keeps
+-- only the body `delay (println_haskell_chars …)` after GHC's eta
+-- reduction).  Applying such a thunk crashes the runtime.
+applyMainIfFunctionAlias :: [F.Def] -> [F.Def]
+applyMainIfFunctionAlias defs =
+  let lamArity (F.ELam ps body) = length ps + lamArity body
+      lamArity (F.ETypeLam _ b) = lamArity b
+      lamArity (F.EDelay b)     = lamArity b
+      lamArity _                = 0
+      defBodyArity = Map.fromList
+        [ (F.nameText (F.qnameName (F.defName d)), lamArity (F.defExpr d))
+        | d <- defs
+        ]
+      rewriteMain d
+        | F.nameText (F.qnameName (F.defName d)) == "main"
+        , let body = stripDelay (F.defExpr d)
+        , F.EVar fn <- body
+        , Just n <- Map.lookup (F.nameText fn) defBodyArity
+        , n > 0
+        = d { F.defExpr = F.EApp body (replicate n (F.ELit (F.LitInt 0))) }
+        | otherwise = d
+      stripDelay (F.EDelay e) = stripDelay e
+      stripDelay e            = e
+  in map rewriteMain defs
 
 -- | Translate a single GHC Core expression (public entry point).
 translateExpr :: CoreExpr -> F.Expr

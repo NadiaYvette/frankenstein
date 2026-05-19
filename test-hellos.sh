@@ -80,6 +80,14 @@ rm -rf /tmp/frankenstein-mercury-*/
 run_hello "hello-mercury"     "Hello, World!" "examples/hello.m"
 
 echo ""
+echo "--- Chained IO actions ---"
+run_hello "chained-haskell"   $'first\nsecond\nthird' "examples/chained_io.hs"
+run_hello "chained-rust"      $'first\nsecond\nthird' "examples/chained_io.rs"
+# Clean Mercury temp dirs between runs
+rm -rf /tmp/frankenstein-mercury-*/
+run_hello "chained-mercury"   $'first\nsecond\nthird' "examples/chained_io.m"
+
+echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then
     echo "  ALL HELLOS PASS ($PASS/$((PASS+FAIL)))"

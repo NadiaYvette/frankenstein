@@ -577,6 +577,9 @@ runtimeNames = Set.fromList
   -- Build "[n1,n2,n3]" for an [Int] — GHC bridge's Show [Int]
   -- rewrite target ($fShowInt_$cshowList).
   , "int_list_to_haskell_chars"
+  -- Append two [Char] cons-lists — GHC bridge's rewrite target for
+  -- GHC.Internal.Base.(++) in derived Show bodies.
+  , "haskell_chars_concat"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

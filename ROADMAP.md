@@ -733,10 +733,35 @@ details.
       (they're CString CAFs, not dictionaries) — without this, the
       first arg of `unpackAppendCString#` was being silently dropped.
 
+  `deriving Show` for user ADTs now works for three common shapes:
+    - Enum-only (`data Color = Red | Green | Blue deriving Show`)
+    - Single-constructor with args (`data Pair = Pair Int Int deriving Show`)
+    - Multi-constructor uniformly with-args
+      (`data Tree = Leaf | Node Tree Int Tree deriving Show`)
+
+  The pieces wired in:
+    - `kk_haskell_chars_concat` runtime helper (`(++) :: [Char] -> [Char] -> [Char]`)
+      with both `kk_*` and bare-name aliases for PAP wrappers.
+    - `knownShowCharCAF` inlines `showSpace1` = `' '`,
+      `$fShowCallStack2` = `')'`, `$fShowCallStack3` = `'('`,
+      `$fShowCallStack4` = `','`.
+    - `GHC.Internal.Show.itos` (unprimed) recognised by
+      `isShowIntWorker`/`pickShowArgs` as a 2-arg int-to-cons-list helper.
+    - `isDictDef` keeps `$cshowsPrec`/`$cshow`/`$ccompare`/`$cfmap` etc.
+      (derived methods) while still filtering `$cshowList` (whose body
+      references `showList__`, currently unshimmed).
+
+  Known limitation: mixing enum and with-args ADTs in the same module
+  (e.g. `data Color = Red | Green | Blue` + `data Point = Point Int Int`
+  in one file) triggers an mlir-opt arity error.  The lambda-lifter
+  promotes `go1`/`go` helpers from the `$cshowsPrec` bodies to top-level
+  with captured-arg signatures (2-arg), but at call sites in the enum
+  branches the captures aren't materialised, so the call passes only
+  1 arg.  Workaround: split each ADT into its own module.
+
   Still blocked: reading stdin/files, formatted output via
-  `printf`/`Text.Printf`, Show for tuples and custom datatypes (would
-  need a generic ADT walker — current approach is per-instance
-  intercept).
+  `printf`/`Text.Printf`, Show for tuples (would need additional
+  `$fShowTuple*` CAF entries), GADT-style data declarations.
 
 - **BRIDGE_rust_strings**: Rust `println!(...)` now works for plain
   string literals: the bridge elides `Arguments::<'_>::from_str` (a thin

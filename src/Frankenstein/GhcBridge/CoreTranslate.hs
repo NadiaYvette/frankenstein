@@ -165,6 +165,11 @@ trExpr (Var v)
                (F.Name (T.pack (getOccString (dataConName dc))) 0))
   | Just canonical <- normalizeGhcBuiltin v =
       F.EVar (F.Name canonical 0)
+  -- Known single-char CAFs that GHC's deriving Show uses as components
+  -- of cons-list construction (e.g. `showSpace1 = ' '`, `$fShowCallStack2
+  -- = ')'`).  Inline as Char literal.
+  | Just c <- knownShowCharCAF v =
+      F.ELit (F.LitChar c)
   -- Known GHC Show-prefix CAFs (e.g. $fShowMaybe3 = "Nothing"):
   -- inline the literal as a [Char] cons-list since the CAF symbol
   -- isn't linkable in our runtime.
@@ -471,6 +476,29 @@ ghcIoOutputRuntime v =
 -- `showsPrec p :: Int -> ShowS` to this 3-arg worker call.
 -- | True for the Show [Int] specialised showList method
 -- ($fShowInt_$cshowList).  Two args: (list, tail).
+-- | Recognise GHC's single-character Show CAFs.  These are used by
+-- `deriving Show`-generated `$cshowsPrec` bodies as components of
+-- cons-list construction (`:(showSpace1, restList)`).  When the CAF
+-- appears as a Var in head position, the value is a single Char
+-- codepoint, not a multi-char string — so we inline as LitChar.
+knownShowCharCAF :: Var -> Maybe Char
+knownShowCharCAF v =
+  let occ = getOccString v
+      mmod = case nameModule_maybe (varName v) of
+               Just m  -> moduleNameString (moduleName m)
+               Nothing -> ""
+  in if mmod `elem` ["GHC.Internal.Show", "GHC.Show"]
+     then case occ of
+       "showSpace1"          -> Just ' '
+       -- $fShowCallStack2 and $fShowCallStack3 are the parens around
+       -- constructor args in derived Show output.  Numbering is
+       -- consistent across recent GHC versions: 2 = ')', 3 = '('.
+       "$fShowCallStack2"    -> Just ')'
+       "$fShowCallStack3"    -> Just '('
+       "$fShowCallStack4"    -> Just ','     -- between tuple elements
+       _                     -> Nothing
+     else Nothing
+
 -- | Recognise GHC's specialised Show-prefix CAFs and return the literal
 -- string they hold.  GHC's Show specialiser routes calls like
 -- `show (Just n)` through @unpackAppendCString# $fShowMaybe1 (show n)@
@@ -528,9 +556,10 @@ isShowIntWorker v =
       -- $fShowCallStack_itos' is the unwrapped "int to string" emitter
       -- (2-arg: value + tail) that GHC pulls in for some specialised
       -- show calls (e.g. `show (e :: Int)` after CSE pre-computes the
-      -- value).  It's the same shape as $w$cshowsPrec2 minus the
-      -- precedence arg.
-      isItos = occ == "$fShowCallStack_itos'"
+      -- value).  Plain `itos` is the wrapped form used by derived
+      -- Show bodies (e.g. `itos b2 (...)` for the Int field of a
+      -- constructor).  Same shape: (value, tail).
+      isItos = occ `elem` ["$fShowCallStack_itos'", "itos"]
   in (mmod == "GHC.Internal.Show" || mmod == "GHC.Show")
      && (occ `elem`
         [ "$w$cshowsPrec2"        -- worker for Show Int
@@ -561,6 +590,7 @@ unboxIntCon e = case collectArgs e of
 pickShowArgs :: String -> [CoreExpr] -> Maybe (CoreExpr, CoreExpr)
 pickShowArgs name args = case (name, args) of
   ("$fShowCallStack_itos'", [v, t])     -> Just (v, t)
+  ("itos", [v, t])                      -> Just (v, t)
   (_, [_prec, v, t])                    -> Just (v, t)
   _                                     -> Nothing
 
@@ -579,10 +609,28 @@ isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
 
 -- | Is this a compiler-generated dictionary/module definition?
 -- These are GHC's desugared typeclass infrastructure and module metadata.
+--
+-- `$c<method>` names are dictionary method selectors (e.g. `$c==`, `$c+`)
+-- — those we want to filter.  BUT GHC reuses the same prefix for
+-- `deriving`-generated method bodies (`$cshowsPrec`, `$cshow`,
+-- `$cshowList`, `$ccompare`, etc.).  Those are real user-level
+-- functions referenced from the user's `print` calls and must survive.
 isDictDef :: F.Def -> Bool
 isDictDef d =
   let n = T.unpack (F.nameText (F.qnameName (F.defName d)))
-  in isPrefixOf "$f" n || isPrefixOf "$d" n || isPrefixOf "$c" n
+      -- Keep the show* and compare-family methods we actually call.
+      -- `showList` is intentionally NOT kept: GHC always generates it
+      -- alongside `showsPrec` in `deriving Show` instances, but its
+      -- body references `showList__` (an unshimmed GHC runtime
+      -- helper).  Filtering it keeps `print x` (which uses
+      -- showsPrec) working without dragging in the list machinery.
+      isDerivedMethodName = any (`isPrefixOf` drop 2 n)
+        [ "showsPrec", "show"   -- keep $cshowsPrec, $cshow (not $cshowList)
+        , "compare", "min", "max"
+        , "fmap", "foldr", "foldMap", "traverse"
+        ] && not ("showList" `isPrefixOf` drop 2 n)
+  in isPrefixOf "$f" n || isPrefixOf "$d" n
+     || (isPrefixOf "$c" n && not isDerivedMethodName)
      || isPrefixOf "$tr" n || isPrefixOf "$W" n || isPrefixOf "$tc" n
      || isPrefixOf "$krep" n
 
@@ -674,6 +722,9 @@ normalizeGhcBuiltin v =
                Just m  -> moduleNameString (moduleName m)
                Nothing -> ""
   in case (mmod, occ) of
+    -- Haskell list append used by derived Show bodies.
+    ("GHC.Internal.Base", "++") -> Just "haskell_chars_concat"
+    ("GHC.Base",          "++") -> Just "haskell_chars_concat"
     -- Num methods
     (m, "+")      | isGhcNum m -> Just "+"
     (m, "-")      | isGhcNum m -> Just "-"

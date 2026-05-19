@@ -46,6 +46,10 @@ int64_t kk_int_to_haskell_chars(int64_t n, int64_t tail);
  * $fShowInt_$cshowList method). */
 int64_t kk_int_list_to_haskell_chars(int64_t list, int64_t tail);
 
+/* Append two Haskell [Char] cons-lists (a ++ b).  Used by the GHC
+ * bridge to translate GHC.Internal.Base.(++) calls in derived Show. */
+int64_t kk_haskell_chars_concat(int64_t a, int64_t b);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

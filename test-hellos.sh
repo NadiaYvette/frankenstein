@@ -96,6 +96,10 @@ echo "--- Show / print compound types ---"
 run_hello "show-compound"     $'[]\n[42]\n[1,2,3,4,5]\n[-7,0,100]\nJust 42\nNothing' "examples/show_compound.hs"
 
 echo ""
+echo "--- Show / print derived ADTs ---"
+run_hello "show-derived"      "Node (Node Leaf 1 Leaf) 2 (Node Leaf 3 Leaf)" "examples/show_derived.hs"
+
+echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then
     echo "  ALL HELLOS PASS ($PASS/$((PASS+FAIL)))"

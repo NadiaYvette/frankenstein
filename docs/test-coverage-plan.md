@@ -47,12 +47,14 @@ Haskell `show :: Int -> String` and `print :: Int -> IO ()` work via
 the GHC bridge's `isShowIntWorker` intercept — see
 `examples/show_int.hs`.  Show for [Int] and Maybe Int works via
 `isShowIntListMethod` + `knownShowCAF` — see `examples/show_compound.hs`.
-Test driver runs 10/10 hellos.
+`deriving Show` for user ADTs works for the three common shapes —
+see `examples/show_derived.hs`.  Test driver runs 11/11 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
 Rust `println!("{}", x)` placeholders (Display trait machinery),
-Haskell Show for tuples and custom datatypes (would need generic ADT
-walker), file/stdin handles, full UTF-8 re-encoding.
+Haskell mixing enum + with-args ADTs in one module (lambda-lifting
+helper-name collision), Show for tuples, file/stdin handles, full
+UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

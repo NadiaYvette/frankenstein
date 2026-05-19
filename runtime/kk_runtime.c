@@ -369,6 +369,37 @@ static int64_t kk_cons_char_cell(int64_t ch, int64_t tail) {
     return cell;
 }
 
+/* List append for Haskell [Char] cons-lists: a ++ b.
+ * Walks a (collecting into a buffer), then prepends each element onto
+ * b in reverse to preserve original order.  Recurses if a exceeds the
+ * stack buffer (rare).
+ *
+ * Exposed under both names: kk_haskell_chars_concat for direct calls
+ * through the intrinsic dispatcher, and haskell_chars_concat (no kk_
+ * prefix) for PAP wrappers that the MLIR emitter constructs when
+ * (++) is partially applied (e.g. inside derived $cshowsPrec). */
+int64_t haskell_chars_concat(int64_t, int64_t)
+  __attribute__((alias("kk_haskell_chars_concat")));
+int64_t kk_haskell_chars_concat(int64_t a, int64_t b) {
+    enum { CAP = 256 };
+    int64_t buf[CAP];
+    int n = 0;
+    int64_t cur = a;
+    while (kk_tag(cur) != KK_HASKELL_NIL_TAG && n < CAP) {
+        buf[n++] = kk_field(cur, 0);
+        cur = kk_field(cur, 1);
+    }
+    int64_t result = b;
+    /* Tail beyond the buffer: recurse on the remainder. */
+    if (kk_tag(cur) != KK_HASKELL_NIL_TAG) {
+        result = kk_haskell_chars_concat(cur, result);
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        result = kk_cons_char_cell(buf[i], result);
+    }
+    return result;
+}
+
 /* Show Int's showList: format an Int cons-list as "[n1,n2,n3]" and
  * prepend onto tail.  Used by the GHC bridge to intercept the
  * specialised Show [Int] method ($fShowInt_$cshowList).

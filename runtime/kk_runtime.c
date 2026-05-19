@@ -1,3 +1,4 @@
+#define _GNU_SOURCE  /* for asprintf */
 /* Frankenstein minimal runtime — Perceus refcounting + boxed values
  *
  * Boxed value layout (all fields int64_t):
@@ -546,16 +547,212 @@ int64_t kk_rust_arg_upper_hex(int64_t v) { return kk_rust_arg_radix(KK_RUST_HEX_
 int64_t kk_rust_arg_octal(int64_t v)     { return kk_rust_arg_radix(KK_RUST_OCT_TAG, v); }
 int64_t kk_rust_arg_binary(int64_t v)    { return kk_rust_arg_radix(KK_RUST_BIN_TAG, v); }
 
+/* Render an arg to a freshly-malloc'd C string.  Caller frees.
+ * Mirrors kk_rust_print_one_arg but goes to a buffer instead of stdout. */
+static char* kk_rust_render_one_arg(int64_t v, size_t* out_len) {
+    char* result = NULL;
+    size_t len = 0;
+    if (kk_is_heap_ptr(v) && kk_nfields(v) == 1) {
+        int64_t tag = kk_tag(v);
+        int64_t inner = kk_field(v, 0);
+        const char* fmt = NULL;
+        if (tag == KK_RUST_HEX_LO_TAG)      fmt = "%lx";
+        else if (tag == KK_RUST_HEX_HI_TAG) fmt = "%lX";
+        else if (tag == KK_RUST_OCT_TAG)    fmt = "%lo";
+        else if (tag == KK_RUST_BIN_TAG) {
+            uint64_t u = (uint64_t)inner;
+            char buf[65];
+            int blen = 0;
+            if (u == 0) { buf[blen++] = '0'; }
+            else { while (u && blen < 64) { buf[blen++] = '0' + (int)(u & 1); u >>= 1; } }
+            result = (char*)malloc(blen + 1);
+            for (int i = 0; i < blen; i++) result[i] = buf[blen - 1 - i];
+            result[blen] = 0;
+            *out_len = blen;
+            return result;
+        }
+        else if (tag == KK_RUST_DEBUG_TAG) {
+            if (kk_is_string(inner)) {
+                /* Render debug-quoted string to buffer. */
+                size_t n = (size_t)kk_str_len(inner);
+                char* bytes = kk_str_dup_cstr(inner);
+                /* Worst-case: every byte becomes \xHH (4 bytes), plus 2 quotes + NUL. */
+                size_t cap = n * 4 + 3;
+                result = (char*)malloc(cap);
+                size_t pos = 0;
+                result[pos++] = '"';
+                if (bytes) {
+                    for (size_t i = 0; i < n; i++) {
+                        unsigned char c = (unsigned char)bytes[i];
+                        switch (c) {
+                            case '\n': result[pos++] = '\\'; result[pos++] = 'n'; break;
+                            case '\t': result[pos++] = '\\'; result[pos++] = 't'; break;
+                            case '\r': result[pos++] = '\\'; result[pos++] = 'r'; break;
+                            case '\"': result[pos++] = '\\'; result[pos++] = '"'; break;
+                            case '\\': result[pos++] = '\\'; result[pos++] = '\\'; break;
+                            default:
+                                if (c >= 0x20 && c < 0x7f) result[pos++] = c;
+                                else pos += snprintf(result + pos, 5, "\\x%02x", c);
+                                break;
+                        }
+                    }
+                    free(bytes);
+                }
+                result[pos++] = '"';
+                result[pos] = 0;
+                *out_len = pos;
+                return result;
+            }
+            /* Debug == Display for non-string */
+            fmt = "%ld";
+            v = inner;
+        }
+        if (fmt) {
+            /* asprintf isn't fully portable but our toolchain has it. */
+            int wrote = asprintf(&result, fmt, (long)inner);
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote;
+            return result;
+        }
+    }
+    if (kk_is_string(v)) {
+        size_t n = (size_t)kk_str_len(v);
+        char* bytes = kk_str_dup_cstr(v);
+        if (!bytes) { *out_len = 0; return NULL; }
+        *out_len = n;
+        return bytes;
+    }
+    int wrote = asprintf(&result, "%ld", (long)v);
+    if (wrote < 0) { *out_len = 0; return NULL; }
+    *out_len = (size_t)wrote;
+    return result;
+    (void)len;
+}
+
+/* Field-spec decoded structure. */
+typedef struct {
+    char    fill;
+    int     align;    /* 0=left, 1=right, 2=center, 3=default */
+    int     zero_pad;
+    int     plus_sign;
+    int     alt_form;
+    int     has_width;
+    uint16_t width;
+} kk_rust_spec_t;
+
+/* Is this value a "numeric" type per Rust's default-alignment rule? */
+static int kk_rust_arg_is_numeric(int64_t v) {
+    if (kk_is_string(v)) return 0;
+    if (kk_is_heap_ptr(v) && kk_nfields(v) == 1) {
+        int64_t tag = kk_tag(v);
+        if (tag == KK_RUST_HEX_LO_TAG || tag == KK_RUST_HEX_HI_TAG
+            || tag == KK_RUST_OCT_TAG || tag == KK_RUST_BIN_TAG)
+            return 1;
+        if (tag == KK_RUST_DEBUG_TAG) {
+            int64_t inner = kk_field(v, 0);
+            return !kk_is_string(inner);
+        }
+        return 1;  /* assume number for unknown 1-field cells */
+    }
+    return 1;  /* raw i64 = number */
+}
+
+/* Print one arg with the given spec applied: render to buffer, then
+ * pad to `width` using `fill` chars on the chosen alignment side. */
+static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
+    size_t len = 0;
+    char* rendered = kk_rust_render_one_arg(v, &len);
+    if (!rendered) return;
+    if (!spec->has_width || spec->width <= len) {
+        fwrite(rendered, 1, len, stdout);
+        free(rendered);
+        return;
+    }
+    size_t pad = spec->width - len;
+    int eff_align = spec->align;
+    int is_num = kk_rust_arg_is_numeric(v);
+    if (eff_align == 3) {
+        /* Default alignment: numeric → right, string → left. */
+        eff_align = is_num ? 1 : 0;
+    }
+    char fill = spec->fill;
+    if (spec->zero_pad && is_num) {
+        fill = '0';
+        eff_align = 1;  /* zero-pad implies right-align */
+    }
+    /* Sign-aware zero-pad: if rendered starts with '-' or '+', emit the
+     * sign first, then pad with '0', then the digits. */
+    if (spec->zero_pad && is_num && len > 0
+        && (rendered[0] == '-' || rendered[0] == '+'))
+    {
+        putchar(rendered[0]);
+        for (size_t i = 0; i < pad; i++) putchar('0');
+        fwrite(rendered + 1, 1, len - 1, stdout);
+        free(rendered);
+        return;
+    }
+    switch (eff_align) {
+        case 0:  /* left */
+            fwrite(rendered, 1, len, stdout);
+            for (size_t i = 0; i < pad; i++) putchar(fill);
+            break;
+        case 1:  /* right */
+            for (size_t i = 0; i < pad; i++) putchar(fill);
+            fwrite(rendered, 1, len, stdout);
+            break;
+        case 2: { /* center */
+            size_t left_pad = pad / 2;
+            size_t right_pad = pad - left_pad;
+            for (size_t i = 0; i < left_pad; i++) putchar(fill);
+            fwrite(rendered, 1, len, stdout);
+            for (size_t i = 0; i < right_pad; i++) putchar(fill);
+            break;
+        }
+    }
+    free(rendered);
+}
+
+/* Decode 4 spec bytes into a kk_rust_spec_t.  Width comes separately. */
+static void kk_rust_decode_spec(const unsigned char* sp, kk_rust_spec_t* out) {
+    out->fill      = (char)sp[0];
+    /* sp[1] reserved / always 0 */
+    out->plus_sign = (sp[2] & 0x20) != 0;
+    out->alt_form  = (sp[2] & 0x80) != 0;
+    unsigned char a = sp[3];
+    /* Align: high nibble.  0=left, 2=right, 4=center, 6=default. */
+    switch ((a >> 4) & 0x0f) {
+        case 0: out->align = 0; break;
+        case 2: out->align = 1; break;
+        case 4: out->align = 2; break;
+        case 6: out->align = 3; break;
+        default: out->align = 3; break;
+    }
+    out->zero_pad  = (a & 0x01) != 0;
+    out->has_width = 0;
+    out->width     = 0;
+}
+
 int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
     /* Template encoding (Rust 2024+):
      *   template := piece* '\x00'
      *   piece    := '\xc0'                            (plain placeholder)
-     *            |  '\xc3' <spec>{6}                  (placeholder with field-spec)
+     *            |  '\xc1' <spec>{4}                  (placeholder + spec, no width)
+     *            |  '\xc3' <spec>{4} <width>{2}       (placeholder + spec + width)
      *            |  <len> <byte>{len}                  (literal piece)
-     * The 6 spec bytes encode fill/align/sign/width/precision/format
-     * flags.  Field-spec rendering is not implemented yet — we still
-     * print the arg via the default formatter and skip the spec bytes
-     * so the walker stays aligned with the next piece. */
+     *
+     * Spec bytes (4):
+     *   [0] fill char (e.g. 0x20 = ' ', 0x30 = '0', 0x78 = 'x', …)
+     *   [1] reserved/zero
+     *   [2] sign/alt-form flags
+     *         bit 5 (0x20): '+' sign
+     *         bit 7 (0x80): '#' alternate form
+     *   [3] align byte
+     *         nibble HI (bits 4-7): alignment code
+     *           0 = left, 2 = right, 4 = center, 6 = default
+     *         bit 3 = has-width (also signalled by c3 vs c1 marker)
+     *         bit 0 = zero-pad flag
+     *
+     * Width bytes (2, little-endian u16): minimum field width. */
     size_t total;
     unsigned char* buf = kk_rust_decode_template(template_str, &total);
     if (!buf) return 0;
@@ -569,12 +766,20 @@ int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
             int64_t v = kk_args_extract(args_struct, arg_idx);
             kk_rust_print_one_arg(v);
             arg_idx++;
-        } else if (b == 0xc3) {                         /* placeholder + 6-byte spec */
+        } else if (b == 0xc1 || b == 0xc3) {            /* placeholder + spec */
             int64_t v = kk_args_extract(args_struct, arg_idx);
-            kk_rust_print_one_arg(v);
             arg_idx++;
-            if (p + 6 <= end) p += 6;                   /* skip spec bytes */
-            else              p = end;
+            kk_rust_spec_t spec;
+            int spec_bytes = 4;
+            if (p + spec_bytes > end) { p = end; continue; }
+            kk_rust_decode_spec(p, &spec);
+            p += spec_bytes;
+            if (b == 0xc3 && p + 2 <= end) {
+                spec.has_width = 1;
+                spec.width = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+                p += 2;
+            }
+            kk_rust_print_arg_with_spec(v, &spec);
         } else {                                        /* literal piece, len=b */
             size_t len = b;
             size_t n = (p + len > end) ? (size_t)(end - p) : len;

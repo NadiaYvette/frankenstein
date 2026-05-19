@@ -805,12 +805,15 @@ details.
   `{:x}` / `{:X}` / `{:o}` / `{:b}` also work via per-radix
   Argument wrappers (`new_lower_hex` / `new_upper_hex` / `new_octal`
   / `new_binary`).  See `examples/rust_fmt.rs`, `examples/rust_dbg.rs`,
-  `examples/rust_radix.rs`.  Partial: field-spec syntax (`{:>5}`,
-  `{:05}`, `{:.2}`) — the bridge recognises the `0xc3` placeholder-
-  with-spec marker and skips the 6 spec bytes, so the arg prints
-  without garbage, but width/alignment/precision aren't applied
-  yet (would need decoding Rust's spec byte encoding).  Still
-  blocked: non-i64 numeric types (i32/u64/f64), `{:?}` for ADTs.
+  `examples/rust_radix.rs`.  Field-spec syntax `{:>5}`, `{:<5}`, `{:^5}`, `{:05}`, `{:x>5}`,
+  `{:08x}` all apply correctly — width, alignment (left/right/center/
+  default), zero-pad with sign-aware placement, and custom fill chars
+  are decoded from Rust's 4- or 6-byte spec encoding (`c1`/`c3`
+  placeholder markers).  Default alignment matches Rust's per-type
+  convention: numeric → right, string → left.  See
+  `examples/rust_spec.rs`.  Still blocked: precision (`{:.2}`), `+`
+  sign flag (`{:+}`), alternate form (`{:#x}`), non-i64 numeric
+  types (i32/u64/f64), `{:?}` for ADTs.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

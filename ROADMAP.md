@@ -717,13 +717,26 @@ details.
   user's `main` is just an `EVar` reference to a lambda-bodied helper
   and rewrites the alias to apply it with a dummy state arg.  Codepoints
   > 127 are written as raw bytes (Latin-1ish); full UTF-8 re-encoding
-  is future work.  `show :: Int -> String` and `print :: Int -> IO ()` now work via the
-  bridge's `isShowIntWorker` intercept (recognises `$w$cshowsPrec2` and
-  `$fShowCallStack_itos'` from `GHC.Internal.Show`) routing to
-  `int_to_haskell_chars` runtime helper.  Still blocked: reading
-  stdin/files, formatted output via `printf`/`Text.Printf`,
-  Show instances for non-Int types (Lists, Maybe, custom datatypes —
-  these need either generic walking or per-Show-method intercepts).
+  is future work.  `show :: Int -> String`, `print :: Int -> IO ()`, `show [Int]`,
+  `show (Maybe Int)` (`Just n` / `Nothing`) all now work natively.
+  Routing:
+    - Int show: `isShowIntWorker` recognises `$w$cshowsPrec2` and
+      `$fShowCallStack_itos'`, routed to `int_to_haskell_chars`.
+    - [Int] show: `isShowIntListMethod` recognises `$fShowInt_$cshowList`,
+      routed to `int_list_to_haskell_chars` (formats `[n1,n2,n3]`).
+    - Maybe show: `knownShowCAF` recognises the prefix CAFs that GHC
+      emits (`$fShowMaybe1` = "Just ", `$fShowMaybe3` = "Nothing"),
+      inlining the literal `[Char]` cons-list at translation time.
+    - `unpackAppendCString#` (both Lit and Var forms) handled in trExpr
+      so the prefix CAF lookup composes with `unpackAppendCString# pfx (show inner)`.
+    - `isDictArg` no longer filters `$fShow*` CAFs with digit suffixes
+      (they're CString CAFs, not dictionaries) — without this, the
+      first arg of `unpackAppendCString#` was being silently dropped.
+
+  Still blocked: reading stdin/files, formatted output via
+  `printf`/`Text.Printf`, Show for tuples and custom datatypes (would
+  need a generic ADT walker — current approach is per-instance
+  intercept).
 
 - **BRIDGE_rust_strings**: Rust `println!(...)` now works for plain
   string literals: the bridge elides `Arguments::<'_>::from_str` (a thin

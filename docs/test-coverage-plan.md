@@ -45,12 +45,14 @@ Haskell, Rust, and Mercury — see `examples/chained_io.{hs,rs,m}`.
 
 Haskell `show :: Int -> String` and `print :: Int -> IO ()` work via
 the GHC bridge's `isShowIntWorker` intercept — see
-`examples/show_int.hs`.  Test driver runs 9/9 hellos.
+`examples/show_int.hs`.  Show for [Int] and Maybe Int works via
+`isShowIntListMethod` + `knownShowCAF` — see `examples/show_compound.hs`.
+Test driver runs 10/10 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
 Rust `println!("{}", x)` placeholders (Display trait machinery),
-Haskell `Show` for non-Int types (lists, Maybe, custom datatypes),
-file/stdin handles, full UTF-8 re-encoding.
+Haskell Show for tuples and custom datatypes (would need generic ADT
+walker), file/stdin handles, full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

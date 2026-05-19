@@ -361,6 +361,79 @@ int64_t kk_int_to_haskell_chars(int64_t n, int64_t tail) {
     #undef CONS_CELL
 }
 
+/* Helper: prepend a single char onto a [Char] cons-list. */
+static int64_t kk_cons_char_cell(int64_t ch, int64_t tail) {
+    int64_t cell = kk_alloc_con(KK_HASKELL_CONS_TAG, 2);
+    kk_set_field(cell, 0, ch);
+    kk_set_field(cell, 1, tail);
+    return cell;
+}
+
+/* Show Int's showList: format an Int cons-list as "[n1,n2,n3]" and
+ * prepend onto tail.  Used by the GHC bridge to intercept the
+ * specialised Show [Int] method ($fShowInt_$cshowList).
+ *
+ * Each input cell's field 0 is a raw i64 (the bridge strips I#
+ * wrappers via the existing trExpr (App I# _) cases on list
+ * construction); field 1 is the tail.
+ */
+int64_t kk_int_list_to_haskell_chars(int64_t list, int64_t tail) {
+    /* Collect values into a small stack buffer; if the list overflows
+     * the buffer we walk twice (rare for everyday hello-world output).
+     * 128 elements is plenty for any reasonable print call. */
+    enum { CAP = 128 };
+    int64_t vals[CAP];
+    int len = 0;
+    int64_t cur = list;
+    while (kk_tag(cur) != KK_HASKELL_NIL_TAG && len < CAP) {
+        vals[len++] = kk_field(cur, 0);
+        cur = kk_field(cur, 1);
+    }
+    /* If we hit CAP, the rest is in cur (still a valid cons-list). */
+
+    /* Build the result tail-first: tail, ']', then for each value in
+     * reverse, the int chars (with a leading ',' for all but the
+     * first emitted element).  Finally prepend '['. */
+    int64_t result = tail;
+    /* If cur is still non-nil, recursively format it (without the
+     * outer brackets) before the ']'. */
+    if (kk_tag(cur) != KK_HASKELL_NIL_TAG) {
+        /* Format cur as if it were a separate list, then merge — but
+         * we want the comma separator between blocks.  Simplest: take
+         * the recursive result of formatting [cur_elems] and splice
+         * its inner content (drop the leading '[' and the trailing ']')
+         * onto result.  Cleaner approach: emit cur's elements directly
+         * here using another stack pass. */
+        int64_t vals2[CAP];
+        int len2 = 0;
+        int64_t cur2 = cur;
+        while (kk_tag(cur2) != KK_HASKELL_NIL_TAG && len2 < CAP) {
+            vals2[len2++] = kk_field(cur2, 0);
+            cur2 = kk_field(cur2, 1);
+        }
+        /* (Lists of >256 elements are truncated.) */
+        result = kk_cons_char_cell((int64_t)']', result);
+        for (int i = len2 - 1; i >= 0; i--) {
+            result = kk_int_to_haskell_chars(vals2[i], result);
+            /* Always a comma before — we know there's at least one in-buffer elem ahead. */
+            result = kk_cons_char_cell((int64_t)',', result);
+        }
+    } else {
+        result = kk_cons_char_cell((int64_t)']', result);
+    }
+    /* Now prepend the in-buffer elements in reverse.  The last
+     * element emitted (i = 0) is the head of the source list and
+     * should NOT be preceded by a comma. */
+    for (int i = len - 1; i >= 0; i--) {
+        result = kk_int_to_haskell_chars(vals[i], result);
+        if (i > 0) {
+            result = kk_cons_char_cell((int64_t)',', result);
+        }
+    }
+    result = kk_cons_char_cell((int64_t)'[', result);
+    return result;
+}
+
 
 /* First-class strings — rope-based, UTF-8.
  *

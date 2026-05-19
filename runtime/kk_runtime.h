@@ -41,6 +41,11 @@ void    kk_println_haskell_chars(int64_t list);
  * tail.  Used by the GHC bridge to implement Show Int. */
 int64_t kk_int_to_haskell_chars(int64_t n, int64_t tail);
 
+/* Format a [Int] cons-list as "[n1,n2,n3]" prepended onto tail.  Used
+ * by the GHC bridge to implement Show [Int] (the specialised
+ * $fShowInt_$cshowList method). */
+int64_t kk_int_list_to_haskell_chars(int64_t list, int64_t tail);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

@@ -92,6 +92,10 @@ echo "--- Show / print integers ---"
 run_hello "show-haskell"      $'0\n42\n-7\n210' "examples/show_int.hs"
 
 echo ""
+echo "--- Show / print compound types ---"
+run_hello "show-compound"     $'[]\n[42]\n[1,2,3,4,5]\n[-7,0,100]\nJust 42\nNothing' "examples/show_compound.hs"
+
+echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then
     echo "  ALL HELLOS PASS ($PASS/$((PASS+FAIL)))"

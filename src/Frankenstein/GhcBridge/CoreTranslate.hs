@@ -52,6 +52,7 @@ import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -164,6 +165,11 @@ trExpr (Var v)
                (F.Name (T.pack (getOccString (dataConName dc))) 0))
   | Just canonical <- normalizeGhcBuiltin v =
       F.EVar (F.Name canonical 0)
+  -- Known GHC Show-prefix CAFs (e.g. $fShowMaybe3 = "Nothing"):
+  -- inline the literal as a [Char] cons-list since the CAF symbol
+  -- isn't linkable in our runtime.
+  | Just litBytes <- knownShowCAF v =
+      unpackLitStringToCons litBytes (F.ECon (F.QName T.empty (F.Name "[]" 0)))
   -- foreign import ccall: extract the C function name from FCallId
   | FCallId (CCall (CCallSpec (StaticTarget _ clabel _ _) _ _)) <- idDetails v =
       F.EVar (F.Name (T.pack (unpackFS clabel)) 0)
@@ -180,13 +186,33 @@ trExpr (App f (Type t)) = F.ETypeApp (trExpr f) [translateType t]
 -- know the intent.
 trExpr (App (Var v) (Lit (LitString bs)))
   | getOccString v `elem` ["unpackCString#", "unpackCStringUtf8#"] =
-      let s = TE.decodeUtf8With lenientDecode bs
-          nilCon = F.QName T.empty (F.Name "[]" 0)
-          consCon = F.QName T.empty (F.Name ":" 0)
-          go "" = F.ECon nilCon
-          go t  = let (c, rest) = (T.head t, T.tail t)
-                  in F.EApp (F.ECon consCon) [F.ELit (F.LitChar c), go rest]
-      in go s
+      unpackLitStringToCons bs (F.ECon (F.QName T.empty (F.Name "[]" 0)))
+
+-- unpackAppendCString# "literal" tail: same as unpackCString# but ending
+-- with `tail` instead of nil.  GHC uses this for compositions like
+-- `"Just " ++ show n`, which the Show specialiser inlines as
+-- `unpackAppendCString# "Just "# (show n)`.  Without this case, the
+-- bridge emits a 1-arg call to an undefined symbol — the literal arg
+-- gets eaten by trExpr's general App path.
+trExpr (App (App (Var v) (Lit (LitString bs))) tailExpr)
+  | getOccString v `elem` ["unpackAppendCString#", "unpackAppendCStringUtf8#"] =
+      unpackLitStringToCons bs (trExpr tailExpr)
+
+-- Specialised Show implementations reference the prefix literal via a
+-- top-level CAF in GHC.Internal.Show (e.g. $fShowMaybe1 = "Just "#).
+-- Recognise these by name and substitute the known content directly,
+-- since the CAFs aren't linkable in our runtime.
+trExpr (App (App (Var v) (Var litVar)) tailExpr)
+  | getOccString v `elem` ["unpackAppendCString#", "unpackAppendCStringUtf8#"]
+  , Just litBytes <- knownShowCAF litVar =
+      unpackLitStringToCons litBytes (trExpr tailExpr)
+-- And the no-tail unpackCString# form for the same CAFs (e.g.
+-- `show Nothing` is just unpackCString# $fShowMaybe2#).
+trExpr (App (Var v) (Var litVar))
+  | getOccString v `elem` ["unpackCString#", "unpackCStringUtf8#"]
+  , Just litBytes <- knownShowCAF litVar =
+      unpackLitStringToCons litBytes (F.ECon (F.QName T.empty (F.Name "[]" 0)))
+
 
 -- Regular application: collect args, strip dictionaries, simplify boxing
 trExpr (App f a) =
@@ -239,6 +265,17 @@ trExpr (App f a) =
       , Just (intArg, tailArg) <- pickShowArgs (getOccString v) valueArgs ->
           F.EApp (F.EVar (F.Name "int_to_haskell_chars" 0))
                  [unboxIntCon intArg, trExpr tailArg]
+    -- GHC.Internal.Show.$fShowInt_$cshowList: Show [Int]'s showList.
+    -- Two args: the [Int] list and the tail [Char].  We route to the
+    -- runtime int_list_to_haskell_chars which formats as "[n1,n2,n3]".
+    (Var v, args)
+      | isShowIntListMethod v
+      , let valueArgs = filter (\x -> not (isDictArg x)
+                                       && not (isRealWorldArg x)
+                                       && not (isTypeArg x)) args
+      , [listArg, tailArg] <- valueArgs ->
+          F.EApp (F.EVar (F.Name "int_list_to_haskell_chars" 0))
+                 [trExpr listArg, trExpr tailArg]
     -- General case: strip dictionary arguments and realWorld# state tokens
     (fun, args) ->
       let args' = filter (\x -> not (isDictArg x) && not (isRealWorldArg x)) args
@@ -380,7 +417,7 @@ collectArgs = go []
 isDictArg :: CoreExpr -> Bool
 isDictArg (Var v) =
   let name = getOccString v
-  in (isPrefixOf "$f" name && not (isInstanceMethod name))
+  in (isPrefixOf "$f" name && not (isInstanceMethod name) && not (isStringCAF name))
      || isPrefixOf "$d" name  -- $dOrd, $dNum, etc. (alternative naming)
      || isPrefixOf "$c" name  -- $c==, etc. (method selectors)
      || isPrefixOf "$W" name  -- $WI# etc. (wrappers)
@@ -389,6 +426,13 @@ isDictArg (Var v) =
     -- not dictionaries. They appear after the simplifier inlines dictionary
     -- lookups. Don't filter them out.
     isInstanceMethod n = "_$c" `isInfixOf` n
+    -- $fShowMaybe1, $fShowList2, etc. (digit suffix) are CString CAFs
+    -- holding the literal prefixes that Show methods concatenate.
+    -- These are not dictionaries — they're real value arguments passed
+    -- to unpackAppendCString#.  Distinguish by digit suffix.
+    isStringCAF n = case reverse n of
+      (c:_) | c >= '0' && c <= '9' -> True
+      _                            -> False
     isInfixOf needle haystack = any (isPrefixOf needle) (tails haystack)
     tails []     = [[]]
     tails s@(_:xs) = s : tails xs
@@ -425,6 +469,56 @@ ghcIoOutputRuntime v =
 -- for Int (and related types that share the worker after specialisation).
 -- The simplifier rewrites `show :: Int -> String` and
 -- `showsPrec p :: Int -> ShowS` to this 3-arg worker call.
+-- | True for the Show [Int] specialised showList method
+-- ($fShowInt_$cshowList).  Two args: (list, tail).
+-- | Recognise GHC's specialised Show-prefix CAFs and return the literal
+-- string they hold.  GHC's Show specialiser routes calls like
+-- `show (Just n)` through @unpackAppendCString# $fShowMaybe1 (show n)@
+-- where @$fShowMaybe1@ is a top-level CAF in GHC.Internal.Show holding
+-- "Just ".  Since the Frankenstein runtime can't link to GHC's
+-- stdlib symbols, recognise the CAF names and inline their content.
+knownShowCAF :: Var -> Maybe BS.ByteString
+knownShowCAF v =
+  let occ = getOccString v
+      mmod = case nameModule_maybe (varName v) of
+               Just m  -> moduleNameString (moduleName m)
+               Nothing -> ""
+  in if mmod `elem` ["GHC.Internal.Show", "GHC.Show"]
+     then case occ of
+       -- Maybe: GHC 9.14.1 emits "$fShowMaybe1" = "Just " (used by
+       -- unpackAppendCString# when showing Just) and "$fShowMaybe3" =
+       -- "Nothing" (used directly via Var for show Nothing).  The
+       -- numbering may shift across GHC versions; add new entries as
+       -- they surface.
+       "$fShowMaybe1"        -> Just (TE.encodeUtf8 "Just ")
+       "$fShowMaybe3"        -> Just (TE.encodeUtf8 "Nothing")
+       "$fShowMaybe2"        -> Just (TE.encodeUtf8 "Nothing")  -- older GHC
+       "$fShowEither1"       -> Just (TE.encodeUtf8 "Left ")
+       "$fShowEither2"       -> Just (TE.encodeUtf8 "Right ")
+       _                     -> Nothing
+     else Nothing
+
+-- | Build a [Char] cons-list from a ByteString literal, ending in the
+-- supplied tail expression.  Shared between unpackCString# (tail = []) and
+-- unpackAppendCString# (tail = caller-supplied).
+unpackLitStringToCons :: BS.ByteString -> F.Expr -> F.Expr
+unpackLitStringToCons bs tailE =
+  let s = TE.decodeUtf8With lenientDecode bs
+      consCon = F.QName T.empty (F.Name ":" 0)
+      go "" = tailE
+      go t  = let (c, rest) = (T.head t, T.tail t)
+              in F.EApp (F.ECon consCon) [F.ELit (F.LitChar c), go rest]
+  in go s
+
+isShowIntListMethod :: Var -> Bool
+isShowIntListMethod v =
+  let occ = getOccString v
+      mmod = case nameModule_maybe (varName v) of
+               Just m  -> moduleNameString (moduleName m)
+               Nothing -> ""
+  in (mmod == "GHC.Internal.Show" || mmod == "GHC.Show")
+     && occ == "$fShowInt_$cshowList"
+
 isShowIntWorker :: Var -> Bool
 isShowIntWorker v =
   let occ = getOccString v

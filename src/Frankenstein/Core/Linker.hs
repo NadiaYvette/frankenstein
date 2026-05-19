@@ -574,6 +574,9 @@ runtimeNames = Set.fromList
   -- Build a [Char] cons-list for an Int — GHC bridge's Show Int
   -- rewrite target (replaces $w$cshowsPrec2).
   , "int_to_haskell_chars"
+  -- Build "[n1,n2,n3]" for an [Int] — GHC bridge's Show [Int]
+  -- rewrite target ($fShowInt_$cshowList).
+  , "int_list_to_haskell_chars"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

@@ -61,7 +61,7 @@ translateHlds hlds = do
       -- @:- pred main_int(int::out) is det.@ convention. This lets
       -- Mercury programs without the standard @io@-threaded main serve
       -- as native entry points that return an Int result.
-      mainAliases =
+      mainIntAliases =
         [ Def
             { defName = QName "" (Name "main" 0)
             , defType = TFun [] EffectRowEmpty intT
@@ -72,6 +72,27 @@ translateHlds hlds = do
         | any (\p -> predName p == "main_int" && predDet p == Det)
               (hldsPreds hlds)
         ]
+      -- Synthesise a no-arg @main@ that calls Mercury's
+      -- @main(io::di, io::uo)@ with a dummy 0 IO state and discards the
+      -- result.  Mercury's io stdlib calls (e.g. io.write_string) are
+      -- routed to the Frankenstein runtime printers, which are
+      -- side-effectful regardless of the state-thread argument.
+      mainIoAliases =
+        [ Def
+            { defName = QName "" (Name "main" 0)
+            , defType = TFun [] EffectRowEmpty intT
+            , defExpr = EApp (EVar (Name "main_io_impl" 0)) [ELit (LitInt 0)]
+            , defSort = DefFun
+            , defVisibility = Public
+            }
+        | null mainIntAliases  -- prefer the int form if both somehow declared
+        , any (\p -> predName p == "main"
+                     && predDet p == Det
+                     && length (predModes p) == 2
+                     && all (\m -> m == ModeDi || m == ModeUo) (predModes p))
+              (hldsPreds hlds)
+        ]
+      mainAliases = mainIntAliases ++ mainIoAliases
   Right $ Program
     { progName = QName (hldsModule hlds) (Name "main" 0)
     , progDefs = failHandler : defs ++ multiWrappers ++ mainAliases
@@ -140,7 +161,16 @@ translateMercuryTypeDecl modName td = DataDecl
 -- | Translate a single Mercury predicate to a Frankenstein definition
 translatePred :: MercuryPred -> Either Text Def
 translatePred pred' = do
-  let name = QName "mercury" (Name (predName pred') 0)
+  let -- The user's @main(io::di, io::uo)@ predicate is renamed to
+      -- @mercury_main_io@ so the synthesised no-arg @main@ alias can
+      -- delegate to it without a name collision.
+      effectiveName
+        | predName pred' == "main"
+        , length (predModes pred') == 2
+        , all (\m -> m == ModeDi || m == ModeUo) (predModes pred')
+        = "main_io_impl"
+        | otherwise = predName pred'
+      name = QName "mercury" (Name effectiveName 0)
       -- Separate input and output modes
       pmodes = predModes pred'
       indexedModes = zip [0..length pmodes - 1] pmodes
@@ -290,26 +320,34 @@ translateGoal g = translateGoalK Set.empty g (ELit (LitInt 0))
 -- @g@ (construct, deconstruct, unify-with-var, switch arm) scope over @k@.
 translateGoalK :: Set Text -> MercuryGoal -> Expr -> Expr
 
--- Unification. Four cases, depending on which side is a literal and which
--- side is a fresh variable that needs to be bound.
+-- Unification. Several cases, depending on which side is a literal and
+-- which side is a fresh variable that needs to be bound.
 translateGoalK env (GoalUnify x y) k =
   let lhsLit = readMaybe (T.unpack x) :: Maybe Integer
       rhsLit = readMaybe (T.unpack y) :: Maybe Integer
+      lhsStr = parseMercuryStringLit x
+      rhsStr = parseMercuryStringLit y
       bindLhs = not (Set.member x env)
       bindRhs = not (Set.member y env)
-  in case (lhsLit, rhsLit) of
-       -- Both literals: no binding; just continue.
-       (Just _, Just _) -> k
-       -- X = <literal>: bind X to the literal if not yet bound.
-       (_, Just n) | bindLhs ->
+  in case (lhsLit, rhsLit, lhsStr, rhsStr) of
+       -- Both Int literals: no binding; just continue.
+       (Just _, Just _, _, _) -> k
+       -- X = <int literal>: bind X to the literal if not yet bound.
+       (_, Just n, _, _) | bindLhs ->
          ELet [[Bind (Name x 0) intTy (ELit (LitInt n)) DefVal]] k
-       -- <literal> = Y: bind Y to the literal if not yet bound.
-       (Just n, _) | bindRhs ->
+       -- <int literal> = Y: bind Y to the literal if not yet bound.
+       (Just n, _, _, _) | bindRhs ->
          ELet [[Bind (Name y 0) intTy (ELit (LitInt n)) DefVal]] k
+       -- X = "string literal": bind X to the LitString.
+       (_, _, _, Just s) | bindLhs ->
+         ELet [[Bind (Name x 0) stringTy (ELit (LitString s)) DefVal]] k
+       -- "string literal" = Y: bind Y to the LitString.
+       (_, _, Just s, _) | bindRhs ->
+         ELet [[Bind (Name y 0) stringTy (ELit (LitString s)) DefVal]] k
        -- X = Y, one side bound: bind the other as an alias.
-       (Nothing, Nothing) | bindLhs && not bindRhs ->
+       (Nothing, Nothing, Nothing, Nothing) | bindLhs && not bindRhs ->
          ELet [[Bind (Name x 0) intTy (EVar (Name y 0)) DefVal]] k
-       (Nothing, Nothing) | bindRhs && not bindLhs ->
+       (Nothing, Nothing, Nothing, Nothing) | bindRhs && not bindLhs ->
          ELet [[Bind (Name y 0) intTy (EVar (Name x 0)) DefVal]] k
        -- Fallback: emit a stub unify call.
        _ ->
@@ -323,10 +361,28 @@ translateGoalK _env (GoalCall predName' args) k =
         | Just op <- stripIntOp predName'
         , [lhs, rhs] <- args =
             EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
+        -- Mercury io stdlib calls: route through the Frankenstein
+        -- runtime's string printer.  The trailing two args are the
+        -- io::di/uo state variables — discarded since the runtime is
+        -- effectful but does not thread an IO state token.
+        | Just rtName <- ioCallRuntimeName predName' args =
+            case args of
+              (s:_) -> EApp (EVar (Name rtName 0)) [EVar (Name s 0)]
+              []    -> EApp (EVar (Name rtName 0)) []
         | otherwise =
             EApp (EVar (Name predName' 0))
                  (map (\a -> EVar (Name a 0)) args)
       stripIntOp n = T.stripPrefix "int." n
+      -- Mercury io.* predicates that have a direct runtime equivalent.
+      -- Returns the Frankenstein runtime name when the call shape matches.
+      ioCallRuntimeName n as = case (n, length as) of
+        ("io.write_string", 3) -> Just "print_str"
+        ("io.print",        3) -> Just "print_str"
+        ("io.write",        3) -> Just "print_str"
+        ("io.write_line",   3) -> Just "println_str"
+        ("io.print_line",   3) -> Just "println_str"
+        ("io.nl",           2) -> Just "putStrLn"  -- prints just newline (need empty string + putStrLn)
+        _                      -> Nothing
       -- If the call has a plausible output argument (last arg), bind it.
       -- This is a heuristic: Mercury HLDS dumps list output vars in the
       -- argument list, and for det predicates the last position is
@@ -416,7 +472,9 @@ extendBindingsFor :: Set Text -> MercuryGoal -> Set Text
 extendBindingsFor env g = case g of
   GoalUnify x y ->
     let lhsLit = isJust (readMaybe (T.unpack x) :: Maybe Integer)
+                   || isJust (parseMercuryStringLit x)
         rhsLit = isJust (readMaybe (T.unpack y) :: Maybe Integer)
+                   || isJust (parseMercuryStringLit y)
     in (if not lhsLit then Set.insert x env else env)
        `Set.union`
        (if not rhsLit then Set.insert y env else env)
@@ -442,3 +500,29 @@ boolTy = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
 
 anyTy :: Type
 anyTy = TCon (TypeCon (QName "std" (Name "any" 0)) KindValue)
+
+stringTy :: Type
+stringTy = TCon (TypeCon (QName "std" (Name "string" 0)) KindValue)
+
+-- | Recognise a Mercury HLDS string literal (surrounded by double
+-- quotes).  Returns the unquoted content if so.  Used to translate
+-- @V_n = "literal"@ unifications into LitString bindings rather than
+-- falling through to the unify-stub fallback.
+parseMercuryStringLit :: Text -> Maybe Text
+parseMercuryStringLit t = case T.uncons t of
+  Just ('"', rest) -> case T.unsnoc rest of
+    Just (inside, '"') -> Just (unescape inside)
+    _                  -> Nothing
+  _ -> Nothing
+  where
+    -- Mercury string literals use Haskell-style escapes (\n, \t, \", \\).
+    -- The HLDS emitter prints them verbatim, so undo the escapes here.
+    unescape = T.pack . go . T.unpack
+    go []             = []
+    go ('\\':'n':xs)  = '\n' : go xs
+    go ('\\':'t':xs)  = '\t' : go xs
+    go ('\\':'r':xs)  = '\r' : go xs
+    go ('\\':'"':xs)  = '"'  : go xs
+    go ('\\':'\\':xs) = '\\' : go xs
+    go ('\\':'0':xs)  = '\0' : go xs
+    go (c:xs)         = c    : go xs

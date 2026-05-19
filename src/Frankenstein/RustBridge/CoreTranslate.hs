@@ -269,12 +269,23 @@ parseConstLit t
   where
     -- MIR prints string literals with surrounding double quotes; strip
     -- them so kk_str_len returns the byte count of the actual string
-    -- content, not including the source-syntax quote characters.
+    -- content, not including the source-syntax quote characters.  Then
+    -- unescape Rust-style \n, \t, etc. so they don't reach the printer
+    -- as two literal characters.
     stripQuotes s = case T.uncons s of
       Just ('"', rest) -> case T.unsnoc rest of
-        Just (inside, '"') -> inside
+        Just (inside, '"') -> unescapeRust inside
         _                  -> s
       _ -> s
+    unescapeRust = T.pack . go . T.unpack
+    go []             = []
+    go ('\\':'n':xs)  = '\n' : go xs
+    go ('\\':'t':xs)  = '\t' : go xs
+    go ('\\':'r':xs)  = '\r' : go xs
+    go ('\\':'0':xs)  = '\0' : go xs
+    go ('\\':'"':xs)  = '"'  : go xs
+    go ('\\':'\\':xs) = '\\' : go xs
+    go (c:xs)         = c    : go xs
 
 -- | Map MIR binary operator names to Core operator names
 mirBinOpToName :: Text -> Text
@@ -295,8 +306,18 @@ mirBinOpToName op    = op
 translateTermExpr :: MirBody -> Set.Set Int -> MirTerminator -> Text -> Expr
 translateTermExpr body visited term _raw = case term of
   TermReturn ->
-    -- Return: the result is in _0
-    EVar (Name "_0" 0)
+    -- Return: the result is in _0.  For functions returning `()` the
+    -- return slot is never assigned by the MIR, so emit a literal 0
+    -- (the runtime's unit representation) instead of a dangling EVar.
+    let retLocal = case mirLocals body of
+          (l:_) -> Just l
+          []    -> Nothing
+        returnsUnit = case retLocal of
+          Just l -> localType l == "()"
+          Nothing -> False
+    in if returnsUnit
+       then ELit (LitInt 0)
+       else EVar (Name "_0" 0)
 
   TermGoto target ->
     -- Goto: inline the target block
@@ -313,11 +334,14 @@ translateTermExpr body visited term _raw = case term of
     -- Known Rust intrinsics are remapped to Frankenstein runtime names
     -- (e.g. core::str::<impl str>::len → str_len) so the emitter routes
     -- them through the kk_* runtime without applying the rust_ module
-    -- prefix or arity suffix.
-    let mappedName = remapRustIntrinsic funcName
-        funcExpr = EVar (Name mappedName 0)
-        argExprs = map parseCallArg argStrs
-        callExpr = EApp funcExpr argExprs
+    -- prefix or arity suffix.  Arguments::from_str is a thin wrapper —
+    -- elide it entirely and use the first arg directly so the
+    -- subsequent print_str call sees the string literal.
+    let argExprs = map parseCallArg argStrs
+        callExpr = case (funcName, argExprs) of
+          ("Arguments::<'_>::from_str", (a:_)) -> a
+          ("Arguments::<'_>::new_const", (a:_)) -> a
+          _ -> EApp (EVar (Name (remapRustIntrinsic funcName) 0)) argExprs
         -- Find the destination variable: look at the raw terminator
         -- _N = func(args) -> [return: bbM, ...]
         destName = findCallDest _raw
@@ -412,6 +436,13 @@ lookupBlock body idx =
 -- the user is expected to provide via FFI shim).
 remapRustIntrinsic :: Text -> Text
 remapRustIntrinsic n = case n of
-  "core::str::<impl str>::len" -> "str_len"
-  "core::str::len"             -> "str_len"
-  _                            -> n
+  "core::str::<impl str>::len"      -> "str_len"
+  "core::str::len"                  -> "str_len"
+  -- println!("...") expands to two MIR calls:
+  --   Arguments::<'_>::from_str(const "...") creates a thin Arguments
+  --     wrapper — elided at the bridge level (see TermCallSimple).
+  --   std::io::_print(args) does the actual print; remap to print_str
+  --     (no trailing newline — Rust's println! source already includes
+  --     it in the format string).
+  "std::io::_print"                 -> "print_str"
+  _                                 -> n

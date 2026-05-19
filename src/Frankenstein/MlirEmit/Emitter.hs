@@ -483,10 +483,24 @@ emitProgramText prog =
             ]
         else ""
       exprCallsPrint (EApp (EVar fn) _) =
-        nameText fn `elem` [ "print", "println_str", "putStrLn", "print_str" ]
+        nameText fn `elem`
+          [ "print", "println_str", "putStrLn", "print_str"
+          -- Mercury bridge synthesises a no-arg `main` alias that calls
+          -- the user's `main(io::di, io::uo) is det` predicate
+          -- (renamed to `main_io_impl` to avoid the alias collision,
+          -- then mangled by the Linker to `mercury_main_io_impl`).
+          -- That predicate threads through io.write_string etc., so
+          -- the wrapper must not print the alias's Int return value.
+          , "main_io_impl", "mercury_main_io_impl"
+          ]
       exprCallsPrint (EApp f args)       = exprCallsPrint f || any exprCallsPrint args
       exprCallsPrint (EDelay e)          = exprCallsPrint e
-      exprCallsPrint (ELet _ body)       = exprCallsPrint body
+      -- A `let _ = print_str("...") in ()` form (Rust's println! after
+      -- our bridge remap) was previously missed because we only checked
+      -- the body of the let, not the binder RHSs.  Check both.
+      exprCallsPrint (ELet bgs body)     =
+        exprCallsPrint body
+          || or [ exprCallsPrint (bindExpr b) | bg <- bgs, b <- bg ]
       exprCallsPrint (ECase _ bs)        = any (\(Branch _ _ b) -> exprCallsPrint b) bs
       exprCallsPrint (ELam _ body)       = exprCallsPrint body
       exprCallsPrint _                   = False
@@ -1658,12 +1672,22 @@ emitAppVarWith1 fn arg
         , "llvm.call @printf(%" <> fmtName <> ", %" <> argName <> ") vararg(!llvm.func<i32 (ptr, ...)>) : (!llvm.ptr, i64) -> i32"
         , "%" <> resultName <> " = arith.constant 0 : i64"
         ], resultName)
-  -- First-class string intrinsics
-  | n `elem` ["println_str", "putStrLn", "print_str"] = do
+  -- First-class string intrinsics.  println_str / putStrLn emit a
+  -- trailing newline; print_str writes the bytes verbatim.  Routing
+  -- them to the wrong runtime function produced a spurious extra
+  -- newline for Mercury's io.write_string (which embeds its own '\n').
+  | n `elem` ["println_str", "putStrLn"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "func.call @kk_println_str(%" <> argName <> ") : (i64) -> ()"
+        , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+  | n == "print_str" = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "func.call @kk_print_str(%" <> argName <> ") : (i64) -> ()"
         , "%" <> resultName <> " = arith.constant 0 : i64"
         ], resultName)
   | n `elem` ["str_len", "strlen", "bytes_len"] = do

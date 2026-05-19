@@ -536,16 +536,23 @@ splitTopLevel :: Text -> [Text]
 splitTopLevel = splitOperands
 
 splitOperands :: Text -> [Text]
-splitOperands t = go 0 T.empty (T.unpack t) []
+splitOperands t = go 0 False T.empty (T.unpack t) []
   where
-    go :: Int -> Text -> String -> [Text] -> [Text]
-    go _ acc [] result = result ++ [acc | not (T.null (T.strip acc))]
-    go depth acc ('(':cs) result = go (depth+1) (acc <> "(") cs result
-    go depth acc (')':cs) result = go (max 0 (depth-1)) (acc <> ")") cs result
-    go depth acc ('[':cs) result = go (depth+1) (acc <> "[") cs result
-    go depth acc (']':cs) result = go (max 0 (depth-1)) (acc <> "]") cs result
-    go 0 acc (',':cs) result = go 0 T.empty cs (result ++ [acc])
-    go depth acc (c:cs) result = go depth (acc <> T.singleton c) cs result
+    -- depth tracks paren/bracket nesting; inStr tracks "..." literals.
+    -- Without inStr, commas inside Rust string constants split the
+    -- operand (e.g. `const "Hello, World!\n"` became two ops).
+    go :: Int -> Bool -> Text -> String -> [Text] -> [Text]
+    go _ _     acc [] result = result ++ [acc | not (T.null (T.strip acc))]
+    go d True  acc ('\\':c:cs) result = go d True  (acc <> T.pack ['\\', c]) cs result
+    go d True  acc ('"':cs)    result = go d False (acc <> "\"") cs result
+    go d True  acc (c:cs)      result = go d True  (acc <> T.singleton c) cs result
+    go d False acc ('"':cs)    result = go d True  (acc <> "\"") cs result
+    go d False acc ('(':cs)    result = go (d+1) False (acc <> "(") cs result
+    go d False acc (')':cs)    result = go (max 0 (d-1)) False (acc <> ")") cs result
+    go d False acc ('[':cs)    result = go (d+1) False (acc <> "[") cs result
+    go d False acc (']':cs)    result = go (max 0 (d-1)) False (acc <> "]") cs result
+    go 0 False acc (',':cs)    result = go 0 False T.empty cs (result ++ [acc])
+    go d False acc (c:cs)      result = go d False (acc <> T.singleton c) cs result
 
 -- | Parse a MIR terminator string into a structured MirTerminator.
 --

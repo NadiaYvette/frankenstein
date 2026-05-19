@@ -717,25 +717,30 @@ details.
   effectful Haskell I/O (chained prints, reading stdin) still doesn't
   work, but pure programs that return Strings do.
 
-- **BRIDGE_rust_strings**: Rust bridge can measure strings but cannot print.
-  `str::len()` now works: the bridge remaps `core::str::<impl str>::len` to
-  the runtime's `str_len` (commit landing this), and the sanitizer encodes
-  `:` and `;` as `zi`/`zs` so MIR symbols with those characters survive
-  mlir-opt.  `println!(...)` still pulls in `core::fmt::Arguments::new`,
-  `core::fmt::rt::Argument`, and `std::io::_print` (all unshimmed) — Rust
-  programs that print rather than measure remain blocked on a larger
-  `core::fmt` shim.  See `examples/hello.rs`.
+- **BRIDGE_rust_strings**: Rust `println!(...)` now works for plain
+  string literals: the bridge elides `Arguments::<'_>::from_str` (a thin
+  Arguments wrapper) and remaps `std::io::_print` to the runtime's
+  `print_str`.  `splitOperands` tracks string-literal depth so commas
+  inside Rust string constants don't split the call arguments
+  (previously broke `const "Hello, World!"`), and `parseConstLit`
+  unescapes `\n`/`\t`/`\r`/`\0`/`\"`/`\\` from MIR string syntax.
+  `str::len()` still works (separate path: remap
+  `core::str::<impl str>::len` → `str_len`).  Still blocked: format
+  arguments (`println!("{}", x)`) — the `core::fmt::Arguments::new`
+  builder with placeholder-aware formatting remains unshimmed.  See
+  `examples/hello.rs`.
 
-- **BRIDGE_mercury_strings**: Mercury bridge runs standalone for simple
-  fact-form `is det` predicates as of the trailing-period fix in
-  `HldsParse.parseSingleGoal` (commit landing this).  Single-clause facts
-  (`main_int(13).`) and the synthesised `main` from
-  `:- pred main_int(int::out) is det.` now compile to a clean Frankenstein-Core
-  `let HeadVar__1 = 13 in HeadVar__1`.  See `examples/hello.m`.  Still
-  blocked: `:- pred main(io::di, io::uo) is det.` requires `io.write_string`
-  from Mercury's stdlib `io` module (large shim, not started); complex
-  ADT deconstruction (e.g. `examples/shape.m`) still hits HLDS `unify`
-  fallback paths.
+- **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
+  with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.
+  The bridge renames the user's `main` to `main_io_impl` and synthesises a
+  no-arg `main` alias; `io.write_string(S, !IO)` is routed to the runtime's
+  `print_str` (and `io.write_line`/`io.print_line` to `println_str`).
+  String literals on the RHS of HLDS unifications bind to `LitString`.
+  Trailing-period stripping in `parseSingleGoal` already let fact-form
+  `is det` predicates compile.  See `examples/hello.m`.  Still blocked:
+  Mercury's broader io module (read, file handles, formatted output)
+  and complex ADT deconstruction (e.g. `examples/shape.m`) still hits
+  HLDS `unify` fallback paths.
 
 ---
 

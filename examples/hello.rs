@@ -1,18 +1,12 @@
-// Phase A hello-world for the Rust bridge — degraded form.
+// Phase A hello-world for the Rust bridge.
 //
-// The Rust bridge does not yet shim std::io / core::fmt::Arguments, so
-// `println!("Hello, World!")` still fails to link (Arguments::new,
-// std::io::_print remain unresolved).  See ROADMAP →
-// BRIDGE_rust_strings.
-//
-// This degraded form computes the byte-length of "Hello, World!" via
-// `str::len`, returning the i64 through the proven main-returns-Int
-// wrapper.  The Rust bridge now remaps `core::str::<impl str>::len` to
-// the runtime's `kk_str_len`, so this compiles and runs end-to-end.
-//
-// Expected output: 13   (byte-length of "Hello, World!")
+// The bridge now recognises the println! macro's expanded MIR:
+//   Arguments::<'_>::from_str(const "...") → identity (elided)
+//   std::io::_print(arg) → print_str (the bridge's emitter routes
+//                                       this to kk_print_str)
+// and the splitOperands parser tracks string-literal depth so commas
+// inside Rust string literals don't split the call arguments.
 
-#[no_mangle]
-pub fn main() -> i64 {
-    "Hello, World!".len() as i64
+pub fn main() {
+    println!("Hello, World!");
 }

@@ -1,5 +1,16 @@
 # Plotkin-Style Evidence-Vector Dispatch (D-series)
 
+## Status
+
+**SHIPPED**.  D1-D5 all landed.  `--evidence=plotkin` is wired through
+the CLI, the runtime ABI exists in `runtime/kk_runtime.{c,h}`, and
+under `FRANKENSTEIN_EVIDENCE=plotkin` the bootstrap reaches strict
+`*** FIXED POINT REACHED ***` (26/26 modules byte-equal between
+stages 2 and 3, 21/21 E2E pass at every stage — 2026-05-19).
+This document preserves the design rationale.  Module-count numbers
+elsewhere in the doc reference the historical 24-module snapshot; the
+current bootstrap has 26 modules.
+
 ## Goal
 
 Replace Frankenstein's compile-time inline handler-binding (the default

@@ -2,15 +2,16 @@
 
 ## Status
 
-**Phase B2-medium**. Lays groundwork for B2-full (research-paper-quality
-implementation with runtime stack capture, benchmark suite, formal
-correctness proof).
+**SHIPPED — ROADMAP Phase 11 ✓** (handler classifier, CPS converter,
+evidence-pass dispatch with sentinel substitution, nondeterminism demo,
+K verification, bootstrap verification all complete).  This document
+preserves the design rationale; for the as-implemented state see
+ROADMAP Phase 11 §§11a-11f.
 
-This document captures the design decisions for native multi-shot
-effect handlers in Frankenstein. The implementation lands in pieces:
-classifier first, then CPS converter (pure, tested in isolation), then
-evidence-pass wiring, then runtime ABI, then nondet demo, then K
-verification.
+Originally drafted as a "Phase B2-medium" plan that staged the
+implementation in pieces: classifier first, then CPS converter (pure,
+tested in isolation), then evidence-pass wiring, then runtime ABI,
+then nondet demo, then K verification.  All pieces landed.
 
 ## Background
 

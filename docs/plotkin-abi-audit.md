@@ -451,3 +451,11 @@ The most promising specific bug class is **pattern-guard miscompilation**: Haske
 ### Closing call
 
 DB5 marked substantially complete. 21/21 E2E behavioral parity is the durable user-visible win. The 9-11/26 fixed-point gap is foundational pattern-compiler-correctness work — see `docs/strict-fixed-point.md` for the next investigation arc.
+
+---
+
+### Postscript (2026-05-19): fixed point reached
+
+DB6 closed at strict 26/26.  Two-step resolution: (a) clean rebuild fixed `driver.o` staleness (9-11/26 → 19/26), then (b) four `PostProcess.hs` fixes resolved the remaining 7 stage-3 emit failures (19/26 → 26/26).  See `docs/strict-fixed-point.md` for the resolution writeup; commit `9cd995f` for the PostProcess patches.
+
+The underlying pattern-match dispatch bug listed above is still latent — strict s2≡s3 is reached because PostProcess papers over the symptoms.  Minimum reproducer at `examples/db7_reproducers/wrong_default_body.hs`.  A source-level refactor of `classifyBranches.defaultBranch` was attempted same day and caused massive regression (26/26 → 3/26, 21/21 → 6/21), reverted.  Confirms the original "every refactor attempt triggers a different manifestation" observation.  Root-cause fix needs MLIR-level instrumentation, not source rewrites.

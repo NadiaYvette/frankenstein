@@ -36,4 +36,8 @@ pub fn main() {
     println!("[{:x>5}]", n);     //  [xxx42]   custom fill 'x'
     println!("[{:08x}]", id(255)); // [000000ff]  hex zero-padded
     println!("[{:5}]", s);       //  [hi   ]   strings default left-align
+    let long = "frankenstein";
+    println!("[{:.5}]", long);   //  [frank]   precision truncates strings
+    println!("[{:.5}]", n);      //  [00042]   precision = min digits (ints)
+    println!("[{:10.5}]", long); //  [frank     ]  width + precision
 }

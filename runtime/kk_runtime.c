@@ -637,7 +637,9 @@ typedef struct {
     int     plus_sign;
     int     alt_form;
     int     has_width;
+    int     has_precision;
     uint16_t width;
+    uint16_t precision;
 } kk_rust_spec_t;
 
 /* Is this value a "numeric" type per Rust's default-alignment rule? */
@@ -657,12 +659,43 @@ static int kk_rust_arg_is_numeric(int64_t v) {
     return 1;  /* raw i64 = number */
 }
 
-/* Print one arg with the given spec applied: render to buffer, then
- * pad to `width` using `fill` chars on the chosen alignment side. */
+/* Print one arg with the given spec applied: render to buffer, apply
+ * precision (truncate for strings; min-digits for ints), then pad to
+ * `width` using `fill` chars on the chosen alignment side. */
 static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
     size_t len = 0;
     char* rendered = kk_rust_render_one_arg(v, &len);
     if (!rendered) return;
+    int is_num = kk_rust_arg_is_numeric(v);
+    /* Apply precision before width.  For strings, precision is the
+     * max byte count (truncate).  For numerics, precision sets the
+     * minimum number of digits (zero-pad on the left between sign
+     * and digits).  Floats are not yet supported. */
+    if (spec->has_precision) {
+        if (!is_num) {
+            if (spec->precision < len) len = spec->precision;
+        } else {
+            /* Find digit start (skip leading sign). */
+            size_t digit_start = 0;
+            if (len > 0 && (rendered[0] == '-' || rendered[0] == '+'))
+                digit_start = 1;
+            size_t digit_count = len - digit_start;
+            if (spec->precision > digit_count) {
+                size_t extra = spec->precision - digit_count;
+                size_t new_len = len + extra;
+                char* padded = (char*)malloc(new_len + 1);
+                if (padded) {
+                    if (digit_start) padded[0] = rendered[0];
+                    for (size_t i = 0; i < extra; i++) padded[digit_start + i] = '0';
+                    memcpy(padded + digit_start + extra, rendered + digit_start, digit_count);
+                    padded[new_len] = 0;
+                    free(rendered);
+                    rendered = padded;
+                    len = new_len;
+                }
+            }
+        }
+    }
     if (!spec->has_width || spec->width <= len) {
         fwrite(rendered, 1, len, stdout);
         free(rendered);
@@ -670,7 +703,6 @@ static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
     }
     size_t pad = spec->width - len;
     int eff_align = spec->align;
-    int is_num = kk_rust_arg_is_numeric(v);
     if (eff_align == 3) {
         /* Default alignment: numeric → right, string → left. */
         eff_align = is_num ? 1 : 0;
@@ -712,24 +744,29 @@ static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
     free(rendered);
 }
 
-/* Decode 4 spec bytes into a kk_rust_spec_t.  Width comes separately. */
+/* Decode 4 spec bytes into a kk_rust_spec_t.  Width / precision come
+ * separately (their presence is signalled by the marker byte and
+ * the align byte's bits 3 / 4). */
 static void kk_rust_decode_spec(const unsigned char* sp, kk_rust_spec_t* out) {
     out->fill      = (char)sp[0];
     /* sp[1] reserved / always 0 */
     out->plus_sign = (sp[2] & 0x20) != 0;
     out->alt_form  = (sp[2] & 0x80) != 0;
     unsigned char a = sp[3];
-    /* Align: high nibble.  0=left, 2=right, 4=center, 6=default. */
-    switch ((a >> 4) & 0x0f) {
+    /* Alignment is encoded in bits 5–6 of the align byte:
+     *   00 = left, 01 = right, 10 = center, 11 = default. */
+    int align_bits = (a >> 5) & 0x3;
+    switch (align_bits) {
         case 0: out->align = 0; break;
-        case 2: out->align = 1; break;
-        case 4: out->align = 2; break;
-        case 6: out->align = 3; break;
-        default: out->align = 3; break;
+        case 1: out->align = 1; break;
+        case 2: out->align = 2; break;
+        case 3: out->align = 3; break;
     }
-    out->zero_pad  = (a & 0x01) != 0;
-    out->has_width = 0;
-    out->width     = 0;
+    out->zero_pad      = (a & 0x01) != 0;
+    out->has_width     = 0;
+    out->has_precision = (a & 0x10) != 0;
+    out->width         = 0;
+    out->precision     = 0;
 }
 
 int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
@@ -766,19 +803,32 @@ int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
             int64_t v = kk_args_extract(args_struct, arg_idx);
             kk_rust_print_one_arg(v);
             arg_idx++;
-        } else if (b == 0xc1 || b == 0xc3) {            /* placeholder + spec */
+        } else if ((b & 0xC0) == 0xC0 && (b & 0x01) != 0) {
+            /* Placeholder with spec.  Marker byte 0xc{1,3,5,7}:
+             *   bit 0 = has-spec (always 1 here)
+             *   bit 1 = has-width (extra 2 bytes after spec)
+             *   bit 2 = has-precision-value (extra 2 bytes after width) */
+            int has_width = (b & 0x02) != 0;
+            int has_prec_value = (b & 0x04) != 0;
             int64_t v = kk_args_extract(args_struct, arg_idx);
             arg_idx++;
             kk_rust_spec_t spec;
-            int spec_bytes = 4;
-            if (p + spec_bytes > end) { p = end; continue; }
+            if (p + 4 > end) { p = end; continue; }
             kk_rust_decode_spec(p, &spec);
-            p += spec_bytes;
-            if (b == 0xc3 && p + 2 <= end) {
+            p += 4;
+            if (has_width && p + 2 <= end) {
                 spec.has_width = 1;
                 spec.width = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
                 p += 2;
             }
+            if (has_prec_value && p + 2 <= end) {
+                spec.has_precision = 1;
+                spec.precision = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+                p += 2;
+            }
+            /* `{:.0}` is encoded as 0xc1 (no precision-value bit) with
+             * the align byte's precision-flag bit set; kk_rust_decode_spec
+             * already set has_precision=1 and precision=0 for that case. */
             kk_rust_print_arg_with_spec(v, &spec);
         } else {                                        /* literal piece, len=b */
             size_t len = b;

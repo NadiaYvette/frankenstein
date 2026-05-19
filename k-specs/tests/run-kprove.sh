@@ -135,7 +135,7 @@ case "$FILTER" in
       bridge)    run_claims "bridge-claims.k (67 claims)" "$BRIDGE_CLAIMS" "$ALL_CLAIMS_DEF" ;;
       evidence)  run_claims "evidence-claims.k (15 claims)" "$EVIDENCE_CLAIMS" "$ALL_CLAIMS_DEF" ;;
       linker)    run_claims "linker-claims.k (18 claims)" "$LINKER_CLAIMS" "$ALL_CLAIMS_DEF" ;;
-      effectopt) run_claims "effectopt-claims.k (41 claims)" "$EFFECTOPT_CLAIMS" "$ALL_CLAIMS_DEF" ;;
+      effectopt) run_claims "effectopt-claims.k (34 claims)" "$EFFECTOPT_CLAIMS" "$ALL_CLAIMS_DEF" ;;
     esac
     ;;
   all)
@@ -145,7 +145,7 @@ case "$FILTER" in
     run_claims "bridge-claims.k (67 claims)" "$BRIDGE_CLAIMS" "$ALL_CLAIMS_DEF"
     run_claims "evidence-claims.k (15 claims)" "$EVIDENCE_CLAIMS" "$ALL_CLAIMS_DEF"
     run_claims "linker-claims.k (18 claims)" "$LINKER_CLAIMS" "$ALL_CLAIMS_DEF"
-    run_claims "effectopt-claims.k (41 claims)" "$EFFECTOPT_CLAIMS" "$ALL_CLAIMS_DEF"
+    run_claims "effectopt-claims.k (34 claims)" "$EFFECTOPT_CLAIMS" "$ALL_CLAIMS_DEF"
     ;;
   *)
     echo "Unknown filter: $FILTER"

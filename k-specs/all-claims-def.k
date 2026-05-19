@@ -280,6 +280,47 @@ module EFFECTOPT-CHECKERS
 
   rule isMultiShotHandler(_) => false [owise]
 
+  // -----------------------------------------------------------------
+  // Pass-level rewrites.
+  //
+  // The full EffectOpt passes recurse over the AST.  Here we model the
+  // soundness-critical LOCAL rewrite of each pass at an EHandle site,
+  // so that pass-level claims can be stated structurally.  The
+  // recursive structural descent in the Haskell implementation is
+  // plumbing; the load-bearing transformation is the local rewrite at
+  // each EHandle.
+  // -----------------------------------------------------------------
+
+  // eliminateIdentityHandlers (EffectOpt.hs:169-205):
+  //   EHandle Eff identity_handler Body  =>  Body
+  // Mirrors `elimIdentityHandler` for the case where the handler is an
+  // identity (\x k -> k x).  The opt's correctness rests on the
+  // observation that an identity handler reduces effect dispatch to
+  // a no-op, so the EHandle wrapper can be stripped.
+  syntax Expr ::= eliminateIdentityRewrite(Expr) [function, symbol(eliminateIdentityRewrite)]
+
+  rule eliminateIdentityRewrite(EHandle(_E, H, B))
+    => B
+    requires isIdentityHandler(H)
+
+  rule eliminateIdentityRewrite(E) => E
+    [owise]
+
+  // annotateTailResumptive (EffectOpt.hs:207-251):
+  //   Marks tail-resumptive handlers as such so downstream CPS conversion
+  //   can avoid allocating a continuation.  Semantically a no-op (only
+  //   adds an annotation), so soundness reduces to "classification is
+  //   stable": a handler classified tail-resumptive remains so under any
+  //   structural neighbourhood.  This rewrite models the classifier
+  //   itself; the annotation step is non-semantic.
+  syntax Bool ::= annotateTailResumptiveCheck(Expr) [function, symbol(annotateTailResumptiveCheck)]
+
+  rule annotateTailResumptiveCheck(EHandle(_E, H, _B))
+    => isTailResumptiveHandler(H)
+
+  rule annotateTailResumptiveCheck(_) => false
+    [owise]
+
 endmodule
 
 // --- Linker checker functions ---

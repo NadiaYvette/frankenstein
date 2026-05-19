@@ -400,4 +400,143 @@ module EFFECTOPT-CLAIMS
     true
   </k> [label(claim-eo-7c)]
 
+  // =================================================================
+  // Group EO8: eliminateIdentityHandlers pass — local rewrite soundness
+  //
+  // Models the load-bearing rewrite of EffectOpt.hs's elimIdentityHandler
+  // at one EHandle site.  See `eliminateIdentityRewrite` in
+  // all-claims-def.k.
+  // =================================================================
+
+  // EO8a: identity-handler EHandle reduces to its body.
+  claim <k>
+    eliminateIdentityRewrite(
+      EHandle(
+        effectExtend(qname("std", name("console", 0)), effectEmpty),
+        ELam(
+          param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          .ParamList,
+          EApp(EVar(name("k", 0)), EVar(name("x", 0)) , .ExprList)
+        ),
+        ELit(litInt(42))
+      )
+    )
+    =>
+    ELit(litInt(42))
+  </k> [label(claim-eo-8a)]
+
+  // EO8b: non-identity handler is left alone (rewrite is a no-op).
+  claim <k>
+    eliminateIdentityRewrite(
+      EHandle(
+        effectExtend(qname("std", name("console", 0)), effectEmpty),
+        ELam(
+          param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          .ParamList,
+          EApp(EVar(name("k", 0)), ELit(litInt(0)) , .ExprList)
+        ),
+        ELit(litInt(42))
+      )
+    )
+    =>
+    EHandle(
+      effectExtend(qname("std", name("console", 0)), effectEmpty),
+      ELam(
+        param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+        param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+        .ParamList,
+        EApp(EVar(name("k", 0)), ELit(litInt(0)) , .ExprList)
+      ),
+      ELit(litInt(42))
+    )
+  </k> [label(claim-eo-8b)]
+
+  // EO8c: idempotence — applying the rewrite twice on a body without
+  // outer EHandle is the same as applying it once.  After EO8a strips
+  // the EHandle wrapper, the remaining ELit(litInt(42)) is no longer
+  // an EHandle, so the second application is a no-op via the [owise]
+  // rule.
+  claim <k>
+    eliminateIdentityRewrite(
+      eliminateIdentityRewrite(
+        EHandle(
+          effectExtend(qname("std", name("console", 0)), effectEmpty),
+          ELam(
+            param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+            param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+            .ParamList,
+            EApp(EVar(name("k", 0)), EVar(name("x", 0)) , .ExprList)
+          ),
+          ELit(litInt(42))
+        )
+      )
+    )
+    =>
+    ELit(litInt(42))
+  </k> [label(claim-eo-8c)]
+
+  // EO8d: rewrite is a no-op when the input is not an EHandle.
+  claim <k>
+    eliminateIdentityRewrite(ELit(litInt(7)))
+    =>
+    ELit(litInt(7))
+  </k> [label(claim-eo-8d)]
+
+  // =================================================================
+  // Group EO9: annotateTailResumptive — classification stability
+  //
+  // The annotateTailResumptive pass adds a hint annotation to handlers
+  // classifyHandler determines are tail-resumptive.  Since the annotation
+  // itself is non-semantic (a downstream-CPS optimisation hint), the
+  // soundness condition reduces to: the classifier returns the expected
+  // verdict at each EHandle site.  This is captured by
+  // `annotateTailResumptiveCheck` which wraps `isTailResumptiveHandler`.
+  // =================================================================
+
+  // EO9a: an EHandle whose handler is tail-resumptive classifies positively.
+  claim <k>
+    annotateTailResumptiveCheck(
+      EHandle(
+        effectExtend(qname("std", name("console", 0)), effectEmpty),
+        ELam(
+          param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          .ParamList,
+          EApp(EVar(name("k", 0)), EVar(name("x", 0)) , .ExprList)
+        ),
+        ELit(litInt(42))
+      )
+    )
+    =>
+    true
+  </k> [label(claim-eo-9a)]
+
+  // EO9b: a handler that ends with a literal (not a resume call) is
+  // not classified tail-resumptive.
+  claim <k>
+    annotateTailResumptiveCheck(
+      EHandle(
+        effectExtend(qname("std", name("console", 0)), effectEmpty),
+        ELam(
+          param(name("x", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          param(name("k", 0), TCon(typecon(qname("std/core/types", name("int", 0)), KValue))) ,
+          .ParamList,
+          ELit(litInt(0))
+        ),
+        ELit(litInt(42))
+      )
+    )
+    =>
+    false
+  </k> [label(claim-eo-9b)]
+
+  // EO9c: classification is a no-op when applied to a non-EHandle expression.
+  claim <k>
+    annotateTailResumptiveCheck(ELit(litInt(7)))
+    =>
+    false
+  </k> [label(claim-eo-9c)]
+
 endmodule

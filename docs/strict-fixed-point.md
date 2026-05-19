@@ -2,7 +2,29 @@
 
 **Goal**: drive Phase 10's strict MLIR byte-equality check from the current 9-11/26 up to 26/26.
 
-**Status**: DB5 closed at 21/21 E2E parity across stages. The 17-ish modules that fail the strict fixed-point check are E2E-correct; the gap is structural emit divergence between stage 2 and stage 3 binaries that doesn't change behavior.
+**Status**: ✓ ACHIEVED 2026-05-19. Bootstrap reports `*** FIXED POINT REACHED ***` — Stage 2 vs Stage 3 byte-equal on 26/26 modules, 21/21 E2E PASS at both stages.
+
+## Resolution summary
+
+The arc closed in two moves:
+
+1. **Clean rebuild fixed driver.o staleness** (9-11/26 → 19/26). The on-disk `self-host/obj/driver.o` had been linked from an older `driver.c` that didn't call the evidence pass; stage 1 and stage 2 binaries silently skipped plotkin while stage 3 (linked at a different time) applied it. `bash self-host/build.sh` rebuilds `driver.o` unconditionally and brought all three stages onto the same driver. See `memory/bootstrap_state_drift.md` for the diagnostic recipe.
+
+2. **Four PostProcess.hs bugs fixed** (19/26 → 26/26, commit `9cd995f`). The remaining 7 stage-3 emit failures were all `--postprocess-mlir` producing invalid rewrites:
+   - **ReExtractFix scope violation** — accepted aliases anywhere in the function, including ones whose `kk_field` producer's enclosing `scf.if` had already closed. Fix: walk brace balance char-by-char from producer to call site, try each candidate alias.
+   - **hasDecl/hasWrapper too permissive** — `T.isInfixOf` on `@<name>` matched comments and use sites, suppressing the wrapper injection. Fix: require the `func.func ... @<name>` definition syntax.
+   - **findPapWrapper param counter** — filtered `(== "i64")` on segments like `"%clos: i64"`, always returning 0. Fix: match `": i64" `T.isSuffixOf`` per segment.
+   - **ExternPapFix arity off-by-one** — wrapper has `arity + 1` i64 params (closure + args) but mkPapBlock was called with `arity`. Fix: pass `arity + 1`.
+
+The QC differential test driver (`tools/diff-tester/`, commit `7159234`) was the major enabling lever: it characterized the divergences universally on small generated programs (clean-rebuild experiments showed 100/100 stage1≡stage2 and 100/100 stage2≡stage3 well before the bootstrap-scale fixes landed), which proved the remaining 7 failures were purely emit-pipeline mlir-opt rejection, not strict-equality compiler bugs.
+
+## Underlying note
+
+These fixes papered over the deeper bug ("Self-host runtime: pattern-match dispatch on ADT constructors is systematically wrong" — see Phase 9 Outstanding Issues in ROADMAP.md) by making PostProcess robust to its symptoms. The pattern-compiler root cause is still latent; the host-compiled `frankenstein` binary (which runs PostProcess) is architecturally immune.
+
+---
+
+# Historical record (pre-resolution)
 
 ## What we know
 

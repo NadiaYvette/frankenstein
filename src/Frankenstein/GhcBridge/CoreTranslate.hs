@@ -70,7 +70,8 @@ import qualified Data.Word as W
 translateProgram :: Text -> CoreProgram -> [TyCon] -> Either Text F.Program
 translateProgram modName binds tyCons =
   let rawDefs = filter (not . isDictDef) (concatMap translateTopBind binds)
-      defs = applyMainIfFunctionAlias rawDefs
+      disambigDefs = disambiguateLetBindings rawDefs
+      defs = applyMainIfFunctionAlias disambigDefs
       -- Merge locally-defined TyCons with those referenced in expressions
       -- (e.g. [], Bool, Maybe from the standard library)
       referencedTyCons = collectReferencedTyCons binds
@@ -82,6 +83,133 @@ translateProgram modName binds tyCons =
     , F.progData    = dataDecls
     , F.progEffects = []
     }
+
+-- | Rename let-bound helper names that collide across binding sites.
+--
+-- GHC's simplifier sometimes shares the same Unique for `let go1 = ...`
+-- bindings introduced in different `deriving Show`-generated $cshowsPrec
+-- bodies and in main.  The bodies *look* identical (same shape) but
+-- their free-variable contexts differ — one captures the outer `z`
+-- thunk, the other doesn't.  Our MLIR emitter's lambda-lifter
+-- deduplicates by name, so it lifts only one version with one
+-- capture set, then call sites in the other context emit the wrong
+-- number of args.
+--
+-- Fix: every let-binding gets a fresh Unique by adding a per-site
+-- counter offset.  All in-scope EVar references inside the let body
+-- are rewritten to the renamed Name.  The counter is threaded so
+-- each binding-site gets a globally distinct offset.
+disambiguateLetBindings :: [F.Def] -> [F.Def]
+disambiguateLetBindings defs =
+  let (defs', _) = foldl step ([], 1 :: Int) defs
+  in reverse defs'
+  where
+    -- Per-def: walk the body with an empty rename env and the running counter.
+    step (acc, ctr) d =
+      let (expr', ctr') = walk Map.empty ctr (F.defExpr d)
+      in (d { F.defExpr = expr' } : acc, ctr')
+
+    -- env :: Map (oldText, oldUnique) -> renamedName
+    walk :: Map (Text, Int) F.Name -> Int -> F.Expr -> (F.Expr, Int)
+    walk env c0 expr = case expr of
+      F.ELet bgs body ->
+        -- For each binding name, generate a renamed version.  Pair
+        -- (origName, renamedName) so we can update both bindName and
+        -- in-scope references.
+        let bindPairs =
+              [ (F.bindName b, renameTag c (F.bindName b))
+              | (bg, c) <- zip bgs [c0 ..], b <- bg ]
+            -- counter advances by total number of bindings in this let
+            totalBinds = sum (map length bgs)
+            c1 = c0 + totalBinds
+            env' = foldr (\(orig, new) m ->
+                            Map.insert (F.nameText orig, F.nameUnique orig) new m)
+                         env bindPairs
+            renameLookup orig =
+              Map.findWithDefault orig (F.nameText orig, F.nameUnique orig)
+                                       (Map.fromList
+                                          [ ((F.nameText o, F.nameUnique o), n)
+                                          | (o, n) <- bindPairs ])
+            (bgs', c2) = walkBindGroups env' c1 renameLookup bgs
+            (body', c3) = walk env' c2 body
+        in (F.ELet bgs' body', c3)
+      F.EVar n ->
+        case Map.lookup (F.nameText n, F.nameUnique n) env of
+          Just n' -> (F.EVar n', c0)
+          Nothing -> (F.EVar n, c0)
+      F.EApp f args ->
+        let (f', c1) = walk env c0 f
+            (args', c2) = walkList env c1 args
+        in (F.EApp f' args', c2)
+      F.ELam ps body ->
+        let (body', c1) = walk env c0 body
+        in (F.ELam ps body', c1)
+      F.ECase scrut bs ->
+        let (scrut', c1) = walk env c0 scrut
+            (bs', c2) = walkBranches env c1 bs
+        in (F.ECase scrut' bs', c2)
+      F.ETypeApp e' ts ->
+        let (e'', c1) = walk env c0 e' in (F.ETypeApp e'' ts, c1)
+      F.ETypeLam tvs e' ->
+        let (e'', c1) = walk env c0 e' in (F.ETypeLam tvs e'', c1)
+      F.EPerform q es ->
+        let (es', c1) = walkList env c0 es in (F.EPerform q es', c1)
+      F.EHandle q h b ->
+        let (h', c1) = walk env c0 h
+            (b', c2) = walk env c1 b
+        in (F.EHandle q h' b', c2)
+      F.ERetain e' ->
+        let (e'', c1) = walk env c0 e' in (F.ERetain e'', c1)
+      F.ERelease e' ->
+        let (e'', c1) = walk env c0 e' in (F.ERelease e'', c1)
+      F.EDrop e' ->
+        let (e'', c1) = walk env c0 e' in (F.EDrop e'', c1)
+      F.EReuse a b ->
+        let (a', c1) = walk env c0 a
+            (b', c2) = walk env c1 b
+        in (F.EReuse a' b', c2)
+      F.EDelay e' ->
+        let (e'', c1) = walk env c0 e' in (F.EDelay e'', c1)
+      F.EForce e' ->
+        let (e'', c1) = walk env c0 e' in (F.EForce e'', c1)
+      other -> (other, c0)
+
+    walkList :: Map (Text, Int) F.Name -> Int -> [F.Expr] -> ([F.Expr], Int)
+    walkList env c0 = foldr step' ([], c0)
+      where step' e (acc, c) = let (e', c') = walk env c e in (e' : acc, c')
+
+    walkBranches env c0 = foldr step' ([], c0)
+      where
+        step' (F.Branch p g body) (acc, c) =
+          let (body', c1) = walk env c body
+              (g', c2) = case g of
+                Nothing -> (Nothing, c1)
+                Just ge -> let (ge', c2') = walk env c1 ge in (Just ge', c2')
+          in (F.Branch p g' body' : acc, c2)
+
+    -- Bump a Name's Unique by a counter-based offset.  Offset is large
+    -- enough that collisions with original GHC Uniques are unlikely
+    -- (GHC Uniques are dense in the 10⁹-10¹⁰ range; we shift by
+    -- 5×10¹¹ per site).
+    renameTag :: Int -> F.Name -> F.Name
+    renameTag c n = n { F.nameUnique = F.nameUnique n + c * 500000000000 }
+
+    -- Walk binding groups, replacing each bindName via the rename
+    -- lookup and recursing into bindExpr with the extended env.
+    walkBindGroups :: Map (Text, Int) F.Name -> Int -> (F.Name -> F.Name)
+                   -> [F.BindGroup] -> ([F.BindGroup], Int)
+    walkBindGroups env c0 renameLookup bgs =
+      let walkBind (bsAcc, c) b =
+            let (e', c') = walk env c (F.bindExpr b)
+            in (b { F.bindName = renameLookup (F.bindName b)
+                  , F.bindExpr = e' } : bsAcc, c')
+          walkBG c bg =
+            let (bsRev, cFinal) = foldl walkBind ([], c) bg
+            in (reverse bsRev, cFinal)
+          stepBG (acc, c) bg =
+            let (bg', c') = walkBG c bg in (bg' : acc, c')
+          (bgsRev, cEnd) = foldl stepBG ([], c0) bgs
+      in (reverse bgsRev, cEnd)
 
 -- | GHC compiles `main :: IO () = do { … }` to two defs:
 --     main$N :: State# RealWorld -> (# State# RealWorld, () #)

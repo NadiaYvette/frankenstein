@@ -751,13 +751,13 @@ details.
       (derived methods) while still filtering `$cshowList` (whose body
       references `showList__`, currently unshimmed).
 
-  Known limitation: mixing enum and with-args ADTs in the same module
-  (e.g. `data Color = Red | Green | Blue` + `data Point = Point Int Int`
-  in one file) triggers an mlir-opt arity error.  The lambda-lifter
-  promotes `go1`/`go` helpers from the `$cshowsPrec` bodies to top-level
-  with captured-arg signatures (2-arg), but at call sites in the enum
-  branches the captures aren't materialised, so the call passes only
-  1 arg.  Workaround: split each ADT into its own module.
+  Mixed-ADT modules now work: `disambiguateLetBindings` post-pass in
+  `Frankenstein.GhcBridge.CoreTranslate` gives every let-binding a
+  fresh Unique by adding a per-site counter offset, so no two
+  binding sites can collide.  Previously the lambda-lifter
+  deduplicated by name and picked the capture set from whichever
+  site it saw first; call sites in the other context then emitted
+  the wrong argument count.
 
   Show for tuples works for shapes including 2-tuples, n-tuples
   (3, 4, 5, …), tuples with negative numbers, and nested tuples

@@ -99,6 +99,7 @@ echo ""
 echo "--- Show / print derived ADTs ---"
 run_hello "show-derived"      "Node (Node Leaf 1 Leaf) 2 (Node Leaf 3 Leaf)" "examples/show_derived.hs"
 run_hello "show-tuple"        $'(1,2)\n(1,2,3)\n(-5,100)\n(42,0,-7,13)\n((7,13),42)' "examples/show_tuple.hs"
+run_hello "show-mixed"        $'Red\nGreen\nBlue\nPoint 3 4\nCircle 10\nRectangle 7 13\nSquare 5' "examples/show_mixed.hs"
 
 echo ""
 echo "========================================"

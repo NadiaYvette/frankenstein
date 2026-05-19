@@ -328,14 +328,15 @@ data DiffResult
   | OrganFailed !String
   deriving Show
 
-data Mode = HostVsStage1 | Stage1VsStage2 | Stage2VsStage3
+data Mode = HostVsStage1 | Stage1VsStage2 | Stage2VsStage3 | HostRuntimeVsStage2Runtime
   deriving (Eq, Show)
 
 parseMode :: String -> Maybe Mode
-parseMode "host-vs-stage1"   = Just HostVsStage1
-parseMode "stage1-vs-stage2" = Just Stage1VsStage2
-parseMode "stage2-vs-stage3" = Just Stage2VsStage3
-parseMode _                  = Nothing
+parseMode "host-vs-stage1"             = Just HostVsStage1
+parseMode "stage1-vs-stage2"           = Just Stage1VsStage2
+parseMode "stage2-vs-stage3"           = Just Stage2VsStage3
+parseMode "host-runtime-vs-stage2-runtime" = Just HostRuntimeVsStage2Runtime
+parseMode _                            = Nothing
 
 data Tools = Tools
   { toolFrkBin    :: FilePath
@@ -431,9 +432,95 @@ runDifferential mode tools prog =
       Stage2VsStage3 -> compareTwoStages tools dir src
                           (must "stage2" (toolStage2Bin tools))
                           (must "stage3" (toolStage3Bin tools))
+      HostRuntimeVsStage2Runtime -> compareRuntime tools dir src
+                                      (must "stage2" (toolStage2Bin tools))
   where
     must lbl Nothing  = error ("required " ++ lbl ++ " binary not found")
     must _   (Just p) = p
+
+-- Runtime mode: compile and run the program via host and via stage 2; compare
+-- exit codes (since generated programs have main :: Int and the frankenstein
+-- runtime maps that to the process exit code).  Differs from the MLIR-equality
+-- modes because it catches semantic miscompilations regardless of MLIR-level
+-- divergence — the right test for chasing the pattern-match dispatch bug.
+compareRuntime :: Tools -> FilePath -> FilePath -> FilePath -> IO DiffResult
+compareRuntime tools dir src s2Bin = do
+  -- Host: produce a native binary via --compile.
+  let hostBin = dir </> "host-bin"
+  (xh, hOut, hErr) <- readProcessWithExitCode (toolFrkBin tools)
+    [src, "--no-simplify", "--compile", "-o", hostBin] ""
+  if xh /= ExitSuccess
+    then return (HostFailed (hErr ++ "\n" ++ hOut))
+    else do
+      hostOk <- doesFileExist hostBin
+      if not hostOk
+        then return (HostFailed "host --compile did not produce a binary")
+        else do
+          (xhr, _, _) <- readProcessWithExitCode hostBin [] ""
+          let hostExit = case xhr of
+                ExitSuccess   -> 0
+                ExitFailure n -> n
+          -- Self-host stage 2: emit organ -> compile via s2 -> postprocess -> mlir-opt + clang.
+          o <- emitOrgan tools src
+          case o of
+            Left e -> return (OrganFailed e)
+            Right json -> do
+              let jsonPath = dir </> "input.organ.json"
+                  s2Mlir   = dir </> "s2.mlir"
+                  s2Ll     = dir </> "s2.ll"
+                  s2Obj    = dir </> "s2.o"
+                  s2Bin'   = dir </> "s2-bin"
+              writeFile jsonPath json
+              (xs, sOut, sErr) <- readProcessWithExitCode s2Bin
+                [jsonPath, "--no-perceus", "-o", s2Mlir] ""
+              if xs /= ExitSuccess
+                then return (Stage1Failed ("s2 emit: " ++ sErr ++ "\n" ++ sOut))
+                else do
+                  (xp, _, pErr) <- readProcessWithExitCode (toolFrkBin tools)
+                    ["--postprocess-mlir", s2Mlir] ""
+                  if xp /= ExitSuccess
+                    then return (Stage1Failed ("postprocess: " ++ pErr))
+                    else do
+                      -- mlir-opt | mlir-translate -> s2.ll
+                      let optArgs = ["--allow-unregistered-dialect"
+                                    ,"--convert-scf-to-cf"
+                                    ,"--convert-arith-to-llvm"
+                                    ,"--convert-cf-to-llvm"
+                                    ,"--convert-func-to-llvm"
+                                    ,"--reconcile-unrealized-casts"
+                                    , s2Mlir]
+                      (xo, optOut, optErr) <- readProcessWithExitCode "mlir-opt" optArgs ""
+                      if xo /= ExitSuccess
+                        then return (Stage1Failed ("mlir-opt: " ++ optErr))
+                        else do
+                          (xt, llOut, tErr) <- readProcessWithExitCode
+                            "mlir-translate" ["--mlir-to-llvmir"] optOut
+                          if xt /= ExitSuccess
+                            then return (Stage1Failed ("mlir-translate: " ++ tErr))
+                            else do
+                              writeFile s2Ll llOut
+                              (xc, _, cErr) <- readProcessWithExitCode "clang"
+                                ["-c", "-o", s2Obj, s2Ll] ""
+                              if xc /= ExitSuccess
+                                then return (Stage1Failed ("clang -c: " ++ cErr))
+                                else do
+                                  (xl, _, lErr) <- readProcessWithExitCode "clang"
+                                    ["-o", s2Bin', s2Obj
+                                    , "self-host/obj/kk_rt_standalone.o"
+                                    , "self-host/obj/kk_arena_standalone.o"
+                                    , "self-host/obj/kk_cycle_standalone.o"
+                                    , "-lm"] ""
+                                  if xl /= ExitSuccess
+                                    then return (Stage1Failed ("clang link: " ++ lErr))
+                                    else do
+                                      (xrr, _, _) <- readProcessWithExitCode s2Bin' [] ""
+                                      let s2Exit = case xrr of
+                                            ExitSuccess   -> 0
+                                            ExitFailure n -> n
+                                          tag :: BS.ByteString -> BS.ByteString -> DiffResult
+                                          tag h s = if h == s then Agree else Diverge h s
+                                      return (tag (BSC.pack (show hostExit))
+                                                  (BSC.pack (show s2Exit)))
 
 compareTwoStages :: Tools -> FilePath -> FilePath -> FilePath -> FilePath
                  -> IO DiffResult
@@ -500,6 +587,29 @@ isInfixOfStr needle = go
            | needle `isPrefixOf` hay    = True
            | otherwise                  = go (drop 1 hay)
 
+-- | Classify a failure message so cluster fingerprints stay short and
+--   semantic.  The compiler-tool exit paths produce wildly different
+--   error text (mlir-opt diagnostics, clang link errors, GHC syntax
+--   errors); we pull out a 1-line category and trim.
+classifyFail :: String -> String
+classifyFail err =
+  let firstLine = take 1 (lines err)
+      stem = case firstLine of
+        []    -> "(empty)"
+        (l:_) -> l
+      cat
+        | "mlir-opt"        `isInfixOfStr` err = "mlir-opt"
+        | "mlir-translate"  `isInfixOfStr` err = "mlir-translate"
+        | "clang -c"        `isInfixOfStr` err = "clang-compile"
+        | "clang link"      `isInfixOfStr` err = "clang-link"
+        | "use of undeclared SSA value name" `isInfixOfStr` err = "undeclared-SSA"
+        | "reference to undefined function"  `isInfixOfStr` err = "undefined-func"
+        | "reference to function with mismatched type" `isInfixOfStr` err = "type-mismatch"
+        | "s2 emit"         `isInfixOfStr` err = "s2-emit"
+        | "postprocess"     `isInfixOfStr` err = "postprocess"
+        | otherwise = "other"
+  in cat ++ ": " ++ take 120 stem
+
 -- Strip per-program-unique noise from a line so that semantically-identical
 -- diffs in different programs share a fingerprint.
 normalizeLine :: BS.ByteString -> BS.ByteString
@@ -535,9 +645,19 @@ runBatch mode tools n seedBase = do
               return (HostFailed ("exception: " ++ show e))
     case res of
       Agree -> modifyIORef' stats (\s -> s { sAgree = sAgree s + 1 })
-      HostFailed _    -> modifyIORef' stats (\s -> s { sHostFailed   = sHostFailed s + 1 })
+      HostFailed e    -> do
+        modifyIORef' stats (\s -> s { sHostFailed   = sHostFailed s + 1 })
+        let fp = "[host-failed] " ++ classifyFail e
+        modifyIORef' divs (Map.insertWith
+          (\(_, np) (k, op) -> (k + 1, if progSize np < progSize op then np else op))
+          fp (1, prog))
       OrganFailed _   -> modifyIORef' stats (\s -> s { sOrganFailed  = sOrganFailed s + 1 })
-      Stage1Failed _  -> modifyIORef' stats (\s -> s { sStage1Failed = sStage1Failed s + 1 })
+      Stage1Failed e  -> do
+        modifyIORef' stats (\s -> s { sStage1Failed = sStage1Failed s + 1 })
+        let fp = "[stage1-failed] " ++ classifyFail e
+        modifyIORef' divs (Map.insertWith
+          (\(_, np) (k, op) -> (k + 1, if progSize np < progSize op then np else op))
+          fp (1, prog))
       Diverge h s -> do
         modifyIORef' stats (\st -> st { sDiverge = sDiverge st + 1 })
         let fp = diffFingerprint h s
@@ -643,5 +763,7 @@ main = do
       error "stage1-vs-stage2 requested but stage 2 binary missing"
     Stage2VsStage3 | toolStage2Bin tools == Nothing || toolStage3Bin tools == Nothing ->
       error "stage2-vs-stage3 requested but stage 2 or stage 3 binary missing"
+    HostRuntimeVsStage2Runtime | toolStage2Bin tools == Nothing ->
+      error "host-runtime-vs-stage2-runtime requested but stage 2 binary missing"
     _ -> return ()
   runBatch (argMode a) tools (argN a) (argSeed a)

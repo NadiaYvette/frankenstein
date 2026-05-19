@@ -73,10 +73,10 @@ run_hello() {
 echo "--- Native string output (full string ABI) ---"
 run_hello "hello-koka"        "Hello, World!" "examples/hello.kk"
 run_hello "hello-python"      "Hello, world"  "examples/hello.py"
+run_hello "hello-haskell"     "Hello, World!" "examples/hello.hs"
 
 echo ""
 echo "--- Degraded to Int (string-ABI gap; routes through printf wrapper) ---"
-run_hello "hello-haskell"     "13"            "examples/hello.hs"
 run_hello "hello-rust"        "13"            "examples/hello.rs"
 
 # Clean Mercury temp dirs between runs

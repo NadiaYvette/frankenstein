@@ -704,15 +704,18 @@ details.
   in the self-hosted binary non-deterministically corrupts characters
   (closure dispatch or UTF-8 iteration). Mitigated by `A_sanitize_shim.c`.
 
-- **BRIDGE_haskell_strings**: GHC bridge cannot print strings. `putStrLn`
-  inlines to `hPutStr stdout`, pulling in `GHC.Internal.IO.Handle.FD/stdout`
-  and `GHC.Internal.IO.Handle.Text/hPutStr2` which the runtime does not shim.
-  `main :: String` does not route through `kk_println_str` because the bridge
-  translates `String` (i.e. `[Char]`) to a cons-list and `returnsStringType`
-  in the emitter checks for the `string` TCon. Workaround: `examples/hello.hs`
-  uses `main :: Int = myLength "Hello, World!"` to exercise the string-literal
-  *allocation* path (unpackCString# warnings appear but compile succeeds).
-  Captured by `test-hellos.sh` (Phase A test driver).
+- **BRIDGE_haskell_strings**: `main :: String` now prints natively as of
+  the `kk_println_haskell_chars` runtime helper (commit landing this).
+  The emitter detects when main returns the cons-list type (`[]`/`List` of
+  `Char`, or the `String` synonym) and routes through a runtime walker
+  that uses the hash-based tags `stableConTag "[]" = 31636` and
+  `stableConTag ":" = 46589` to traverse the list and `putchar` each
+  codepoint.  Codepoints > 127 are written as raw bytes (Latin-1ish);
+  full UTF-8 re-encoding is future work.  Still blocked:
+  `putStrLn`/`hPutStr` inline to `GHC.Internal.IO.Handle.FD/stdout` and
+  `GHC.Internal.IO.Handle.Text/hPutStr2` which remain unshimmed — so
+  effectful Haskell I/O (chained prints, reading stdin) still doesn't
+  work, but pure programs that return Strings do.
 
 - **BRIDGE_rust_strings**: Rust bridge can measure strings but cannot print.
   `str::len()` now works: the bridge remaps `core::str::<impl str>::len` to

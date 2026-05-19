@@ -31,15 +31,18 @@ whether any of them are lurking.
 |---|---|---|---|
 | Koka | `examples/hello.kk` | native string via `kk_println_str` | "Hello, World!" |
 | Python | `examples/hello.py` | native string via `println_str` | "Hello, world" |
-| Haskell | `examples/hello.hs` | degraded to Int (length 13) | "13" |
-| Rust | `examples/hello.rs` | degraded to Int (hardcoded 13) | "13" |
-| Mercury | `examples/hello.m` + `hello-mercury-driver.kk` | polyglot semidet → Int | "13" |
+| Haskell | `examples/hello.hs` | native cons-list via `kk_println_haskell_chars` | "Hello, World!" |
+| Rust | `examples/hello.rs` | str::len → Int via `kk_str_len` remap | "13" |
+| Mercury | `examples/hello.m` | standalone `main_int(13).` after HldsParse fix | "13" |
 
-The three degraded forms each document a specific string-ABI gap in their
-header comments and as ROADMAP entries (`BRIDGE_haskell_strings`,
-`BRIDGE_rust_strings`, `BRIDGE_mercury_strings`).  Mercury cannot run
-standalone; the established polyglot idiom (proven by `polyglot-demo/check.m`)
-is what works.
+Most original string-ABI gaps were closed in follow-up work (commits land
+after the initial Phase A ship): HldsParse trailing-`.` stripping unblocked
+single-clause Mercury facts; sanitizer `:`/`;` encoding plus a
+`core::str::<impl str>::len → str_len` remap unblocked Rust's `str::len`;
+the `kk_println_haskell_chars` runtime helper plus emitter detection of
+`[Char]`/`String`-typed `main` unblocked Haskell native string output.
+Remaining gaps documented in ROADMAP: Rust `println!`/`core::fmt` machinery,
+Haskell `putStrLn`/IO machinery, Mercury `io.write_string` module.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

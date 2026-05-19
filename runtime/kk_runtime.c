@@ -284,6 +284,31 @@ void kk_println_con(int64_t v) {
     printf("\n");
 }
 
+/* Haskell-String printer: walks a [Char] cons-list and prints chars.
+ *
+ * The GHC bridge encodes Haskell's String (= [Char]) as a cons-list
+ * with hash-based tags: stableConTag "[]" = 31636 (Nil), stableConTag
+ * ":" = 46589 (Cons).  Field 0 of a Cons holds the Char codepoint
+ * (i64), field 1 holds the tail.
+ *
+ * Each char is emitted via putchar as a single byte.  Codepoints > 127
+ * are written verbatim (no UTF-8 re-encoding) — matching Haskell's
+ * default Latin-1-ish behaviour for `putStrLn`-style output of
+ * literal strings.  Trailing newline appended once at end.
+ */
+#define KK_HASKELL_NIL_TAG  31636
+#define KK_HASKELL_CONS_TAG 46589
+
+void kk_println_haskell_chars(int64_t list) {
+    while (1) {
+        if (kk_tag(list) == KK_HASKELL_NIL_TAG) break;
+        int64_t ch = kk_field(list, 0);
+        putchar((int)(ch & 0xff));
+        list = kk_field(list, 1);
+    }
+    putchar('\n');
+}
+
 /* First-class strings — rope-based, UTF-8.
  *
  * A Frankenstein string is a heap-allocated kk_string_t header. The

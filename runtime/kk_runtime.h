@@ -30,6 +30,12 @@ int64_t kk_field(int64_t ptr, int64_t idx);
  * Heap pointers print as (#tag f0 f1 ...); scalars print as decimal ints. */
 void    kk_println_con(int64_t v);
 
+/* Walk a Haskell [Char] cons-list and print each char.  Uses the
+ * hash-based tags stableConTag "[]" = 31636 and stableConTag ":" =
+ * 46589.  Newline appended after final char.  Codepoints > 127 are
+ * written verbatim (no UTF-8 re-encoding). */
+void    kk_println_haskell_chars(int64_t list);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

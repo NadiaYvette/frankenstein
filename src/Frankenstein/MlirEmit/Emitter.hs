@@ -424,6 +424,11 @@ emitProgramText prog =
                               && returnsDataType prog d) defs
       mainReturnsString = any (\d -> nameText (qnameName (defName d)) == "main"
                                   && returnsStringType d) defs
+      -- Haskell's `String = [Char]` arrives as the cons-list type
+      -- `List Char`.  When main returns that, walk the list and print
+      -- each char rather than treating the head pointer as an Int.
+      mainReturnsHaskellString = any (\d -> nameText (qnameName (defName d)) == "main"
+                                          && returnsListChar d) defs
       -- The @main wrapper takes (argc, argv) and hands them off to
       -- kk_args_init so programs can read command-line arguments via
       -- the args_count / args_get intrinsics.
@@ -443,6 +448,15 @@ emitProgramText prog =
           then T.unlines $ mainHeader ++
             [ mainCallPrelude <> "    %result = func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
             , "    func.call @kk_println_str(%result) : (i64) -> ()"
+            , "    %zero = arith.constant 0 : i32"
+            , "    func.return %zero : i32"
+            , "  }"
+            ]
+          else if mainReturnsHaskellString
+          then T.unlines $ mainHeader ++
+            [ mainCallPrelude <> "    %result_raw = func.call @" <> qualMainName <> "(" <> mainCallArgs <> ") : " <> mainCallSig
+            , "    %result = func.call @kk_thunk_force(%result_raw) : (i64) -> i64"
+            , "    func.call @kk_println_haskell_chars(%result) : (i64) -> ()"
             , "    %zero = arith.constant 0 : i32"
             , "    func.return %zero : i32"
             , "  }"
@@ -505,6 +519,26 @@ emitProgramText prog =
             tconName (TForall _ t)         = tconName t
             tconName _                     = Nothing
         in tconName ret == Just "string"
+      -- True iff the def's return type is the Haskell `List Char`
+      -- (i.e. `[Char]` / `String`) cons-list.  The GHC bridge encodes
+      -- this as TApp (TCon "[]") (TCon "Char") for the plain list type,
+      -- or as TCon "String" / TSyn "String" when the source uses the
+      -- synonym directly.
+      returnsListChar d =
+        let (_, _, ret) = decomposeDefType (defType d)
+            unwrap (TSyn _ _ t)  = unwrap t
+            unwrap (TForall _ t) = unwrap t
+            unwrap t             = t
+            tconText (TCon (TypeCon qn _)) = Just (nameText (qnameName qn))
+            tconText _                     = Nothing
+            listConNames = ["[]", "List"]
+            isListApp outer inner =
+              maybe False (`elem` listConNames) (tconText (unwrap outer))
+                && tconText (unwrap inner) == Just "Char"
+        in case unwrap ret of
+             TApp outer inner -> isListApp outer inner
+             TCon tc          -> nameText (qnameName (tcName tc)) == "String"
+             _                -> False
   in T.unlines
     [ "module {"
     , ""
@@ -530,6 +564,7 @@ emitProgramText prog =
     , "  func.func private @kk_field(i64, i64) -> i64"
     , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
+    , "  func.func private @kk_println_haskell_chars(i64) -> ()"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
     , "  func.func private @kk_nil() -> i64"
@@ -692,6 +727,7 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_field(i64, i64) -> i64"
     , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
+    , "  func.func private @kk_println_haskell_chars(i64) -> ()"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
@@ -807,6 +843,7 @@ emitProgramWasm prog =
     , "  func.func private @kk_field(i64, i64) -> i64"
     , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
+    , "  func.func private @kk_println_haskell_chars(i64) -> ()"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"

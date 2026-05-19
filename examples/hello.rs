@@ -1,19 +1,18 @@
-// Phase A hello-world for the Rust bridge — heavily degraded form.
+// Phase A hello-world for the Rust bridge — degraded form.
 //
-// Two Rust string-ABI gaps prevent a "natural" hello:
-//   1. `println!(...)` pulls in Arguments::new / std::io::_print which
-//      aren't shimmed (see ROADMAP → BRIDGE_rust_strings).
-//   2. `str::len()` produces a mangled symbol mlir-opt rejects.
+// The Rust bridge does not yet shim std::io / core::fmt::Arguments, so
+// `println!("Hello, World!")` still fails to link (Arguments::new,
+// std::io::_print remain unresolved).  See ROADMAP →
+// BRIDGE_rust_strings.
 //
-// This degraded form returns the byte-length of "Hello, World!" as a
-// hardcoded constant.  It does *not* exercise any string ABI surface;
-// it exists as a placeholder so the hello-test driver has an entry per
-// bridge and any future Rust string work has an obvious file to update.
+// This degraded form computes the byte-length of "Hello, World!" via
+// `str::len`, returning the i64 through the proven main-returns-Int
+// wrapper.  The Rust bridge now remaps `core::str::<impl str>::len` to
+// the runtime's `kk_str_len`, so this compiles and runs end-to-end.
 //
 // Expected output: 13   (byte-length of "Hello, World!")
 
 #[no_mangle]
 pub fn main() -> i64 {
-    let _greeting = "Hello, World!";
-    13
+    "Hello, World!".len() as i64
 }

@@ -2831,6 +2831,9 @@ sanitizeName = T.concatMap encodeChar
     encodeChar '&' = "zb"
     encodeChar '|' = "zo"
     encodeChar '~' = "zw"
+    encodeChar ':' = "zi"
+    encodeChar ';' = "zs"
+    encodeChar '?' = "zq"
     encodeChar c
       | c `elem` ("/.,()[]{}'\"\\ \t" :: [Char]) = "_"
       | otherwise = T.singleton c

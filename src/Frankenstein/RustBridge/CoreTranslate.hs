@@ -265,7 +265,16 @@ parseConstLit t
       let numPart = T.takeWhile (\c -> c == '-' || isDigit c) t
       in case reads (T.unpack numPart) of
            [(n, _)] -> ELit (LitInt n)
-           _        -> ELit (LitString t)
+           _        -> ELit (LitString (stripQuotes t))
+  where
+    -- MIR prints string literals with surrounding double quotes; strip
+    -- them so kk_str_len returns the byte count of the actual string
+    -- content, not including the source-syntax quote characters.
+    stripQuotes s = case T.uncons s of
+      Just ('"', rest) -> case T.unsnoc rest of
+        Just (inside, '"') -> inside
+        _                  -> s
+      _ -> s
 
 -- | Map MIR binary operator names to Core operator names
 mirBinOpToName :: Text -> Text
@@ -300,8 +309,13 @@ translateTermExpr body visited term _raw = case term of
     in ECase scrutExpr branches
 
   TermCallSimple funcName argStrs retBb ->
-    -- Function call: translate to EApp, then continue to return block
-    let funcExpr = EVar (Name funcName 0)
+    -- Function call: translate to EApp, then continue to return block.
+    -- Known Rust intrinsics are remapped to Frankenstein runtime names
+    -- (e.g. core::str::<impl str>::len → str_len) so the emitter routes
+    -- them through the kk_* runtime without applying the rust_ module
+    -- prefix or arity suffix.
+    let mappedName = remapRustIntrinsic funcName
+        funcExpr = EVar (Name mappedName 0)
         argExprs = map parseCallArg argStrs
         callExpr = EApp funcExpr argExprs
         -- Find the destination variable: look at the raw terminator
@@ -389,3 +403,15 @@ findLocal body idx =
 lookupBlock :: MirBody -> Int -> Maybe MirBasicBlock
 lookupBlock body idx =
   find (\bb -> bbIndex bb == idx) (mirBlocks body)
+
+-- | Remap Rust stdlib symbols to Frankenstein runtime intrinsics.
+-- Known names get rewritten to the runtime equivalents that the MLIR
+-- emitter recognises and routes through the kk_* runtime.  Unknown
+-- names pass through unchanged (the emitter applies the rust_ module
+-- prefix and arity suffix, leaving them as unresolved externs that
+-- the user is expected to provide via FFI shim).
+remapRustIntrinsic :: Text -> Text
+remapRustIntrinsic n = case n of
+  "core::str::<impl str>::len" -> "str_len"
+  "core::str::len"             -> "str_len"
+  _                            -> n

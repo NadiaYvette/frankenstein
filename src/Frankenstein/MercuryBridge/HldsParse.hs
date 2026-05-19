@@ -339,7 +339,17 @@ parseSingleGoal txt
           args = map T.strip $ T.splitOn "," argsText
       in GoalCall (T.strip name) args
   | otherwise = GoalUnparsed stripped
-  where stripped = T.strip txt
+  where
+    -- Drop trailing Mercury statement terminator '.' so atoms like "7."
+    -- get recognised as the literal 7 downstream by CoreTranslate's
+    -- readMaybe.  Without this, fact-form `is det` clauses (e.g.
+    -- `seven(7).` translating to HLDS `HeadVar__1 = 7.`) fall through
+    -- the unify branch as `GoalUnify "HeadVar__1" "7."` and the
+    -- literal-on-RHS case in translateGoalK fails to match.
+    stripped = let s = T.strip txt
+               in case T.unsnoc s of
+                    Just (rest, '.') -> rest
+                    _                -> s
 
 -- | Parse a constructor application of the form @ctor(arg1, arg2, ...)@ or
 -- @module.ctor(arg1, arg2, ...)@, returning the bare constructor name and

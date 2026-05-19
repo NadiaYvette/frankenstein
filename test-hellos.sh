@@ -79,9 +79,9 @@ echo "--- Degraded to Int (string-ABI gap; routes through printf wrapper) ---"
 run_hello "hello-haskell"     "13"            "examples/hello.hs"
 run_hello "hello-rust"        "13"            "examples/hello.rs"
 
-# Mercury runs as a polyglot fragment (no standalone main; pair with .kk driver)
+# Clean Mercury temp dirs between runs
 rm -rf /tmp/frankenstein-mercury-*/
-run_hello "hello-mercury"     "13"            "examples/hello.m" "examples/hello-mercury-driver.kk"
+run_hello "hello-mercury"     "13"            "examples/hello.m"
 
 echo ""
 echo "========================================"

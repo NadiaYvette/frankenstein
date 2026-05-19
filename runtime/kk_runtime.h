@@ -50,6 +50,23 @@ int64_t kk_int_list_to_haskell_chars(int64_t list, int64_t tail);
  * bridge to translate GHC.Internal.Base.(++) calls in derived Show. */
 int64_t kk_haskell_chars_concat(int64_t a, int64_t b);
 
+/* Rust println! formatted-output support.
+ *
+ * The Rust bridge represents `Arguments::new(template, args)` as a
+ * packed 2-field cell tagged KK_RUST_FMT_TAG.  `std::io::_print` then
+ * dispatches through kk_rust_print_dispatch which routes either to
+ * kk_print_str (for from_str's plain-string Arguments) or to
+ * kk_rust_print_args (for new's packed cell). */
+int64_t kk_rust_args_pack(int64_t template_str, int64_t args_struct);
+int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct);
+int64_t kk_rust_print_dispatch(int64_t v);
+
+/* Safe field access: kk_field(base, idx) if base is a heap pointer,
+ * else returns base verbatim.  Used by the Rust bridge to handle
+ * both genuine tuple field projections and WithOverflow-flattened
+ * value reads through the same intrinsic. */
+int64_t kk_rust_field_safe(int64_t base, int64_t idx);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

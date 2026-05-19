@@ -102,6 +102,10 @@ run_hello "show-tuple"        $'(1,2)\n(1,2,3)\n(-5,100)\n(42,0,-7,13)\n((7,13),
 run_hello "show-mixed"        $'Red\nGreen\nBlue\nPoint 3 4\nCircle 10\nRectangle 7 13\nSquare 5' "examples/show_mixed.hs"
 
 echo ""
+echo "--- Rust formatted println! ---"
+run_hello "rust-fmt"          $'a=41 b=101\nanswer = 142' "examples/rust_fmt.rs"
+
+echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then
     echo "  ALL HELLOS PASS ($PASS/$((PASS+FAIL)))"

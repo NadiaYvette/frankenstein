@@ -510,6 +510,7 @@ emitProgramText prog =
         nameText fn `elem`
           [ "print", "println_str", "putStrLn", "print_str"
           , "println_haskell_chars", "print_haskell_chars"
+          , "rust_print_dispatch"
           -- Mercury bridge synthesises a no-arg `main` alias that calls
           -- the user's `main(io::di, io::uo) is det` predicate
           -- (renamed to `main_io_impl` to avoid the alias collision,
@@ -615,6 +616,12 @@ emitProgramText prog =
     -- kk_haskell_chars_concat (see runtime/kk_runtime.c).
     , "  func.func private @haskell_chars_concat(i64, i64) -> i64"
     , "  func.func private @dummy_show_caf() -> i64"
+    , "  func.func private @kk_rust_args_pack(i64, i64) -> i64"
+    , "  func.func private @kk_rust_print_dispatch(i64) -> i64"
+    , "  func.func private @kk_rust_field_safe(i64, i64) -> i64"
+    , "  func.func private @rust_args_pack(i64, i64) -> i64"
+    , "  func.func private @rust_print_dispatch(i64) -> i64"
+    , "  func.func private @rust_field_safe(i64, i64) -> i64"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
     , "  func.func private @kk_nil() -> i64"
@@ -789,6 +796,12 @@ emitProgramWithEffects prog =
     -- kk_haskell_chars_concat (see runtime/kk_runtime.c).
     , "  func.func private @haskell_chars_concat(i64, i64) -> i64"
     , "  func.func private @dummy_show_caf() -> i64"
+    , "  func.func private @kk_rust_args_pack(i64, i64) -> i64"
+    , "  func.func private @kk_rust_print_dispatch(i64) -> i64"
+    , "  func.func private @kk_rust_field_safe(i64, i64) -> i64"
+    , "  func.func private @rust_args_pack(i64, i64) -> i64"
+    , "  func.func private @rust_print_dispatch(i64) -> i64"
+    , "  func.func private @rust_field_safe(i64, i64) -> i64"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
@@ -916,6 +929,12 @@ emitProgramWasm prog =
     -- kk_haskell_chars_concat (see runtime/kk_runtime.c).
     , "  func.func private @haskell_chars_concat(i64, i64) -> i64"
     , "  func.func private @dummy_show_caf() -> i64"
+    , "  func.func private @kk_rust_args_pack(i64, i64) -> i64"
+    , "  func.func private @kk_rust_print_dispatch(i64) -> i64"
+    , "  func.func private @kk_rust_field_safe(i64, i64) -> i64"
+    , "  func.func private @rust_args_pack(i64, i64) -> i64"
+    , "  func.func private @rust_print_dispatch(i64) -> i64"
+    , "  func.func private @rust_field_safe(i64, i64) -> i64"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -1634,6 +1653,25 @@ emitAppVarWith2 fn a b
       pure (aOps ++ bOps ++
         [ "%" <> resultName <> " = func.call @kk_haskell_chars_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
         ], resultName)
+  -- rust_args_pack(template, args) → kk_rust_args_pack.  Used by the
+  -- Rust bridge for `Arguments::new(template, args)`.
+  | n == "rust_args_pack" = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_rust_args_pack(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- rust_field_safe(base, idx) → kk_rust_field_safe.  Used by the
+  -- Rust bridge for `_N.M` field accesses (dispatches between heap
+  -- tuple field reads and WithOverflow-flattened identity).
+  | n == "rust_field_safe" = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_rust_field_safe(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
   | n `elem` ["str_eq", "==s", "bytes_eq"] = do
       (aOps, aName) <- emitExpr a
       (bOps, bName) <- emitExpr b
@@ -1777,6 +1815,16 @@ emitAppVarWith1 fn arg
       pure (argOps ++
         [ "func.call @kk_print_str(%" <> argName <> ") : (i64) -> ()"
         , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+  -- rust_print_dispatch(v) — Rust bridge's std::io::_print target.
+  -- Routes through the runtime dispatcher that checks whether v is a
+  -- kk_string (no-arg from_str path) or a packed (template, args)
+  -- cell from `Arguments::new` (formatted path).
+  | n == "rust_print_dispatch" = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_rust_print_dispatch(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   -- Walk a Haskell [Char] cons-list and print each char.  println_*
   -- adds a trailing newline; print_* does not (matches hPutStr2 with
@@ -3080,6 +3128,7 @@ externalRuntimeFns = Set.fromList
   , "int_to_haskell_chars", "int_list_to_haskell_chars"
   , "haskell_chars_concat"
   , "dummy_show_caf"
+  , "rust_args_pack", "rust_print_dispatch", "rust_field_safe"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
   , "read_line", "getLine", "read_file", "write_file"
   , "args_count", "args_get", "args_progname"
@@ -3107,6 +3156,7 @@ externalRuntimeArity = Map.fromList
   , ("int_to_haskell_chars", 2), ("int_list_to_haskell_chars", 2)
   , ("haskell_chars_concat", 2)
   , ("dummy_show_caf", 0)
+  , ("rust_args_pack", 2), ("rust_print_dispatch", 1), ("rust_field_safe", 2)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
   , ("show_int", 1)
   , ("read_line", 0), ("getLine", 0)

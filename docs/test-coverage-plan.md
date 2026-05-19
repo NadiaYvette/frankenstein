@@ -51,11 +51,13 @@ the GHC bridge's `isShowIntWorker` intercept — see
 see `examples/show_derived.hs`.  Show for tuples (2-tuples through
 n-tuples, including negatives and nesting) — see
 `examples/show_tuple.hs`.  Mixing enum + with-args ADTs in one
-module — see `examples/show_mixed.hs`.  Test driver runs 13/13 hellos.
+module — see `examples/show_mixed.hs`.  Rust formatted `println!`
+with i64 placeholders — see `examples/rust_fmt.rs`.  Test driver
+runs 14/14 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-Rust `println!("{}", x)` placeholders (Display trait machinery),
-file/stdin handles, full UTF-8 re-encoding.
+non-i64 Rust format placeholders, file/stdin handles, full UTF-8
+re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

@@ -30,8 +30,10 @@ import Frankenstein.RustBridge.MirParse
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (isDigit)
+import Data.Bits ((.&.))
 import Data.List (find)
 import qualified Data.Set as Set
+import Text.Printf (printf)
 
 -- | Translate a full MIR program to Frankenstein Core
 --
@@ -223,13 +225,19 @@ translateRvalue body rv = case rv of
     ERetain (EVar (Name ("_" <> T.pack (show idx)) 0))
 
   RvFieldAccess baseIdx fieldIdx _ty ->
-    -- Field projection: for overflow tuples, .0 is the result value.
-    -- Simplify field_0 to just the base variable (since WithOverflow is
-    -- already translated as plain arithmetic).
-    if fieldIdx == 0
-    then EVar (Name ("_" <> T.pack (show baseIdx)) 0)
-    else EApp (EVar (Name ("field_" <> T.pack (show fieldIdx)) 0))
-              [EVar (Name ("_" <> T.pack (show baseIdx)) 0)]
+    -- Field projection.  Two cases:
+    --  - CheckedAdd/Mul/Sub WithOverflow-style tuples are pre-flattened
+    --    by the bridge to plain arithmetic (the base is already the
+    --    result value, not a heap tuple).  Field 0 should be the base.
+    --  - Regular RvAggregate-constructed tuples ARE heap cells; field 0
+    --    needs kk_field at runtime to extract the contained value.
+    -- We dispatch via the runtime helper `rust_field_safe` which
+    -- inspects the base: a heap pointer is treated as a tuple cell;
+    -- otherwise the base is returned as-is (matching the
+    -- WithOverflow-flattened shape).
+    EApp (EVar (Name "rust_field_safe" 0))
+         [EVar (Name ("_" <> T.pack (show baseIdx)) 0),
+          ELit (LitInt (fromIntegral fieldIdx))]
 
   RvRaw t -> ELit (LitString t)
 
@@ -269,14 +277,37 @@ parseConstLit t
   where
     -- MIR prints string literals with surrounding double quotes; strip
     -- them so kk_str_len returns the byte count of the actual string
-    -- content, not including the source-syntax quote characters.  Then
-    -- unescape Rust-style \n, \t, etc. so they don't reach the printer
-    -- as two literal characters.
-    stripQuotes s = case T.uncons s of
-      Just ('"', rest) -> case T.unsnoc rest of
-        Just (inside, '"') -> unescapeRust inside
-        _                  -> s
-      _ -> s
+    -- content, not including the source-syntax quote characters.
+    -- Rust byte-string literals carry a leading `b` prefix
+    -- (`b"…"`).  Plain Rust string literals (no `b` prefix) hold
+    -- UTF-8 text and round-trip cleanly through Text/UTF-8.  Byte
+    -- strings can contain raw bytes ≥ 0x80 that don't round-trip
+    -- through UTF-8 encoding, so we materialise them as ASCII hex
+    -- strings of the form `__RBYTES:HHHH…` — the runtime
+    -- kk_str_from_hex_marker decodes them back to raw bytes when
+    -- it sees the marker prefix, and treats other strings as
+    -- ordinary UTF-8.
+    stripQuotes s0 = case T.uncons s0 of
+      Just ('b', rest) -> case T.uncons rest of
+        Just ('"', inner) -> case T.unsnoc inner of
+          Just (content, '"') -> "__RBYTES:" <> hexEncodeBytes content
+          _                   -> s0
+        _ -> s0
+      _ -> case T.uncons s0 of
+             Just ('"', rest) -> case T.unsnoc rest of
+               Just (inside, '"') -> unescapeRust inside
+               _                  -> s0
+             _ -> s0
+    -- Hex-encode a byte-string source-form (with Rust escapes intact)
+    -- to a flat sequence of two-hex-digit pairs.  Two passes:
+    -- (1) unescape Rust-style \n/\t/\xHH into Char codepoints,
+    -- (2) for each Char codepoint c, emit printf "%02X" (c & 0xff).
+    -- Codepoints > 0xff are clamped (Rust byte strings only allow
+    -- 0x00-0xff by syntax).
+    hexEncodeBytes content =
+      let unescaped = unescapeRust content
+          bytes = map (\c -> fromEnum c .&. 0xff) (T.unpack unescaped)
+      in T.pack (concatMap (printf "%02X") bytes)
     unescapeRust = T.pack . go . T.unpack
     go []             = []
     go ('\\':'n':xs)  = '\n' : go xs
@@ -285,7 +316,19 @@ parseConstLit t
     go ('\\':'0':xs)  = '\0' : go xs
     go ('\\':'"':xs)  = '"'  : go xs
     go ('\\':'\\':xs) = '\\' : go xs
+    -- \xHH: two-hex-digit byte escape (Rust byte-string syntax).
+    go ('\\':'x':h1:h2:xs)
+      | Just b <- twoHexDigits h1 h2 = toEnum b : go xs
     go (c:xs)         = c    : go xs
+    twoHexDigits h1 h2 =
+      case (hexVal h1, hexVal h2) of
+        (Just v1, Just v2) -> Just (v1 * 16 + v2)
+        _                  -> Nothing
+    hexVal c
+      | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
+      | c >= 'a' && c <= 'f' = Just (fromEnum c - fromEnum 'a' + 10)
+      | c >= 'A' && c <= 'F' = Just (fromEnum c - fromEnum 'A' + 10)
+      | otherwise            = Nothing
 
 -- | Map MIR binary operator names to Core operator names
 mirBinOpToName :: Text -> Text
@@ -340,7 +383,21 @@ translateTermExpr body visited term _raw = case term of
     let argExprs = map parseCallArg argStrs
         callExpr = case (funcName, argExprs) of
           ("Arguments::<'_>::from_str", (a:_)) -> a
+          ("Arguments::<'_>::from_str_nonconst", (a:_)) -> a
           ("Arguments::<'_>::new_const", (a:_)) -> a
+          -- core::fmt::rt::Argument::<'_>::new_display::<T>(value)
+          -- is a thin wrapper around the value — elide it so the
+          -- argument's raw i64 reaches the Arguments::new args array.
+          (_, (a:_)) | "Argument::<'_>::new_display" `T.isInfixOf` funcName -> a
+          (_, (a:_)) | "Argument::<'_>::new_debug" `T.isInfixOf` funcName -> a
+          -- Arguments::<'_>::new::<N, M>(template, args) builds a
+          -- packed (template, args) cell at runtime.  std::io::_print
+          -- below dispatches: if the value is a kk_string the
+          -- existing print_str path runs, else it's the packed cell
+          -- and rust_print_args walks the template substituting args.
+          (_, (template:argsArr:_))
+            | "Arguments::<'_>::new" `T.isPrefixOf` funcName ->
+              EApp (EVar (Name "rust_args_pack" 0)) [template, argsArr]
           _ -> EApp (EVar (Name (remapRustIntrinsic funcName) 0)) argExprs
         -- Find the destination variable: look at the raw terminator
         -- _N = func(args) -> [return: bbM, ...]
@@ -444,5 +501,5 @@ remapRustIntrinsic n = case n of
   --   std::io::_print(args) does the actual print; remap to print_str
   --     (no trailing newline — Rust's println! source already includes
   --     it in the format string).
-  "std::io::_print"                 -> "print_str"
+  "std::io::_print"                 -> "rust_print_dispatch"
   _                                 -> n

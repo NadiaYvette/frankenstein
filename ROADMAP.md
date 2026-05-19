@@ -779,18 +779,23 @@ details.
   Still blocked: reading stdin/files, formatted output via
   `printf`/`Text.Printf`, GADT-style data declarations.
 
-- **BRIDGE_rust_strings**: Rust `println!(...)` now works for plain
-  string literals: the bridge elides `Arguments::<'_>::from_str` (a thin
-  Arguments wrapper) and remaps `std::io::_print` to the runtime's
-  `print_str`.  `splitOperands` tracks string-literal depth so commas
-  inside Rust string constants don't split the call arguments
-  (previously broke `const "Hello, World!"`), and `parseConstLit`
-  unescapes `\n`/`\t`/`\r`/`\0`/`\"`/`\\` from MIR string syntax.
-  `str::len()` still works (separate path: remap
-  `core::str::<impl str>::len` → `str_len`).  Still blocked: format
-  arguments (`println!("{}", x)`) — the `core::fmt::Arguments::new`
-  builder with placeholder-aware formatting remains unshimmed.  See
-  `examples/hello.rs`.
+- **BRIDGE_rust_strings**: Rust `println!(...)` works for plain string
+  literals and i64-arg format placeholders (`println!("answer = {}", n)`).
+  The bridge elides `Arguments::<'_>::from_str`/`from_str_nonconst`
+  (thin Arguments wrappers) and pairs `Arguments::<'_>::new(template, args)`
+  with a `rust_args_pack` runtime cell; `std::io::_print` becomes
+  `rust_print_dispatch` which dispatches at runtime between
+  kk_print_str (from_str path) and kk_rust_print_args (formatted
+  path).  The template's raw bytes are preserved through the IR by
+  hex-encoding under a `__RBYTES:` marker (UTF-8 round-tripping
+  would mangle bytes ≥ 0x80, like the 0xc0 placeholder marker).
+  `core::fmt::rt::Argument::<'_>::new_display::<T>` is elided to
+  unwrap the value.  `_N.0` field access goes through
+  `rust_field_safe` which dispatches between heap-tuple kk_field
+  reads and WithOverflow-flattened identity returns.  See
+  `examples/rust_fmt.rs`.  Still blocked: non-i64 placeholders
+  (the dispatcher hard-codes %ld); Debug `{:?}` format spec;
+  field-spec syntax (`{:.2}`, `{:>5}`, etc.).
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

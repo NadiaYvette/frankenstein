@@ -582,6 +582,9 @@ runtimeNames = Set.fromList
   , "haskell_chars_concat"
   -- Stub CAF for unforced GHC Show showList methods.
   , "dummy_show_caf"
+  -- Rust formatted-println! runtime helpers (Arguments::new pack +
+  -- std::io::_print dispatch).
+  , "rust_args_pack", "rust_print_dispatch", "rust_field_safe"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

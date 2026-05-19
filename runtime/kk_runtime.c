@@ -377,6 +377,144 @@ static int64_t kk_cons_char_cell(int64_t ch, int64_t tail) {
 int64_t dummy_show_caf(void) { return 0; }
 int64_t kk_dummy_show_caf(int64_t) __attribute__((alias("dummy_show_caf")));
 
+/* Rust println! format support.
+ *
+ * Template byte encoding (rustc 2024+):
+ *   <len-byte> <literal-bytes...>   first piece
+ *   (0xc0 <len-byte> <literal-bytes...>)*   placeholder + next piece
+ *   0x00   terminator
+ *
+ * Frankenstein represents `Arguments::new(template, args)` as a
+ * packed 2-field cell tagged KK_RUST_FMT_TAG with fields
+ *   field 0 → template kk_string
+ *   field 1 → args struct (kk_alloc_con of N i64s, one per arg)
+ *
+ * std::io::_print dispatches through kk_rust_print_dispatch which
+ * checks the value: a kk_string goes through kk_println_str (the
+ * from_str path, no formatting); a packed cell is walked by
+ * kk_rust_print_args. */
+
+#define KK_RUST_FMT_TAG  0xC0FF1E  /* arbitrary distinguishing tag */
+
+int64_t kk_rust_args_pack(int64_t template_str, int64_t args_struct) {
+    int64_t cell = kk_alloc_con(KK_RUST_FMT_TAG, 2);
+    kk_set_field(cell, 0, template_str);
+    kk_set_field(cell, 1, args_struct);
+    return cell;
+}
+
+static int64_t kk_args_extract(int64_t args_struct, int idx) {
+    /* args_struct is a heap-allocated tuple/array.  Field idx holds
+     * the i64 value (already unboxed by the bridge's
+     * Argument::new_display elision). */
+    return kk_field(args_struct, idx);
+}
+
+/* Decode the bridge's `__RBYTES:HHHH…` marker form to raw bytes.
+ * Returns malloc'd bytes + length; caller frees.  If the input
+ * doesn't carry the marker, falls back to returning the original
+ * UTF-8 bytes (the from_str case where format-template parsing isn't
+ * needed). */
+static unsigned char* kk_rust_decode_template(int64_t template_str,
+                                              size_t* out_len)
+{
+    char* raw = kk_str_dup_cstr(template_str);
+    if (!raw) { *out_len = 0; return NULL; }
+    size_t raw_len = (size_t)kk_str_len(template_str);
+    const char marker[] = "__RBYTES:";
+    const size_t mlen = sizeof(marker) - 1;
+    if (raw_len < mlen || memcmp(raw, marker, mlen) != 0) {
+        *out_len = raw_len;
+        return (unsigned char*)raw;  /* caller frees */
+    }
+    /* Decode the hex pairs after the marker. */
+    size_t hex_len = raw_len - mlen;
+    size_t n_bytes = hex_len / 2;
+    unsigned char* out = (unsigned char*)malloc(n_bytes + 1);
+    if (!out) { free(raw); *out_len = 0; return NULL; }
+    const char* hex = raw + mlen;
+    for (size_t i = 0; i < n_bytes; i++) {
+        int hi = hex[i*2], lo = hex[i*2 + 1];
+        int hv = (hi >= '0' && hi <= '9') ? hi - '0'
+               : (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10
+               : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10 : 0;
+        int lv = (lo >= '0' && lo <= '9') ? lo - '0'
+               : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10
+               : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10 : 0;
+        out[i] = (unsigned char)((hv << 4) | lv);
+    }
+    out[n_bytes] = 0;
+    free(raw);
+    *out_len = n_bytes;
+    return out;
+}
+
+int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
+    size_t total;
+    unsigned char* buf = kk_rust_decode_template(template_str, &total);
+    if (!buf) return 0;
+    const unsigned char* p = buf;
+    const unsigned char* end = p + total;
+    int arg_idx = 0;
+    while (p < end) {
+        unsigned char len = *p++;
+        if (len == 0) break;
+        size_t n = (p + len > end) ? (size_t)(end - p) : (size_t)len;
+        fwrite(p, 1, n, stdout);
+        p += n;
+        if (p >= end) break;
+        if (*p == 0xc0) {
+            p++;  /* skip placeholder marker */
+            int64_t v = kk_args_extract(args_struct, arg_idx);
+            printf("%ld", (long)v);
+            arg_idx++;
+        }
+    }
+    free(buf);
+    return 0;
+}
+
+int64_t kk_rust_print_dispatch(int64_t v) {
+    /* Dispatch on the value's shape: kk_string goes straight to
+     * print_str (the from_str fast path); a packed
+     * (template, args) cell tagged KK_RUST_FMT_TAG goes through
+     * the formatted walker. */
+    if (kk_is_string(v)) {
+        kk_print_str(v);
+        return 0;
+    }
+    if (kk_is_heap_ptr(v) && kk_tag(v) == KK_RUST_FMT_TAG && kk_nfields(v) == 2) {
+        int64_t template_str = kk_field(v, 0);
+        int64_t args_struct = kk_field(v, 1);
+        return kk_rust_print_args(template_str, args_struct);
+    }
+    /* Fallback: print as decimal (matches the previous broken
+     * behaviour for unsupported shapes). */
+    printf("%ld", (long)v);
+    return 0;
+}
+
+/* Field access from the Rust bridge.  Returns kk_field(base, idx) if
+ * base is a heap pointer; otherwise returns base verbatim.  The
+ * latter case matches CheckedAdd/Mul-style WithOverflow tuples that
+ * the bridge pre-flattens to plain arithmetic (the "base" is already
+ * the result i64, not a tuple cell).  The former handles genuine
+ * RvAggregate-constructed tuples. */
+int64_t kk_rust_field_safe(int64_t base, int64_t idx) {
+    if (kk_is_heap_ptr(base)) {
+        return kk_field(base, idx);
+    }
+    return base;
+}
+
+/* Bare-name aliases so the MLIR emitter's PAP wrapping resolves. */
+int64_t rust_args_pack(int64_t, int64_t)
+  __attribute__((alias("kk_rust_args_pack")));
+int64_t rust_print_dispatch(int64_t)
+  __attribute__((alias("kk_rust_print_dispatch")));
+int64_t rust_field_safe(int64_t, int64_t)
+  __attribute__((alias("kk_rust_field_safe")));
+
 /* List append for Haskell [Char] cons-lists: a ++ b.
  * Walks a (collecting into a buffer), then prepends each element onto
  * b in reverse to preserve original order.  Recurses if a exceeds the

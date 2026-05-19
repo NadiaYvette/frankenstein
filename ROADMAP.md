@@ -672,26 +672,34 @@ modules match, all 21 E2E tests pass at every stage.
 
 ### Outstanding Issues
 
+**Strict s2≡s3 fixed point: ACHIEVED 2026-05-19** (was 9-11/26 historically).
+Bootstrap reports `*** FIXED POINT REACHED ***` — 26/26 byte-equal, 21/21 E2E
+at every stage. Resolution: clean rebuild fixed driver.o staleness (9-11/26 →
+19/26), then four `PostProcess.hs` bug fixes resolved the remaining 7 stage-3
+emit failures (commit `9cd995f`). See `docs/strict-fixed-point.md` for
+details.
+
 - **Self-host runtime: pattern-match dispatch on ADT constructors is
-  systematically wrong** (root-cause class identified via A1
-  investigation, 2026-05-12). Targeted instrumentation traced the
-  emitConChain `Nothing → Just <prev-body>` flip back through
-  `classifyBranches` to `isDefaultPat`, which appears to return `True`
-  for `PatCon` patterns in compiled self-host code even though the
-  source `case Pattern of PatWild _ -> True; PatVar _ _ -> True; _ ->
-  False` cannot do that. Every refactor attempt triggers a different
-  manifestation of the same class — Maybe/Just confusion, list
-  pattern-match crash, etc. The compiled runtime mishandles
-  constructor-tag dispatch in pattern-shape-dependent ways.
-  Three observable consequences:
+  systematically wrong** — still latent, still worked around by
+  PostProcess. Minimum reproducer saved at
+  `examples/db7_reproducers/wrong_default_body.hs` (8 lines).
+  Source-level refactor of `classifyBranches.defaultBranch` was
+  attempted 2026-05-19 (case-of-list → `filter` + `null` + `head`) —
+  caused massive regression (26/26 → 3/26, 21/21 → 6/21), reverted.
+  Confirms the original observation: every refactor attempt triggers
+  a different manifestation. The bug is in compiled-output shape
+  fragility, not in any one Haskell construct. Future fix needs
+  MLIR-level instrumentation of `classifyBranches` itself, not
+  source-level rewrites. The `tools/diff-tester/`
+  `--mode=host-runtime-vs-stage2-runtime` driver auto-finds new
+  instances.
+  Three observable consequences (all worked around by PostProcess,
+  which runs in the host binary and is architecturally immune):
   1. `emitConChain`'s `mDefaultExpr` flips Nothing → Just, emitting
      dead-code references to out-of-scope pattern binders.
   2. Split-compile `$N` externals not resolving (each part only sees
      its own `esTopFns`).
   3. Lambda-lift capture-dropping at some `func.call` sites.
-  All three are worked around by `Frankenstein.MlirEmit.PostProcess`
-  (Haskell, runs in the host binary — architecturally immune; see
-  `k-specs/postprocess-claims.k`).
 - **`sanitizeName` corruption**: Root cause identified — `T.concatMap encodeChar`
   in the self-hosted binary non-deterministically corrupts characters
   (closure dispatch or UTF-8 iteration). Mitigated by `A_sanitize_shim.c`.

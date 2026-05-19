@@ -52,12 +52,13 @@ see `examples/show_derived.hs`.  Show for tuples (2-tuples through
 n-tuples, including negatives and nesting) — see
 `examples/show_tuple.hs`.  Mixing enum + with-args ADTs in one
 module — see `examples/show_mixed.hs`.  Rust formatted `println!`
-with placeholders — see `examples/rust_fmt.rs` (Display) and
-`examples/rust_dbg.rs` (Debug).  Test driver runs 15/15 hellos.
+with placeholders — see `examples/rust_fmt.rs` (Display),
+`examples/rust_dbg.rs` (Debug), `examples/rust_radix.rs` (radix).
+Test driver runs 16/16 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-Rust field-spec syntax (`{:.2}`), non-i64 numeric format types,
-file/stdin handles, full UTF-8 re-encoding.
+Rust field-spec syntax with applied width/precision, non-i64
+numeric format types, file/stdin handles, full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

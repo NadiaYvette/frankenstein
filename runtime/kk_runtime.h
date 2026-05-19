@@ -74,6 +74,15 @@ int64_t kk_rust_field_safe(int64_t base, int64_t idx);
  * as the rewrite target for Argument::<'_>::new_debug::<T>. */
 int64_t kk_rust_arg_debug(int64_t v);
 
+/* Per-radix Argument wrappers for Rust's `{:x}` / `{:X}` / `{:o}` /
+ * `{:b}` formats.  Each is selected by a distinct
+ * core::fmt::rt::Argument::<'_>::new_* constructor that the bridge
+ * remaps to the corresponding helper here. */
+int64_t kk_rust_arg_lower_hex(int64_t v);
+int64_t kk_rust_arg_upper_hex(int64_t v);
+int64_t kk_rust_arg_octal(int64_t v);
+int64_t kk_rust_arg_binary(int64_t v);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

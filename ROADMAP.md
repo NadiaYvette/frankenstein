@@ -801,10 +801,16 @@ details.
   `Argument::<'_>::new_debug::<T>` with a runtime
   KK_RUST_DEBUG_TAG cell, and the dispatcher applies a Debug
   formatter (surrounding `"…"` quotes and `\n`/`\t`/`\"`/`\\`
-  escapes for strings; identity to %ld for ints).  See
-  `examples/rust_fmt.rs` and `examples/rust_dbg.rs`.  Still blocked:
-  field-spec syntax (`{:.2}`, `{:>5}`, etc.); non-i64 numeric types
-  (i32/u64/f64).
+  escapes for strings; identity to %ld for ints).  Radix formats
+  `{:x}` / `{:X}` / `{:o}` / `{:b}` also work via per-radix
+  Argument wrappers (`new_lower_hex` / `new_upper_hex` / `new_octal`
+  / `new_binary`).  See `examples/rust_fmt.rs`, `examples/rust_dbg.rs`,
+  `examples/rust_radix.rs`.  Partial: field-spec syntax (`{:>5}`,
+  `{:05}`, `{:.2}`) — the bridge recognises the `0xc3` placeholder-
+  with-spec marker and skips the 6 spec bytes, so the arg prints
+  without garbage, but width/alignment/precision aren't applied
+  yet (would need decoding Rust's spec byte encoding).  Still
+  blocked: non-i64 numeric types (i32/u64/f64), `{:?}` for ADTs.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

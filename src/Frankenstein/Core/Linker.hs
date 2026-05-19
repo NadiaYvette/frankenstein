@@ -586,6 +586,8 @@ runtimeNames = Set.fromList
   -- std::io::_print dispatch).
   , "rust_args_pack", "rust_print_dispatch", "rust_field_safe"
   , "rust_arg_debug"
+  , "rust_arg_lower_hex", "rust_arg_upper_hex"
+  , "rust_arg_octal", "rust_arg_binary"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

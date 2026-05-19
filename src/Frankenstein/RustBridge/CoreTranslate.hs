@@ -396,6 +396,18 @@ translateTermExpr body visited term _raw = case term of
           -- handles the wrapped case correctly via tag dispatch.
           (_, (a:_)) | "Argument::<'_>::new_debug" `T.isInfixOf` funcName ->
             EApp (EVar (Name "rust_arg_debug" 0)) [a]
+          -- Radix-format args ({:x}, {:X}, {:o}, {:b}) — Rust selects
+          -- via separate Argument constructors; the format template
+          -- byte is still plain 0xc0 (no field-spec bytes).  Wrap
+          -- with a per-radix runtime marker.
+          (_, (a:_)) | "Argument::<'_>::new_lower_hex" `T.isInfixOf` funcName ->
+            EApp (EVar (Name "rust_arg_lower_hex" 0)) [a]
+          (_, (a:_)) | "Argument::<'_>::new_upper_hex" `T.isInfixOf` funcName ->
+            EApp (EVar (Name "rust_arg_upper_hex" 0)) [a]
+          (_, (a:_)) | "Argument::<'_>::new_octal" `T.isInfixOf` funcName ->
+            EApp (EVar (Name "rust_arg_octal" 0)) [a]
+          (_, (a:_)) | "Argument::<'_>::new_binary" `T.isInfixOf` funcName ->
+            EApp (EVar (Name "rust_arg_binary" 0)) [a]
           -- Arguments::<'_>::new::<N, M>(template, args) builds a
           -- packed (template, args) cell at runtime.  std::io::_print
           -- below dispatches: if the value is a kk_string the

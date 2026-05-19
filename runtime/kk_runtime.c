@@ -396,6 +396,10 @@ int64_t kk_dummy_show_caf(int64_t) __attribute__((alias("dummy_show_caf")));
 
 #define KK_RUST_FMT_TAG     0xC0FF1E  /* packed (template, args) cell tag */
 #define KK_RUST_DEBUG_TAG   0xDEB07A  /* per-arg Debug-formatter wrapper */
+#define KK_RUST_HEX_LO_TAG  0x4845570  /* `{:x}` lower-hex Argument tag */
+#define KK_RUST_HEX_HI_TAG  0x4845577  /* `{:X}` upper-hex Argument tag */
+#define KK_RUST_OCT_TAG     0x40C7A7   /* `{:o}` octal Argument tag */
+#define KK_RUST_BIN_TAG     0x4B17A7   /* `{:b}` binary Argument tag */
 
 int64_t kk_rust_args_pack(int64_t template_str, int64_t args_struct) {
     int64_t cell = kk_alloc_con(KK_RUST_FMT_TAG, 2);
@@ -482,23 +486,39 @@ static void kk_rust_print_str_debug(int64_t s) {
 }
 
 /* Print a single println!-arg.  Dispatches on its runtime shape:
- *   - Debug-tagged cell  → unwrap and use Debug formatter
- *   - kk_string          → Display: print bytes verbatim
- *   - otherwise          → Display: printf("%ld") (assume i64)
+ *   - Debug-tagged cell    → unwrap and use Debug formatter
+ *   - hex/oct/bin-tagged   → printf with appropriate format string
+ *   - kk_string            → Display: print bytes verbatim
+ *   - otherwise            → Display: printf("%ld") (assume i64)
  *
  * The Display dispatch via kk_is_string is best-effort; in practice
  * println! args are small ints or kk_strings, so the heuristic is
  * accurate. */
 static void kk_rust_print_one_arg(int64_t v) {
-    if (kk_is_heap_ptr(v) && kk_tag(v) == KK_RUST_DEBUG_TAG && kk_nfields(v) == 1) {
+    if (kk_is_heap_ptr(v) && kk_nfields(v) == 1) {
+        int64_t tag = kk_tag(v);
         int64_t inner = kk_field(v, 0);
-        if (kk_is_string(inner)) {
-            kk_rust_print_str_debug(inner);
-        } else {
-            /* Debug == Display for Int and most non-string types. */
-            printf("%ld", (long)inner);
+        if (tag == KK_RUST_DEBUG_TAG) {
+            if (kk_is_string(inner)) {
+                kk_rust_print_str_debug(inner);
+            } else {
+                printf("%ld", (long)inner);
+            }
+            return;
         }
-        return;
+        if (tag == KK_RUST_HEX_LO_TAG) { printf("%lx", (long)inner); return; }
+        if (tag == KK_RUST_HEX_HI_TAG) { printf("%lX", (long)inner); return; }
+        if (tag == KK_RUST_OCT_TAG)    { printf("%lo", (long)inner); return; }
+        if (tag == KK_RUST_BIN_TAG) {
+            /* %b isn't portable; format manually as a binary i64. */
+            uint64_t u = (uint64_t)inner;
+            if (u == 0) { putchar('0'); return; }
+            char buf[65];
+            int len = 0;
+            while (u && len < 64) { buf[len++] = '0' + (int)(u & 1); u >>= 1; }
+            for (int i = len - 1; i >= 0; i--) putchar(buf[i]);
+            return;
+        }
     }
     if (kk_is_string(v)) {
         kk_print_str(v);
@@ -515,13 +535,27 @@ int64_t kk_rust_arg_debug(int64_t v) {
     return cell;
 }
 
+/* Per-radix wrappers for `{:x}` / `{:X}` / `{:o}` / `{:b}` formats. */
+static int64_t kk_rust_arg_radix(int64_t tag, int64_t v) {
+    int64_t cell = kk_alloc_con(tag, 1);
+    kk_set_field(cell, 0, v);
+    return cell;
+}
+int64_t kk_rust_arg_lower_hex(int64_t v) { return kk_rust_arg_radix(KK_RUST_HEX_LO_TAG, v); }
+int64_t kk_rust_arg_upper_hex(int64_t v) { return kk_rust_arg_radix(KK_RUST_HEX_HI_TAG, v); }
+int64_t kk_rust_arg_octal(int64_t v)     { return kk_rust_arg_radix(KK_RUST_OCT_TAG, v); }
+int64_t kk_rust_arg_binary(int64_t v)    { return kk_rust_arg_radix(KK_RUST_BIN_TAG, v); }
+
 int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
     /* Template encoding (Rust 2024+):
      *   template := piece* '\x00'
-     *   piece    := '\xc0'                 (placeholder, consumes one arg)
-     *            |  <len> <byte>{len}      (literal piece)
-     * The two piece kinds interleave freely.  Either kind can appear
-     * first or last (before the NUL terminator). */
+     *   piece    := '\xc0'                            (plain placeholder)
+     *            |  '\xc3' <spec>{6}                  (placeholder with field-spec)
+     *            |  <len> <byte>{len}                  (literal piece)
+     * The 6 spec bytes encode fill/align/sign/width/precision/format
+     * flags.  Field-spec rendering is not implemented yet — we still
+     * print the arg via the default formatter and skip the spec bytes
+     * so the walker stays aligned with the next piece. */
     size_t total;
     unsigned char* buf = kk_rust_decode_template(template_str, &total);
     if (!buf) return 0;
@@ -531,10 +565,16 @@ int64_t kk_rust_print_args(int64_t template_str, int64_t args_struct) {
     while (p < end) {
         unsigned char b = *p++;
         if (b == 0) break;                              /* terminator */
-        if (b == 0xc0) {                                /* placeholder */
+        if (b == 0xc0) {                                /* plain placeholder */
             int64_t v = kk_args_extract(args_struct, arg_idx);
             kk_rust_print_one_arg(v);
             arg_idx++;
+        } else if (b == 0xc3) {                         /* placeholder + 6-byte spec */
+            int64_t v = kk_args_extract(args_struct, arg_idx);
+            kk_rust_print_one_arg(v);
+            arg_idx++;
+            if (p + 6 <= end) p += 6;                   /* skip spec bytes */
+            else              p = end;
         } else {                                        /* literal piece, len=b */
             size_t len = b;
             size_t n = (p + len > end) ? (size_t)(end - p) : len;
@@ -596,6 +636,14 @@ int64_t rust_field_safe(int64_t, int64_t)
   __attribute__((alias("kk_rust_field_safe")));
 int64_t rust_arg_debug(int64_t)
   __attribute__((alias("kk_rust_arg_debug")));
+int64_t rust_arg_lower_hex(int64_t)
+  __attribute__((alias("kk_rust_arg_lower_hex")));
+int64_t rust_arg_upper_hex(int64_t)
+  __attribute__((alias("kk_rust_arg_upper_hex")));
+int64_t rust_arg_octal(int64_t)
+  __attribute__((alias("kk_rust_arg_octal")));
+int64_t rust_arg_binary(int64_t)
+  __attribute__((alias("kk_rust_arg_binary")));
 
 /* List append for Haskell [Char] cons-lists: a ++ b.
  * Walks a (collecting into a buffer), then prepends each element onto

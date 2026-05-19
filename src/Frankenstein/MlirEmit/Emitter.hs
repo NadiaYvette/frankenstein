@@ -620,10 +620,18 @@ emitProgramText prog =
     , "  func.func private @kk_rust_print_dispatch(i64) -> i64"
     , "  func.func private @kk_rust_field_safe(i64, i64) -> i64"
     , "  func.func private @kk_rust_arg_debug(i64) -> i64"
+    , "  func.func private @kk_rust_arg_lower_hex(i64) -> i64"
+    , "  func.func private @kk_rust_arg_upper_hex(i64) -> i64"
+    , "  func.func private @kk_rust_arg_octal(i64) -> i64"
+    , "  func.func private @kk_rust_arg_binary(i64) -> i64"
     , "  func.func private @rust_args_pack(i64, i64) -> i64"
     , "  func.func private @rust_print_dispatch(i64) -> i64"
     , "  func.func private @rust_field_safe(i64, i64) -> i64"
     , "  func.func private @rust_arg_debug(i64) -> i64"
+    , "  func.func private @rust_arg_lower_hex(i64) -> i64"
+    , "  func.func private @rust_arg_upper_hex(i64) -> i64"
+    , "  func.func private @rust_arg_octal(i64) -> i64"
+    , "  func.func private @rust_arg_binary(i64) -> i64"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
     , "  func.func private @kk_nil() -> i64"
@@ -802,10 +810,18 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_rust_print_dispatch(i64) -> i64"
     , "  func.func private @kk_rust_field_safe(i64, i64) -> i64"
     , "  func.func private @kk_rust_arg_debug(i64) -> i64"
+    , "  func.func private @kk_rust_arg_lower_hex(i64) -> i64"
+    , "  func.func private @kk_rust_arg_upper_hex(i64) -> i64"
+    , "  func.func private @kk_rust_arg_octal(i64) -> i64"
+    , "  func.func private @kk_rust_arg_binary(i64) -> i64"
     , "  func.func private @rust_args_pack(i64, i64) -> i64"
     , "  func.func private @rust_print_dispatch(i64) -> i64"
     , "  func.func private @rust_field_safe(i64, i64) -> i64"
     , "  func.func private @rust_arg_debug(i64) -> i64"
+    , "  func.func private @rust_arg_lower_hex(i64) -> i64"
+    , "  func.func private @rust_arg_upper_hex(i64) -> i64"
+    , "  func.func private @rust_arg_octal(i64) -> i64"
+    , "  func.func private @rust_arg_binary(i64) -> i64"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
@@ -937,10 +953,18 @@ emitProgramWasm prog =
     , "  func.func private @kk_rust_print_dispatch(i64) -> i64"
     , "  func.func private @kk_rust_field_safe(i64, i64) -> i64"
     , "  func.func private @kk_rust_arg_debug(i64) -> i64"
+    , "  func.func private @kk_rust_arg_lower_hex(i64) -> i64"
+    , "  func.func private @kk_rust_arg_upper_hex(i64) -> i64"
+    , "  func.func private @kk_rust_arg_octal(i64) -> i64"
+    , "  func.func private @kk_rust_arg_binary(i64) -> i64"
     , "  func.func private @rust_args_pack(i64, i64) -> i64"
     , "  func.func private @rust_print_dispatch(i64) -> i64"
     , "  func.func private @rust_field_safe(i64, i64) -> i64"
     , "  func.func private @rust_arg_debug(i64) -> i64"
+    , "  func.func private @rust_arg_lower_hex(i64) -> i64"
+    , "  func.func private @rust_arg_upper_hex(i64) -> i64"
+    , "  func.func private @rust_arg_octal(i64) -> i64"
+    , "  func.func private @rust_arg_binary(i64) -> i64"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -1841,6 +1865,14 @@ emitAppVarWith1 fn arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_rust_arg_debug(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  -- Radix wrappers for `{:x}` / `{:X}` / `{:o}` / `{:b}`.
+  | n `elem` ["rust_arg_lower_hex", "rust_arg_upper_hex", "rust_arg_octal", "rust_arg_binary"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      let rt = "kk_" <> nameText fn
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @" <> rt <> "(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   -- Walk a Haskell [Char] cons-list and print each char.  println_*
   -- adds a trailing newline; print_* does not (matches hPutStr2 with
@@ -3146,6 +3178,8 @@ externalRuntimeFns = Set.fromList
   , "dummy_show_caf"
   , "rust_args_pack", "rust_print_dispatch", "rust_field_safe"
   , "rust_arg_debug"
+  , "rust_arg_lower_hex", "rust_arg_upper_hex"
+  , "rust_arg_octal", "rust_arg_binary"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
   , "read_line", "getLine", "read_file", "write_file"
   , "args_count", "args_get", "args_progname"
@@ -3175,6 +3209,8 @@ externalRuntimeArity = Map.fromList
   , ("dummy_show_caf", 0)
   , ("rust_args_pack", 2), ("rust_print_dispatch", 1), ("rust_field_safe", 2)
   , ("rust_arg_debug", 1)
+  , ("rust_arg_lower_hex", 1), ("rust_arg_upper_hex", 1)
+  , ("rust_arg_octal", 1), ("rust_arg_binary", 1)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
   , ("show_int", 1)
   , ("read_line", 0), ("getLine", 0)

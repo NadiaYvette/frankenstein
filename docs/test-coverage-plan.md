@@ -23,7 +23,23 @@ whether any of them are lurking.
 
 ## Three layered phases
 
-### Phase A: hello-world per language
+### Phase A: hello-world per language — SHIPPED easy-five (2026-05-19)
+
+**Driver**: `test-hellos.sh` (run from repo root).  5/5 pass.
+
+| Bridge | File | Mode | Output |
+|---|---|---|---|
+| Koka | `examples/hello.kk` | native string via `kk_println_str` | "Hello, World!" |
+| Python | `examples/hello.py` | native string via `println_str` | "Hello, world" |
+| Haskell | `examples/hello.hs` | degraded to Int (length 13) | "13" |
+| Rust | `examples/hello.rs` | degraded to Int (hardcoded 13) | "13" |
+| Mercury | `examples/hello.m` + `hello-mercury-driver.kk` | polyglot semidet → Int | "13" |
+
+The three degraded forms each document a specific string-ABI gap in their
+header comments and as ROADMAP entries (`BRIDGE_haskell_strings`,
+`BRIDGE_rust_strings`, `BRIDGE_mercury_strings`).  Mercury cannot run
+standalone; the established polyglot idiom (proven by `polyglot-demo/check.m`)
+is what works.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

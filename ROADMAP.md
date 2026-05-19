@@ -704,6 +704,38 @@ details.
   in the self-hosted binary non-deterministically corrupts characters
   (closure dispatch or UTF-8 iteration). Mitigated by `A_sanitize_shim.c`.
 
+- **BRIDGE_haskell_strings**: GHC bridge cannot print strings. `putStrLn`
+  inlines to `hPutStr stdout`, pulling in `GHC.Internal.IO.Handle.FD/stdout`
+  and `GHC.Internal.IO.Handle.Text/hPutStr2` which the runtime does not shim.
+  `main :: String` does not route through `kk_println_str` because the bridge
+  translates `String` (i.e. `[Char]`) to a cons-list and `returnsStringType`
+  in the emitter checks for the `string` TCon. Workaround: `examples/hello.hs`
+  uses `main :: Int = myLength "Hello, World!"` to exercise the string-literal
+  *allocation* path (unpackCString# warnings appear but compile succeeds).
+  Captured by `test-hellos.sh` (Phase A test driver).
+
+- **BRIDGE_rust_strings**: Rust bridge cannot print or measure strings.
+  `println!(...)` pulls in `core::fmt::Arguments::new`, `core::fmt::rt::Argument`,
+  and `std::io::_print` (all unshimmed). `str::len()` produces a mangled
+  symbol `core::str::<impl str>::len` that the emitter encodes with a `:`
+  in the MLIR function name, which mlir-opt rejects. Workaround:
+  `examples/hello.rs` returns a hardcoded `13` constant for `"Hello, World!".len()`.
+  Real fix requires shimming `core::str::len` and either Rust's `Display`
+  trait machinery or a `kk_print_*` FFI declaration in user code.
+
+- **BRIDGE_mercury_strings**: Mercury bridge cannot run standalone. Mercury's
+  `:- pred main(io::di, io::uo) is det.` requires `io.write_string` from
+  Mercury's stdlib `io` module (large shim, not started). Standalone `is det`
+  predicates with single-clause facts (e.g. `seven(7).`) trigger HLDS
+  unification (`HeadVar__1`, `unify`) which the bridge does not link.
+  `:- func f = int.` and `:- func f(int) = int.` forms have the same issue
+  (HLDS uses `HeadVar__N` for the return slot). Workaround: Mercury hellos
+  use the proven `is semidet` polyglot pattern from `polyglot-demo/check.m`
+  paired with a Koka driver. See `examples/hello.m` + `examples/hello-mercury-driver.kk`.
+  Real fix requires extending `MercuryBridge.HldsParse` to recognise
+  fact-form clauses as `GoalUnify` (not `GoalCall "unify"`), OR implementing
+  the io module shim.
+
 ---
 
 ## Phase 10: Tier A Directions — Arrays and First-Class Continuations ✓

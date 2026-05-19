@@ -660,13 +660,30 @@ static int kk_rust_arg_is_numeric(int64_t v) {
 }
 
 /* Print one arg with the given spec applied: render to buffer, apply
- * precision (truncate for strings; min-digits for ints), then pad to
- * `width` using `fill` chars on the chosen alignment side. */
+ * the `+` sign flag (if numeric and non-negative), precision
+ * (truncate for strings; min-digits for ints), then pad to `width`
+ * using `fill` chars on the chosen alignment side. */
 static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
     size_t len = 0;
     char* rendered = kk_rust_render_one_arg(v, &len);
     if (!rendered) return;
     int is_num = kk_rust_arg_is_numeric(v);
+    /* Apply `+` sign flag: prepend '+' if numeric and not already
+     * signed (i.e. doesn't start with '-' or '+').  Done before
+     * precision so the sign joins the digit count properly. */
+    if (spec->plus_sign && is_num && len > 0
+        && rendered[0] != '-' && rendered[0] != '+')
+    {
+        char* signed_buf = (char*)malloc(len + 2);
+        if (signed_buf) {
+            signed_buf[0] = '+';
+            memcpy(signed_buf + 1, rendered, len);
+            signed_buf[len + 1] = 0;
+            free(rendered);
+            rendered = signed_buf;
+            len = len + 1;
+        }
+    }
     /* Apply precision before width.  For strings, precision is the
      * max byte count (truncate).  For numerics, precision sets the
      * minimum number of digits (zero-pad on the left between sign

@@ -106,7 +106,7 @@ echo "--- Rust formatted println! ---"
 run_hello "rust-fmt"          $'a=41 b=101\nanswer = 142\nhello, frankenstein\nfrankenstein = 142' "examples/rust_fmt.rs"
 run_hello "rust-dbg"          $'Display: 42\nDebug:   42\nDisplay: hello\tworld\nDebug:   "hello\\tworld"' "examples/rust_dbg.rs"
 run_hello "rust-radix"        $'dec: 255\nhex: ff\nHEX: FF\noct: 377\nbin: 11111111' "examples/rust_radix.rs"
-run_hello "rust-spec"         $'[   42]\n[42   ]\n[   42]\n[ 42  ]\n[00042]\n[-0007]\n[xxx42]\n[000000ff]\n[hi   ]\n[frank]\n[00042]\n[frank     ]' "examples/rust_spec.rs"
+run_hello "rust-spec"         $'[   42]\n[42   ]\n[   42]\n[ 42  ]\n[00042]\n[-0007]\n[xxx42]\n[000000ff]\n[hi   ]\n[frank]\n[00042]\n[frank     ]\n[+42]\n[-7]\n[+0042]' "examples/rust_spec.rs"
 
 echo ""
 echo "========================================"

@@ -40,4 +40,7 @@ pub fn main() {
     println!("[{:.5}]", long);   //  [frank]   precision truncates strings
     println!("[{:.5}]", n);      //  [00042]   precision = min digits (ints)
     println!("[{:10.5}]", long); //  [frank     ]  width + precision
+    println!("[{:+}]", n);       //  [+42]     explicit + for non-negative
+    println!("[{:+}]", neg);     //  [-7]      negative unchanged
+    println!("[{:+05}]", n);     //  [+0042]   sign + zero-pad
 }

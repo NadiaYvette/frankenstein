@@ -1,18 +1,29 @@
 module ShowTuple where
 
--- Demonstrates that the Show instance for `(Int, Int)` works through the
--- GHC bridge.  GHC's Show (a, b) specialiser routes the format through
---   "(" ++ showsPrec 0 a ("," ++ showsPrec 0 b ")")
--- using the helpers:
---   - showList__1 (','), the inter-element separator — handled by
---     knownShowCharCAF (Frankenstein.GhcBridge.CoreTranslate).
---   - $fShowCallStack_$sgo, a 3-arg `showFn _ tail → showFn tail`
---     applier — handled by isShowTupleSgo in the same module.
+-- Demonstrates that the Show instance for tuples works through the
+-- GHC bridge for the common shapes:
+--   - 2-tuples
+--   - n-tuples (3, 4, 5, ...)
+--   - tuples with negative numbers
+--   - nested tuples
 --
--- Tuples wider than 2 currently fail: GHC's Show (a, b, c) (and beyond)
--- emits an IR shape that drops the trailing elements in our bridge —
--- see ROADMAP → BRIDGE_haskell_strings.  Multiple tuple prints in one
--- module also hit additional unshimmed CAFs (e.g. $fShowCallStack8).
+-- GHC's Show specialiser emits a chain of comma-separated showFn
+-- applications through `$fShowCallStack_$sgo`, whose second arg is
+-- a static cons-list of show closures.  The bridge unrolls this
+-- chain at translation time via `expandTupleShowChain` so all
+-- elements appear in the output.
+--
+-- Numbered CAFs from GHC.Internal.Show are inlined via
+-- knownShowCharCAF / knownShowCAF:
+--   showList__1 = ','   showList__2 = ']'   showList__3 = '['
+--   showList__4 = "[]"  $fShowCallStack8 = '-' (minus sign)
+-- The Show-class dictionary's never-forced showList field is
+-- substituted with `dummy_show_caf` so the dict structure links cleanly.
 
 main :: IO ()
-main = print ((7, 13) :: (Int, Int))
+main = do
+  print ((1, 2) :: (Int, Int))
+  print ((1, 2, 3) :: (Int, Int, Int))
+  print ((-5, 100) :: (Int, Int))
+  print ((42, 0, -7, 13) :: (Int, Int, Int, Int))
+  print (((7, 13), 42) :: ((Int, Int), Int))

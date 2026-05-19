@@ -369,6 +369,14 @@ static int64_t kk_cons_char_cell(int64_t ch, int64_t tail) {
     return cell;
 }
 
+/* Dummy 0-arg CAF used by the GHC bridge to stub out unforced
+ * references to GHC.Internal.Show showList methods (`$cshowList`).
+ * The bridge points specialised dictionary slots at this so they
+ * link cleanly; the dict is never traversed at runtime because user
+ * code only invokes showsPrec/show, not showList. */
+int64_t dummy_show_caf(void) { return 0; }
+int64_t kk_dummy_show_caf(int64_t) __attribute__((alias("dummy_show_caf")));
+
 /* List append for Haskell [Char] cons-lists: a ++ b.
  * Walks a (collecting into a buffer), then prepends each element onto
  * b in reverse to preserve original order.  Recurses if a exceeds the

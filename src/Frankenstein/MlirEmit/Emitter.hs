@@ -614,6 +614,7 @@ emitProgramText prog =
     -- The C runtime declares haskell_chars_concat as an alias of
     -- kk_haskell_chars_concat (see runtime/kk_runtime.c).
     , "  func.func private @haskell_chars_concat(i64, i64) -> i64"
+    , "  func.func private @dummy_show_caf() -> i64"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
     , "  func.func private @kk_nil() -> i64"
@@ -787,6 +788,7 @@ emitProgramWithEffects prog =
     -- The C runtime declares haskell_chars_concat as an alias of
     -- kk_haskell_chars_concat (see runtime/kk_runtime.c).
     , "  func.func private @haskell_chars_concat(i64, i64) -> i64"
+    , "  func.func private @dummy_show_caf() -> i64"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
@@ -913,6 +915,7 @@ emitProgramWasm prog =
     -- The C runtime declares haskell_chars_concat as an alias of
     -- kk_haskell_chars_concat (see runtime/kk_runtime.c).
     , "  func.func private @haskell_chars_concat(i64, i64) -> i64"
+    , "  func.func private @dummy_show_caf() -> i64"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -3076,6 +3079,7 @@ externalRuntimeFns = Set.fromList
   , "println_haskell_chars", "print_haskell_chars"
   , "int_to_haskell_chars", "int_list_to_haskell_chars"
   , "haskell_chars_concat"
+  , "dummy_show_caf"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
   , "read_line", "getLine", "read_file", "write_file"
   , "args_count", "args_get", "args_progname"
@@ -3102,6 +3106,7 @@ externalRuntimeArity = Map.fromList
   , ("println_haskell_chars", 1), ("print_haskell_chars", 1)
   , ("int_to_haskell_chars", 2), ("int_list_to_haskell_chars", 2)
   , ("haskell_chars_concat", 2)
+  , ("dummy_show_caf", 0)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
   , ("show_int", 1)
   , ("read_line", 0), ("getLine", 0)

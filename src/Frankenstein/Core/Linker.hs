@@ -580,6 +580,8 @@ runtimeNames = Set.fromList
   -- Append two [Char] cons-lists — GHC bridge's rewrite target for
   -- GHC.Internal.Base.(++) in derived Show bodies.
   , "haskell_chars_concat"
+  -- Stub CAF for unforced GHC Show showList methods.
+  , "dummy_show_caf"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

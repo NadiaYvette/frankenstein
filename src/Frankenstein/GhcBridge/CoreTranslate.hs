@@ -281,19 +281,23 @@ trExpr (App f a) =
       , [listArg, tailArg] <- valueArgs ->
           F.EApp (F.EVar (F.Name "int_list_to_haskell_chars" 0))
                  [trExpr listArg, trExpr tailArg]
-    -- GHC.Internal.Show.$fShowCallStack_$sgo: tuple-format helper that
-    -- applies its closure arg to the tail.  Call shape:
-    --   $sgo(showFn, _separator, tail) → showFn(tail)
-    -- The middle arg is a list-CAF reference (the inter-element
-    -- separator) — we drop it since the call site already inserts
-    -- the separator via showList__1 before the $sgo invocation.
+    -- GHC.Internal.Show.$fShowCallStack_$sgo: tuple-format helper.
+    --   $sgo(showFn1, [showFn2, …, showFnN], tail)
+    -- expands to a chain of comma-separated show-fn applications:
+    --   showFn1 (',' : showFn2 (',' : … (',' : showFnN tail) …))
+    -- The second arg is a static cons-list of closures (GHC fully
+    -- inlines tuple shapes), so we unroll at translation time.
+    -- For 2-tuples (where the list is empty), this reduces to just
+    -- showFn1(tail).
     (Var v, args)
       | isShowTupleSgo v
       , let valueArgs = filter (\x -> not (isDictArg x)
                                        && not (isRealWorldArg x)
                                        && not (isTypeArg x)) args
-      , [closureArg, _sep, tailArg] <- valueArgs ->
-          F.EApp (trExpr closureArg) [trExpr tailArg]
+      , [closureArg, restListArg, tailArg] <- valueArgs ->
+          expandTupleShowChain (trExpr closureArg)
+                               (collectStaticShowList restListArg)
+                               (trExpr tailArg)
     -- General case: strip dictionary arguments and realWorld# state tokens
     (fun, args) ->
       let args' = filter (\x -> not (isDictArg x) && not (isRealWorldArg x)) args
@@ -509,9 +513,16 @@ knownShowCharCAF v =
        "$fShowCallStack2"    -> Just ')'
        "$fShowCallStack3"    -> Just '('
        "$fShowCallStack4"    -> Just ','     -- between tuple elements
-       -- showList__1 is the tuple/list element separator ',' inlined
-       -- by GHC's tuple Show specialiser.
+       "$fShowCallStack8"    -> Just '-'     -- negative-number minus sign
+       -- showList__N are the list-display bracket/separator chars
+       -- emitted by GHC's specialised $fShow*_$cshowList methods.
+       -- Numbering (consistent across recent GHC versions):
+       --   1 = ',' inter-element separator (tuple/list bodies)
+       --   2 = ']' closing bracket after last element
+       --   3 = '[' opening bracket before first element
        "showList__1"         -> Just ','
+       "showList__2"         -> Just ']'
+       "showList__3"         -> Just '['
        _                     -> Nothing
      else Nothing
 
@@ -539,6 +550,10 @@ knownShowCAF v =
        "$fShowMaybe2"        -> Just (TE.encodeUtf8 "Nothing")  -- older GHC
        "$fShowEither1"       -> Just (TE.encodeUtf8 "Left ")
        "$fShowEither2"       -> Just (TE.encodeUtf8 "Right ")
+       -- showList__4 holds the empty-list literal "[]" — used by
+       -- the $fShow*_$cshowList nil case as
+       --   unpackAppendCString# showList__4 tail = "[]" ++ tail.
+       "showList__4"         -> Just (TE.encodeUtf8 "[]")
        _                     -> Nothing
      else Nothing
 
@@ -562,6 +577,43 @@ isShowIntListMethod v =
                Nothing -> ""
   in (mmod == "GHC.Internal.Show" || mmod == "GHC.Show")
      && occ == "$fShowInt_$cshowList"
+
+-- | Walk a GHC Core expression representing a *static* cons-list of
+-- ShowS closures (the second arg of $sgo for ≥3-element tuples).
+-- The simplifier fully inlines cons cells for fixed-arity tuples, so
+-- the expression is shaped as
+--   `App (App (Var (:)) closure_i) rest`
+-- terminating in `Var []`.  Returns the closures in source order.
+-- Anything we don't recognise terminates the walk, so partial extraction
+-- is safe.
+collectStaticShowList :: CoreExpr -> [CoreExpr]
+collectStaticShowList = go
+  where
+    go e = case collectArgs e of
+      (Var v, args) ->
+        let valueArgs = filter (not . isTypeArg) args
+            name = case isDataConId_maybe v of
+              Just dc -> getOccString (dataConName dc)
+              Nothing -> getOccString v
+        in case (name, valueArgs) of
+             (":",  [h, t]) -> h : go t
+             ("[]", _)      -> []
+             _              -> []  -- bail out gracefully
+      _ -> []
+
+-- | Build the chain expansion of $sgo for a list of intermediate
+-- closures.  Empty list (2-tuple case) yields @first(tail)@.  Each
+-- closure prepends a comma separator and is applied to the rest.
+expandTupleShowChain :: F.Expr -> [CoreExpr] -> F.Expr -> F.Expr
+expandTupleShowChain firstClos closures tailE =
+  F.EApp firstClos [foldr step tailE closures]
+  where
+    -- Each remaining closure produces (',' : closure(rest))
+    step closExpr rest =
+      F.EApp (F.ECon (F.QName T.empty (F.Name ":" 0)))
+             [ F.ELit (F.LitChar ',')
+             , F.EApp (trExpr closExpr) [rest]
+             ]
 
 -- | True for the GHC tuple-format helper $fShowCallStack_$sgo, used
 -- by the specialised Show (a, b) instance.  Three args: showFn,
@@ -636,6 +688,13 @@ isPrefixOf [] _ = True
 isPrefixOf _ [] = False
 isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
 
+-- | Module-local substring search (no Data.List import needed).
+isInfixOfStr :: String -> String -> Bool
+isInfixOfStr needle haystack = any (isPrefixOf needle) (tails haystack)
+  where
+    tails []         = [[]]
+    tails s@(_:ys)   = s : tails ys
+
 -- | Is this a compiler-generated dictionary/module definition?
 -- These are GHC's desugared typeclass infrastructure and module metadata.
 --
@@ -653,11 +712,15 @@ isDictDef d =
       -- body references `showList__` (an unshimmed GHC runtime
       -- helper).  Filtering it keeps `print x` (which uses
       -- showsPrec) working without dragging in the list machinery.
+      -- Also filter the specialised `$s..._$cshowList...` and
+      -- `$s$fShowTuple..._$cshowList...` variants the simplifier
+      -- generates — same reasoning.
+      hasShowList = any (`isInfixOfStr` n) ["_$cshowList", "$cshowList"]
       isDerivedMethodName = any (`isPrefixOf` drop 2 n)
         [ "showsPrec", "show"   -- keep $cshowsPrec, $cshow (not $cshowList)
         , "compare", "min", "max"
         , "fmap", "foldr", "foldMap", "traverse"
-        ] && not ("showList" `isPrefixOf` drop 2 n)
+        ] && not hasShowList
   in isPrefixOf "$f" n || isPrefixOf "$d" n
      || (isPrefixOf "$c" n && not isDerivedMethodName)
      || isPrefixOf "$tr" n || isPrefixOf "$W" n || isPrefixOf "$tc" n
@@ -754,6 +817,16 @@ normalizeGhcBuiltin v =
     -- Haskell list append used by derived Show bodies.
     ("GHC.Internal.Base", "++") -> Just "haskell_chars_concat"
     ("GHC.Base",          "++") -> Just "haskell_chars_concat"
+    -- GHC's stdlib Show showList methods get referenced by name when
+    -- the bridge keeps the Show dictionary structure (`$s$fShow*`
+    -- defs).  The user code never forces these (only showsPrec is
+    -- invoked), but the unresolved symbol breaks linking.  Substitute
+    -- with a dummy 0-returning CAF — the thunk wrapping it stays
+    -- unforced.
+    ("GHC.Internal.Show", showListName)
+      | "_$cshowList" `isInfixOfStr` showListName -> Just "dummy_show_caf"
+    ("GHC.Show",          showListName)
+      | "_$cshowList" `isInfixOfStr` showListName -> Just "dummy_show_caf"
     -- Num methods
     (m, "+")      | isGhcNum m -> Just "+"
     (m, "-")      | isGhcNum m -> Just "-"

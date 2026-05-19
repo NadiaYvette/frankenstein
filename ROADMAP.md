@@ -759,20 +759,22 @@ details.
   branches the captures aren't materialised, so the call passes only
   1 arg.  Workaround: split each ADT into its own module.
 
-  Show for 2-tuples `(Int, Int)` works via:
-    - `showList__1` = `','` added to knownShowCharCAF (the
-      inter-element separator).
-    - `$fShowCallStack_$sgo` recognised by `isShowTupleSgo` and
-      rewritten as `closure(tail)` (the third-arg tail-applier).
-
-  Known limitations:
-    - Tuples ≥ 3 elements lose trailing components: GHC's Show
-      (a, b, c) emits an IR shape with curried lambda application
-      (`int_to_haskell_chars(2, r)(:(')', s))`) that drops the third
-      argument in our bridge.  Bridge IR investigation needed.
-    - Multiple tuple `print` calls in one module trigger additional
-      unshimmed CAFs (`$fShowCallStack8`, `showList__3`, etc.).
-      Workaround: one print per module.
+  Show for tuples works for shapes including 2-tuples, n-tuples
+  (3, 4, 5, …), tuples with negative numbers, and nested tuples
+  (e.g. `((Int, Int), Int)`).  The key bridge piece:
+    - `$fShowCallStack_$sgo(showFn1, [showFn2, …, showFnN], tail)`
+      is unrolled at translation time via `expandTupleShowChain` to
+      `showFn1 (',' : showFn2 (',' : … (',' : showFnN tail) …))`.
+      The middle list is a static cons-list of closures that GHC
+      fully inlines for fixed-arity tuples; `collectStaticShowList`
+      walks it at translation time.
+    - Numbered CAFs `showList__N`, `$fShowCallStack8` (minus sign),
+      etc. added to knownShowCharCAF/knownShowCAF.
+    - `_$cshowList` matching anywhere in the def name is filtered,
+      including the `$s$f...` specialised variants.
+    - External GHC `$cshowList` references (via the never-forced
+      thunk in the Show dict's showList slot) are routed through
+      a `dummy_show_caf` runtime stub so the dict links cleanly.
 
   Still blocked: reading stdin/files, formatted output via
   `printf`/`Text.Printf`, GADT-style data declarations.

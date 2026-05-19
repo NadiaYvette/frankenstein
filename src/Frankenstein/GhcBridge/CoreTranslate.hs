@@ -159,6 +159,26 @@ trExpr (App f a) =
     -- tagToEnum#(expr) → expr (Bool uses 0/1 integers, same as Int#)
     (Var v, [Type _, arg])
       | getOccString v == "tagToEnum#" -> trExpr arg
+    -- putStrLn / hPutStr2 from GHC.Internal.IO.Handle.Text: GHC inlines
+    -- `putStrLn s = hPutStr2 stdout s True` before our bridge sees Core.
+    -- The runtime can't shim Handle/FD machinery, so route the call to
+    -- println_haskell_chars (walks the [Char] cons-list and writes
+    -- chars + trailing newline).  Args: (handle, string, addNewline).
+    -- We use the addNewline flag to pick the right runtime helper.
+    (Var v, args)
+      | Just rt <- ghcIoOutputRuntime v
+      , let valueArgs = filter (\x -> not (isDictArg x)
+                                       && not (isRealWorldArg x)
+                                       && not (isTypeArg x)) args
+      , length valueArgs >= 2 ->
+          let stringArg = valueArgs !! 1
+              addNewline = case drop 2 valueArgs of
+                (Var b : _) -> getOccString b /= "False"
+                _           -> True
+              fnName = if rt == "hPutStr2" && not addNewline
+                       then "print_haskell_chars"
+                       else "println_haskell_chars"
+          in F.EApp (F.EVar (F.Name (T.pack fnName) 0)) [trExpr stringArg]
     -- General case: strip dictionary arguments and realWorld# state tokens
     (fun, args) ->
       let args' = filter (\x -> not (isDictArg x) && not (isRealWorldArg x)) args
@@ -320,6 +340,26 @@ isDictArg _ = False
 isRealWorldArg :: CoreExpr -> Bool
 isRealWorldArg (Var v) = getOccString v == "realWorld#"
 isRealWorldArg _ = False
+
+-- | True for type arguments in App; GHC passes types as explicit args.
+isTypeArg :: CoreExpr -> Bool
+isTypeArg (Type _) = True
+isTypeArg _        = False
+
+-- | If this Var is one of GHC's stdout-writing IO primitives, return
+-- the runtime helper to route through.  All currently recognised forms
+-- take (handle, string, addNewline).  The bridge replaces the entire
+-- call with a direct print on the string arg.
+ghcIoOutputRuntime :: Var -> Maybe String
+ghcIoOutputRuntime v =
+  let occ = getOccString v
+      mmod = case nameModule_maybe (varName v) of
+               Just m  -> moduleNameString (moduleName m)
+               Nothing -> ""
+  in case (mmod, occ) of
+       ("GHC.Internal.IO.Handle.Text", "hPutStr2")    -> Just "hPutStr2"
+       ("GHC.IO.Handle.Text",          "hPutStr2")    -> Just "hPutStr2"
+       _                                              -> Nothing
 
 -- | Is this variable a State# RealWorld state token?
 -- Used to detect the state component of unboxed tuples from IO/FFI operations.

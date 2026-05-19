@@ -32,8 +32,9 @@ void    kk_println_con(int64_t v);
 
 /* Walk a Haskell [Char] cons-list and print each char.  Uses the
  * hash-based tags stableConTag "[]" = 31636 and stableConTag ":" =
- * 46589.  Newline appended after final char.  Codepoints > 127 are
- * written verbatim (no UTF-8 re-encoding). */
+ * 46589.  Codepoints > 127 are written verbatim (no UTF-8 re-encoding).
+ * println_* appends a newline; print_* writes the bytes verbatim. */
+void    kk_print_haskell_chars(int64_t list);
 void    kk_println_haskell_chars(int64_t list);
 
 /* Boxed value construction */

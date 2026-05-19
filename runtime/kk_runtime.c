@@ -299,13 +299,17 @@ void kk_println_con(int64_t v) {
 #define KK_HASKELL_NIL_TAG  31636
 #define KK_HASKELL_CONS_TAG 46589
 
-void kk_println_haskell_chars(int64_t list) {
+void kk_print_haskell_chars(int64_t list) {
     while (1) {
         if (kk_tag(list) == KK_HASKELL_NIL_TAG) break;
         int64_t ch = kk_field(list, 0);
         putchar((int)(ch & 0xff));
         list = kk_field(list, 1);
     }
+}
+
+void kk_println_haskell_chars(int64_t list) {
+    kk_print_haskell_chars(list);
     putchar('\n');
 }
 

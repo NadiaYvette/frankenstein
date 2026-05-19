@@ -31,18 +31,17 @@ whether any of them are lurking.
 |---|---|---|---|
 | Koka | `examples/hello.kk` | native string via `kk_println_str` | "Hello, World!" |
 | Python | `examples/hello.py` | native string via `println_str` | "Hello, world" |
-| Haskell | `examples/hello.hs` | native cons-list via `kk_println_haskell_chars` | "Hello, World!" |
-| Rust | `examples/hello.rs` | str::len → Int via `kk_str_len` remap | "13" |
-| Mercury | `examples/hello.m` | standalone `main_int(13).` after HldsParse fix | "13" |
+| Haskell | `examples/hello.hs` | native `putStrLn` → `kk_println_haskell_chars` | "Hello, World!" |
+| Rust | `examples/hello.rs` | native `println!` → `kk_print_str` | "Hello, World!" |
+| Mercury | `examples/hello.m` | native `io.write_string` → `kk_print_str` | "Hello, World!" |
 
-Most original string-ABI gaps were closed in follow-up work (commits land
-after the initial Phase A ship): HldsParse trailing-`.` stripping unblocked
-single-clause Mercury facts; sanitizer `:`/`;` encoding plus a
-`core::str::<impl str>::len → str_len` remap unblocked Rust's `str::len`;
-the `kk_println_haskell_chars` runtime helper plus emitter detection of
-`[Char]`/`String`-typed `main` unblocked Haskell native string output.
-Remaining gaps documented in ROADMAP: Rust `println!`/`core::fmt` machinery,
-Haskell `putStrLn`/IO machinery, Mercury `io.write_string` module.
+All five hellos now use the natural source form for their language and
+print real strings.  The original Phase A "easy five" was a 1-3h scope
+estimate; closing the three follow-up string-ABI gaps (BRIDGE_haskell_strings,
+BRIDGE_rust_strings, BRIDGE_mercury_strings) took the same session.
+Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
+chained IO actions, formatted output, file/stdin handles, complex
+ADT deconstruction.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

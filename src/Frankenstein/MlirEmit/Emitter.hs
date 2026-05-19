@@ -417,9 +417,14 @@ emitProgramText prog =
           <> escapeMLIRString s <> "\\00\") {addr_space = 0 : i32}"
         | (gn, s) <- esStringLits finalState ]
       -- Check if _frankenstein_main already prints (i.e. main calls print/putStrLn).
-      -- If so, the wrapper should not print the return value.
+      -- If so, the wrapper should not print the return value.  We follow
+      -- EVar references through one level of definitions so that
+      -- `main = main$N` and `main$N = print_str(...)` (the post-GHC
+      -- simplifier shape for `main = putStrLn "..."`) is recognised.
+      defBodyByName = Map.fromList
+        [ (nameText (qnameName (defName d)), defExpr d) | d <- defs ]
       mainPrints = any (\d -> nameText (qnameName (defName d)) == "main"
-                         && exprCallsPrint (defExpr d)) defs
+                         && exprCallsPrintWith defBodyByName (defExpr d)) defs
       mainReturnsADT = any (\d -> nameText (qnameName (defName d)) == "main"
                               && returnsDataType prog d) defs
       mainReturnsString = any (\d -> nameText (qnameName (defName d)) == "main"
@@ -482,9 +487,29 @@ emitProgramText prog =
             , "  }"
             ]
         else ""
+      -- Wrapper that follows a single level of EVar indirection through
+      -- the def-by-name map.  Bounded depth (3) avoids accidental cycles.
+      exprCallsPrintWith :: Map Text Expr -> Expr -> Bool
+      exprCallsPrintWith m = go (3 :: Int)
+        where
+          go d e | d <= 0 = exprCallsPrint e
+          go d (EVar fn)
+            | Just body <- Map.lookup (nameText fn) m = go (d - 1) body
+            | otherwise = False
+          go d (EApp (EVar fn) args)
+            | exprCallsPrint (EApp (EVar fn) args) = True
+            | Just body <- Map.lookup (nameText fn) m = go (d - 1) body
+          go d (EApp f args) = go d f || any (go d) args
+          go d (EDelay e)    = go d e
+          go d (ELet bgs body) =
+            go d body || or [ go d (bindExpr b) | bg <- bgs, b <- bg ]
+          go d (ECase _ bs) = any (\(Branch _ _ b) -> go d b) bs
+          go d (ELam _ body) = go d body
+          go _ _ = False
       exprCallsPrint (EApp (EVar fn) _) =
         nameText fn `elem`
           [ "print", "println_str", "putStrLn", "print_str"
+          , "println_haskell_chars", "print_haskell_chars"
           -- Mercury bridge synthesises a no-arg `main` alias that calls
           -- the user's `main(io::di, io::uo) is det` predicate
           -- (renamed to `main_io_impl` to avoid the alias collision,
@@ -579,6 +604,7 @@ emitProgramText prog =
     , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
     , "  func.func private @kk_println_haskell_chars(i64) -> ()"
+    , "  func.func private @kk_print_haskell_chars(i64) -> ()"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
     , "  func.func private @kk_nil() -> i64"
@@ -742,6 +768,7 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
     , "  func.func private @kk_println_haskell_chars(i64) -> ()"
+    , "  func.func private @kk_print_haskell_chars(i64) -> ()"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
@@ -858,6 +885,7 @@ emitProgramWasm prog =
     , "  func.func private @kk_structural_eq(i64, i64) -> i64"
     , "  func.func private @kk_println_con(i64) -> ()"
     , "  func.func private @kk_println_haskell_chars(i64) -> ()"
+    , "  func.func private @kk_print_haskell_chars(i64) -> ()"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -1688,6 +1716,28 @@ emitAppVarWith1 fn arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "func.call @kk_print_str(%" <> argName <> ") : (i64) -> ()"
+        , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+  -- Walk a Haskell [Char] cons-list and print each char.  println_*
+  -- adds a trailing newline; print_* does not (matches hPutStr2 with
+  -- addNewline False).  Used by the GHC bridge's putStrLn / hPutStr2
+  -- rewrite — see ghcIoOutputRuntime in GhcBridge.CoreTranslate.
+  | n `elem` ["println_haskell_chars"] = do
+      (argOps, argName) <- emitExpr arg
+      forced <- freshName "vf"
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> forced <> " = func.call @kk_thunk_force(%" <> argName <> ") : (i64) -> i64"
+        , "func.call @kk_println_haskell_chars(%" <> forced <> ") : (i64) -> ()"
+        , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+  | n `elem` ["print_haskell_chars"] = do
+      (argOps, argName) <- emitExpr arg
+      forced <- freshName "vf"
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> forced <> " = func.call @kk_thunk_force(%" <> argName <> ") : (i64) -> i64"
+        , "func.call @kk_print_haskell_chars(%" <> forced <> ") : (i64) -> ()"
         , "%" <> resultName <> " = arith.constant 0 : i64"
         ], resultName)
   | n `elem` ["str_len", "strlen", "bytes_len"] = do
@@ -2966,6 +3016,7 @@ externalRuntimeFns = Set.fromList
   , "kk_optab_create", "kk_optab_set", "kk_optab_get"
   , "printf", "puts", "exit", "exitWith", "malloc", "free"
   , "println_str", "print_str", "putStrLn"
+  , "println_haskell_chars", "print_haskell_chars"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
   , "read_line", "getLine", "read_file", "write_file"
   , "args_count", "args_get", "args_progname"
@@ -2989,6 +3040,7 @@ externalRuntimeArity = Map.fromList
   , ("kk_optab_create", 1), ("kk_optab_set", 3), ("kk_optab_get", 2)
   , ("printf", 2), ("puts", 1), ("exit", 1), ("exitWith", 1)
   , ("println_str", 1), ("print_str", 1), ("putStrLn", 1)
+  , ("println_haskell_chars", 1), ("print_haskell_chars", 1)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
   , ("show_int", 1)
   , ("read_line", 0), ("getLine", 0)

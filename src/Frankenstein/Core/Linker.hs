@@ -568,6 +568,9 @@ runtimeNames = Set.fromList
   , "set_ref", "writeIORef"
   -- Mercury choice effect runtime (iterative path enumeration)
   , "mercury_choose", "mercury_collect_choices"
+  -- Haskell-cons-list printers used by the GHC bridge's putStrLn /
+  -- hPutStr2 rewrite and the `main :: String` wrapper detection.
+  , "println_haskell_chars", "print_haskell_chars"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

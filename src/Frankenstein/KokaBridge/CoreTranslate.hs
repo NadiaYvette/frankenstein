@@ -650,6 +650,8 @@ isKokaBuiltinApp kn =
   || stem == "show" && qual `elem` ["show", ""]
   || local == "++"
   || stem == "++"
+  || stem `elem` ["pretend-no-div", "pretend-nodiv-cast"
+                 , "pretend-decreasing"]
   || local `elem` builtinIntrinsicNames
 
 -- | Names the bridge wires directly to a runtime call.  Pure-stem or
@@ -712,6 +714,20 @@ translateBuiltinApp kn args = do
       a' <- translateExpr a
       b' <- translateExpr b
       pure $ F.EApp (F.EVar strConcatName) [a', b']
+    -- std/core/undiv: `pretend-no-div(action)` is defined in Koka
+    -- as `pretend-nodiv-cast(action)()` — it just runs the thunk.
+    -- Filter the std/ module out at the multi-module driver level
+    -- means the def isn't in our program; intercept the call here
+    -- and inline it as `action()`.
+    ("pretend-no-div", _, _, [thunk]) -> do
+      thunk' <- translateExpr thunk
+      pure $ F.EApp thunk' []
+    -- `pretend-nodiv-cast(action)` is an identity coercion — it
+    -- just hands back its argument unchanged.
+    ("pretend-nodiv-cast", _, _, [action]) -> translateExpr action
+    -- `pretend-decreasing(x)` is also identity (it's a structural
+    -- recursion hint, no runtime effect).
+    ("pretend-decreasing", _, _, [x]) -> translateExpr x
     -- Other intrinsics: keep the bare name; the emitter and Linker
     -- recognise them via the runtimeNames Set, so they pass through
     -- to runtime/kk_runtime.c symbols of the same name (after

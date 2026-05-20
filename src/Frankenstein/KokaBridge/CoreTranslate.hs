@@ -297,37 +297,45 @@ translateExpr = \case
   KC.Case scruts@(scrut:rest) branches | not (null rest) -> do
     scrut'    <- translateExpr scrut
     restScruts <- mapM translateExpr rest
-    branches' <- mapM (translateMultiBranch restScruts) branches
+    branches' <- mapM (translateMultiBranch scrut' restScruts) branches
     pure $ F.ECase scrut' branches'
     where
-      translateMultiBranch :: [F.Expr] -> KC.Branch -> Either Text F.Branch
-      translateMultiBranch _ kbr@(KC.Branch pats _) | length pats < 2 =
-        translateBranch kbr
-      translateMultiBranch restEx (KC.Branch pats guards) = do
+      -- Single-pattern multi-scrutinee branch shouldn't happen in
+      -- well-formed Koka; fall back to the scrutinee-aware single
+      -- branch translator (uses the outer scrutinee).
+      translateMultiBranch :: F.Expr -> [F.Expr] -> KC.Branch -> Either Text F.Branch
+      translateMultiBranch outerScr _ kbr@(KC.Branch pats _) | length pats < 2 =
+        translateBranchWithScrut outerScr kbr
+      translateMultiBranch outerScr restEx (KC.Branch pats guards) = do
         case pats of
           (p0:_) -> do
-            outerPat <- translatePattern p0
+            -- Outer pattern matched against outerScr.  Recover any
+            -- as-binders from p0 and wrap the inner body
+            -- (constructed by buildNested) with let-projections.
+            (outerPat, outerBinders) <- translatePatternBinders [] p0
             innerBody <- buildNested restEx (tail pats) guards
-            pure $ F.Branch outerPat Nothing innerBody
+            let wrappedInner = wrapBodyWithAsBinders outerScr outerBinders innerBody
+            pure $ F.Branch outerPat Nothing wrappedInner
           [] -> Left "Multi-scrutinee branch with no patterns"
 
       -- Wrap the guard body with successive inner ECase matches,
       -- one per remaining scrutinee+pattern pair.  Each inner match
-      -- has a single branch with the corresponding pattern.
+      -- has a single branch whose body inherits any as-binders
+      -- recovered from the inner pattern (projecting from the inner
+      -- scrutinee sEx).
       buildNested :: [F.Expr] -> [KC.Pattern] -> [KC.Guard] -> Either Text F.Expr
       buildNested _ _ [] = Left "Branch with no guards"
-      buildNested [] _ guards = do
-        -- No more inner scrutinees — just translate the body.
+      buildNested [] _ guards =
         case guards of
           [KC.Guard _test body] -> translateExpr body
           gs@(_:_:_) -> desugarGuardsMulti gs
           [] -> Left "Branch with no guards"
       buildNested (sEx:ssRest) (p:psRest) guards = do
-        pat <- translatePattern p
-        inner <- buildNested ssRest psRest guards
-        pure $ F.ECase sEx [F.Branch pat Nothing inner]
+        (innerPat, innerBinders) <- translatePatternBinders [] p
+        nested <- buildNested ssRest psRest guards
+        let wrapped = wrapBodyWithAsBinders sEx innerBinders nested
+        pure $ F.ECase sEx [F.Branch innerPat Nothing wrapped]
       buildNested _ [] guards =
-        -- Extra scrutinees but no more patterns: just translate body.
         case guards of
           [KC.Guard _test body] -> translateExpr body
           gs@(_:_:_) -> desugarGuardsMulti gs
@@ -349,7 +357,7 @@ translateExpr = \case
   -- guard above only fires when `not (null rest)`).
   KC.Case (scrut:_) branches -> do
     scrut'    <- translateExpr scrut
-    branches' <- mapM translateBranch branches
+    branches' <- mapM (translateBranchWithScrut scrut') branches
     pure $ F.ECase scrut' branches'
 
   KC.Case [] _ ->

@@ -2328,13 +2328,30 @@ emitAppVarGeneral fn args = do
   -- If the name already has a module qualifier or was linker-mangled, it's
   -- already fully qualified — don't prepend esModulePrefix again.
   -- Also, runtime functions (kk_*, mercury_*) are never module-qualified.
-  qualSanitized <- do
+  initialQual <- do
     pfx <- gets esModulePrefix
     extRtSet <- gets esExtRuntimeFns
     pure $ if hasModule || T.isPrefixOf pfx sanitized
               || Set.member sanitized extRtSet
            then sanitized else pfx <> sanitized
   let nArgs = length args
+      -- Koka's name resolver picks up overloaded operations via a
+      -- type-qualifier prefix (e.g. `rational/==` for the `==` in
+      -- module surd/rational).  Our bridge stores those names
+      -- verbatim, but the def lives at the longer module path
+      -- (`surd_rational_zeze`).  If the direct name isn't a known
+      -- top-level fn, look for one whose MLIR symbol ENDS with
+      -- "_<initialQual>".  The existing PAP / oversaturation
+      -- handling below takes care of the arity dance — the
+      -- under-saturated case (nArgs=0 passing the fn as a value
+      -- to a HOF) builds a zero-supplied PAP closure.
+      qualSanitized =
+        if Set.member initialQual topFns
+        then initialQual
+        else case [ n | n <- Set.toList topFns
+                      , T.isSuffixOf ("_" <> initialQual) n ] of
+               (resolved:_) -> resolved
+               [] -> initialQual
       mArity = Map.lookup qualSanitized arityMap
   if Set.member qualSanitized topFns
     then case mArity of

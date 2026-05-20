@@ -92,6 +92,9 @@ int64_t kk_rust_arg_u16(int64_t v);
 int64_t kk_rust_arg_i16(int64_t v);
 int64_t kk_rust_arg_u8(int64_t v);
 int64_t kk_rust_arg_i8(int64_t v);
+/* Float wrappers — inner i64 carries the IEEE bit pattern of f64/f32. */
+int64_t kk_rust_arg_f64(int64_t v);
+int64_t kk_rust_arg_f32(int64_t v);
 
 /* Named-struct builders for `#[derive(Debug)]` types.  Bridge emits a
  * call to one of these per struct-construction site; the Debug

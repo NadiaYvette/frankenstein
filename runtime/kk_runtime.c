@@ -409,6 +409,8 @@ int64_t kk_dummy_show_caf(int64_t) __attribute__((alias("dummy_show_caf")));
 #define KK_RUST_U8_TAG      0x42100008
 #define KK_RUST_I8_TAG      0x42100108
 #define KK_RUST_STRUCT_TAG  0x575C7C70  /* derive(Debug) struct cell */
+#define KK_RUST_F64_TAG     0x42100F64  /* per-type float arg tags;     */
+#define KK_RUST_F32_TAG     0x42100F32  /* inner i64 holds the IEEE bits */
 
 int64_t kk_rust_args_pack(int64_t template_str, int64_t args_struct) {
     int64_t cell = kk_alloc_con(KK_RUST_FMT_TAG, 2);
@@ -590,6 +592,20 @@ static void kk_rust_print_one_arg(int64_t v) {
         if (tag == KK_RUST_I16_TAG) { printf("%d",   (int)(int16_t)(inner & 0xFFFF)); return; }
         if (tag == KK_RUST_U8_TAG)  { printf("%u",   (unsigned)(inner & 0xFF)); return; }
         if (tag == KK_RUST_I8_TAG)  { printf("%d",   (int)(int8_t)(inner & 0xFF)); return; }
+        if (tag == KK_RUST_F64_TAG) {
+            double d;
+            uint64_t bits = (uint64_t)inner;
+            memcpy(&d, &bits, sizeof(d));
+            printf("%g", d);
+            return;
+        }
+        if (tag == KK_RUST_F32_TAG) {
+            float f;
+            uint32_t bits = (uint32_t)(inner & 0xFFFFFFFF);
+            memcpy(&f, &bits, sizeof(f));
+            printf("%g", (double)f);
+            return;
+        }
         if (tag == KK_RUST_HEX_LO_TAG) { printf("%lx", (long)inner); return; }
         if (tag == KK_RUST_HEX_HI_TAG) { printf("%lX", (long)inner); return; }
         if (tag == KK_RUST_OCT_TAG)    { printf("%lo", (long)inner); return; }
@@ -640,6 +656,14 @@ int64_t kk_rust_arg_u16(int64_t v) { return kk_rust_arg_radix(KK_RUST_U16_TAG, v
 int64_t kk_rust_arg_i16(int64_t v) { return kk_rust_arg_radix(KK_RUST_I16_TAG, v); }
 int64_t kk_rust_arg_u8(int64_t v)  { return kk_rust_arg_radix(KK_RUST_U8_TAG, v); }
 int64_t kk_rust_arg_i8(int64_t v)  { return kk_rust_arg_radix(KK_RUST_I8_TAG, v); }
+
+/* Float wrappers.  The bridge bit-casts the f64/f32 literal value to
+ * i64 in CoreTranslate.parseConstLit, then wraps with these.  The
+ * cell carries the IEEE bit pattern; the printer reinterprets via
+ * memcpy when rendering.  f32 bits live in the low 32 bits of the
+ * inner i64; f64 bits fill the whole word. */
+int64_t kk_rust_arg_f64(int64_t v) { return kk_rust_arg_radix(KK_RUST_F64_TAG, v); }
+int64_t kk_rust_arg_f32(int64_t v) { return kk_rust_arg_radix(KK_RUST_F32_TAG, v); }
 
 /* Named-struct builders.  Cell layout:
  *   tag        = KK_RUST_STRUCT_TAG
@@ -748,6 +772,27 @@ static char* kk_rust_render_one_arg(int64_t v, size_t* out_len) {
             if (wrote < 0) { *out_len = 0; return NULL; }
             *out_len = (size_t)wrote; return result;
         }
+        /* Floats: reinterpret bit pattern and render the way Rust's
+         * Display does — `%g`-equivalent that elides the fraction for
+         * whole-valued floats (3.0 → "3") and keeps significant digits
+         * for fractions (3.14 → "3.14").  Precision-aware printing is
+         * handled by the spec path; here we render the bare default. */
+        if (tag == KK_RUST_F64_TAG) {
+            double d;
+            uint64_t bits = (uint64_t)inner;
+            memcpy(&d, &bits, sizeof(d));
+            int wrote = asprintf(&result, "%g", d);
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
+        if (tag == KK_RUST_F32_TAG) {
+            float f;
+            uint32_t bits = (uint32_t)(inner & 0xFFFFFFFF);
+            memcpy(&f, &bits, sizeof(f));
+            int wrote = asprintf(&result, "%g", (double)f);
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
         if (tag == KK_RUST_HEX_LO_TAG)      fmt = "%lx";
         else if (tag == KK_RUST_HEX_HI_TAG) fmt = "%lX";
         else if (tag == KK_RUST_OCT_TAG)    fmt = "%lo";
@@ -844,7 +889,8 @@ static int kk_rust_arg_is_numeric(int64_t v) {
             || tag == KK_RUST_U32_TAG || tag == KK_RUST_I32_TAG
             || tag == KK_RUST_U64_TAG || tag == KK_RUST_U16_TAG
             || tag == KK_RUST_I16_TAG || tag == KK_RUST_U8_TAG
-            || tag == KK_RUST_I8_TAG)
+            || tag == KK_RUST_I8_TAG
+            || tag == KK_RUST_F64_TAG || tag == KK_RUST_F32_TAG)
             return 1;
         if (tag == KK_RUST_DEBUG_TAG) {
             int64_t inner = kk_field(v, 0);
@@ -873,11 +919,58 @@ static const char* kk_rust_alt_prefix(int64_t v) {
  * numeric and non-negative), precision (truncate for strings;
  * min-digits for ints), then pad to `width` using `fill` chars on
  * the chosen alignment side. */
+/* For float-tagged args, precision means decimal places: re-render
+ * with `%.Nf` and update *len.  Returns 1 if handled, 0 if v is not
+ * a float (caller should keep its existing rendering). */
+static int kk_rust_render_float_precision(int64_t v, uint16_t precision,
+                                          char** rendered, size_t* len)
+{
+    if (!kk_is_heap_ptr(v) || kk_nfields(v) != 1) return 0;
+    int64_t tag = kk_tag(v);
+    int64_t inner = kk_field(v, 0);
+    if (tag == KK_RUST_F64_TAG) {
+        double d;
+        uint64_t bits = (uint64_t)inner;
+        memcpy(&d, &bits, sizeof(d));
+        char* fresh = NULL;
+        int wrote = asprintf(&fresh, "%.*f", (int)precision, d);
+        if (wrote < 0) return 0;
+        free(*rendered);
+        *rendered = fresh;
+        *len = (size_t)wrote;
+        return 1;
+    }
+    if (tag == KK_RUST_F32_TAG) {
+        float f;
+        uint32_t b32 = (uint32_t)(inner & 0xFFFFFFFF);
+        memcpy(&f, &b32, sizeof(f));
+        char* fresh = NULL;
+        int wrote = asprintf(&fresh, "%.*f", (int)precision, (double)f);
+        if (wrote < 0) return 0;
+        free(*rendered);
+        *rendered = fresh;
+        *len = (size_t)wrote;
+        return 1;
+    }
+    return 0;
+}
+
 static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
     size_t len = 0;
     char* rendered = kk_rust_render_one_arg(v, &len);
     if (!rendered) return;
     int is_num = kk_rust_arg_is_numeric(v);
+    /* For floats with a precision spec, re-render up front with `%.Nf`
+     * so the rest of the pipeline (sign flag, width pad) sees the
+     * fully-formatted decimal string.  This must happen before the
+     * sign-flag prepend below, otherwise the re-render would discard
+     * a manually-prepended '+'. */
+    int float_precision_applied = 0;
+    if (spec->has_precision
+        && kk_rust_render_float_precision(v, spec->precision, &rendered, &len))
+    {
+        float_precision_applied = 1;
+    }
     /* Apply `#` alt-form: prepend radix prefix to the rendered
      * buffer before any other transformations.  The prefix length is
      * tracked separately so the zero-pad path can peel it off and
@@ -919,12 +1012,17 @@ static void kk_rust_print_arg_with_spec(int64_t v, const kk_rust_spec_t* spec) {
         }
     }
     /* Apply precision before width.  For strings, precision is the
-     * max byte count (truncate).  For numerics, precision sets the
-     * minimum number of digits (zero-pad on the left between sign
-     * and digits).  Floats are not yet supported. */
+     * max byte count (truncate).  For floats, precision sets the
+     * decimal-place count (`%.Nf`).  For integers, precision sets
+     * the minimum number of digits (zero-pad on the left between
+     * sign and digits). */
     if (spec->has_precision) {
         if (!is_num) {
             if (spec->precision < len) len = spec->precision;
+        } else if (float_precision_applied) {
+            /* Float precision already applied at the top; the sign flag
+             * may have prepended a '+' that the digit-count path would
+             * incorrectly treat as part of an integer.  Skip it. */
         } else {
             /* Find digit start: skip leading radix prefix (`0x`/`0o`/`0b`)
              * and any sign character ('-' / '+'). */
@@ -1167,6 +1265,8 @@ int64_t rust_arg_u16(int64_t) __attribute__((alias("kk_rust_arg_u16")));
 int64_t rust_arg_i16(int64_t) __attribute__((alias("kk_rust_arg_i16")));
 int64_t rust_arg_u8(int64_t)  __attribute__((alias("kk_rust_arg_u8")));
 int64_t rust_arg_i8(int64_t)  __attribute__((alias("kk_rust_arg_i8")));
+int64_t rust_arg_f64(int64_t) __attribute__((alias("kk_rust_arg_f64")));
+int64_t rust_arg_f32(int64_t) __attribute__((alias("kk_rust_arg_f32")));
 int64_t rust_struct_0(int64_t, int64_t)
   __attribute__((alias("kk_rust_struct_0")));
 int64_t rust_struct_1(int64_t, int64_t, int64_t)

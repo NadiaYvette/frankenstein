@@ -631,6 +631,8 @@ emitProgramText prog =
     , "  func.func private @kk_rust_arg_i16(i64) -> i64"
     , "  func.func private @kk_rust_arg_u8(i64) -> i64"
     , "  func.func private @kk_rust_arg_i8(i64) -> i64"
+    , "  func.func private @kk_rust_arg_f64(i64) -> i64"
+    , "  func.func private @kk_rust_arg_f32(i64) -> i64"
     , "  func.func private @kk_rust_struct_0(i64, i64) -> i64"
     , "  func.func private @kk_rust_struct_1(i64, i64, i64) -> i64"
     , "  func.func private @kk_rust_struct_2(i64, i64, i64, i64) -> i64"
@@ -655,6 +657,8 @@ emitProgramText prog =
     , "  func.func private @rust_arg_i16(i64) -> i64"
     , "  func.func private @rust_arg_u8(i64) -> i64"
     , "  func.func private @rust_arg_i8(i64) -> i64"
+    , "  func.func private @rust_arg_f64(i64) -> i64"
+    , "  func.func private @rust_arg_f32(i64) -> i64"
     , "  func.func private @rust_struct_0(i64, i64) -> i64"
     , "  func.func private @rust_struct_1(i64, i64, i64) -> i64"
     , "  func.func private @rust_struct_2(i64, i64, i64, i64) -> i64"
@@ -853,6 +857,8 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_rust_arg_i16(i64) -> i64"
     , "  func.func private @kk_rust_arg_u8(i64) -> i64"
     , "  func.func private @kk_rust_arg_i8(i64) -> i64"
+    , "  func.func private @kk_rust_arg_f64(i64) -> i64"
+    , "  func.func private @kk_rust_arg_f32(i64) -> i64"
     , "  func.func private @kk_rust_struct_0(i64, i64) -> i64"
     , "  func.func private @kk_rust_struct_1(i64, i64, i64) -> i64"
     , "  func.func private @kk_rust_struct_2(i64, i64, i64, i64) -> i64"
@@ -877,6 +883,8 @@ emitProgramWithEffects prog =
     , "  func.func private @rust_arg_i16(i64) -> i64"
     , "  func.func private @rust_arg_u8(i64) -> i64"
     , "  func.func private @rust_arg_i8(i64) -> i64"
+    , "  func.func private @rust_arg_f64(i64) -> i64"
+    , "  func.func private @rust_arg_f32(i64) -> i64"
     , "  func.func private @rust_struct_0(i64, i64) -> i64"
     , "  func.func private @rust_struct_1(i64, i64, i64) -> i64"
     , "  func.func private @rust_struct_2(i64, i64, i64, i64) -> i64"
@@ -1028,6 +1036,8 @@ emitProgramWasm prog =
     , "  func.func private @kk_rust_arg_i16(i64) -> i64"
     , "  func.func private @kk_rust_arg_u8(i64) -> i64"
     , "  func.func private @kk_rust_arg_i8(i64) -> i64"
+    , "  func.func private @kk_rust_arg_f64(i64) -> i64"
+    , "  func.func private @kk_rust_arg_f32(i64) -> i64"
     , "  func.func private @kk_rust_struct_0(i64, i64) -> i64"
     , "  func.func private @kk_rust_struct_1(i64, i64, i64) -> i64"
     , "  func.func private @kk_rust_struct_2(i64, i64, i64, i64) -> i64"
@@ -1052,6 +1062,8 @@ emitProgramWasm prog =
     , "  func.func private @rust_arg_i16(i64) -> i64"
     , "  func.func private @rust_arg_u8(i64) -> i64"
     , "  func.func private @rust_arg_i8(i64) -> i64"
+    , "  func.func private @rust_arg_f64(i64) -> i64"
+    , "  func.func private @rust_arg_f32(i64) -> i64"
     , "  func.func private @rust_struct_0(i64, i64) -> i64"
     , "  func.func private @rust_struct_1(i64, i64, i64) -> i64"
     , "  func.func private @rust_struct_2(i64, i64, i64, i64) -> i64"
@@ -1969,6 +1981,7 @@ emitAppVarWith1 fn arg
              , "rust_arg_u32", "rust_arg_i32", "rust_arg_u64"
              , "rust_arg_u16", "rust_arg_i16"
              , "rust_arg_u8", "rust_arg_i8"
+             , "rust_arg_f64", "rust_arg_f32"
              ] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
@@ -3285,6 +3298,7 @@ externalRuntimeFns = Set.fromList
   , "rust_arg_u32", "rust_arg_i32", "rust_arg_u64"
   , "rust_arg_u16", "rust_arg_i16"
   , "rust_arg_u8", "rust_arg_i8"
+  , "rust_arg_f64", "rust_arg_f32"
   , "rust_struct_0"
   , "rust_struct_1", "rust_struct_2", "rust_struct_3", "rust_struct_4"
   , "rust_struct_5", "rust_struct_6", "rust_struct_7", "rust_struct_8"
@@ -3322,6 +3336,7 @@ externalRuntimeArity = Map.fromList
   , ("rust_arg_u32", 1), ("rust_arg_i32", 1), ("rust_arg_u64", 1)
   , ("rust_arg_u16", 1), ("rust_arg_i16", 1)
   , ("rust_arg_u8", 1), ("rust_arg_i8", 1)
+  , ("rust_arg_f64", 1), ("rust_arg_f32", 1)
   , ("rust_struct_0", 2)
   , ("rust_struct_1", 3), ("rust_struct_2", 4), ("rust_struct_3", 5), ("rust_struct_4", 6)
   , ("rust_struct_5", 7), ("rust_struct_6", 8), ("rust_struct_7", 9), ("rust_struct_8", 10)

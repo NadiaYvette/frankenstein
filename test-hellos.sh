@@ -110,6 +110,7 @@ run_hello "rust-spec"         $'[   42]\n[42   ]\n[   42]\n[ 42  ]\n[00042]\n[-0
 run_hello "rust-numeric"      $'u32: 4000000000\ni32: -12345\nu64: 18000000000000000000\nu8:  200\ni8:  -50' "examples/rust_numeric.rs"
 run_hello "rust-dbg-adt"      $'Point { x: 7, y: 13 }\nRed' "examples/rust_dbg_adt.rs"
 run_hello "rust-dbg-enum"     $'Circle(10)\nRect { w: 7, h: 13 }\nOrigin' "examples/rust_dbg_enum.rs"
+run_hello "rust-float"        $'3.14159\n0\n-2.5\n0.5\n3.14\n4\n+3.14159\n      3.14' "examples/rust_float.rs"
 
 echo ""
 echo "========================================"

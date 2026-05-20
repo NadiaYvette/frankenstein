@@ -55,10 +55,11 @@ module — see `examples/show_mixed.hs`.  Rust formatted `println!`
 with placeholders — see `examples/rust_fmt.rs` (Display),
 `examples/rust_dbg.rs` (Debug), `examples/rust_radix.rs` (radix),
 `examples/rust_spec.rs` (width / align / fill / zero-pad).
-Test driver runs 17/17 hellos.
+`examples/rust_float.rs` covers f64/f32 Display + `{:.N}` precision +
+`{:+}` sign flag.  Test driver runs 21/21 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-f32/f64 floats, file/stdin handles, full UTF-8 re-encoding.
+file/stdin handles, full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

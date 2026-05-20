@@ -852,7 +852,18 @@ details.
   RvStruct rvalues whose name is the last path segment (so the
   enum prefix is stripped from Debug output, matching Rust).
   See `examples/rust_dbg_adt.rs` and `examples/rust_dbg_enum.rs`.
-  Still blocked: f32/f64 floats, float `{:.N}` decimal places.
+  f64 / f32 floats now route through `rust_arg_f64` / `rust_arg_f32`
+  wrappers — the bridge bit-casts MIR float literals (`3.14159f64`,
+  `0.5f32`) into i64 via `castDoubleToWord64` / `castFloatToWord32` in
+  `parseFloatBits`, and the runtime cell carries the IEEE bit pattern.
+  The printer reinterprets with `memcpy` and renders Rust Display
+  output via `%g` (`3.14159`, whole numbers trimmed: 3.0 → "3").
+  `{:.N}` precision re-renders with `%.Nf` (`{:.2}` of pi → "3.14"),
+  honoring `{:+}` sign flag and `{:W.Pf}` width.  See
+  `examples/rust_float.rs`.  Still blocked: float literals that
+  rustc promotes to `main::promoted[N]` (`println!("{:.0}", 3.5_f64)`
+  inline — bind to a `let` first), file/stdin handles, full UTF-8
+  re-encoding.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

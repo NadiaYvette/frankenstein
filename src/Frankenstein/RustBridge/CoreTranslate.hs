@@ -32,6 +32,7 @@ import qualified Data.Text as T
 import Data.Char (isDigit)
 import Data.Bits ((.&.))
 import Data.List (find)
+import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import qualified Data.Set as Set
 import Text.Printf (printf)
 
@@ -305,6 +306,7 @@ parseConstLit :: Text -> Expr
 parseConstLit t
   | "true" `T.isPrefixOf` t = ECon (QName "std" (Name "True" 0))
   | "false" `T.isPrefixOf` t = ECon (QName "std" (Name "False" 0))
+  | Just bits <- parseFloatBits t = ELit (LitInt bits)
   | otherwise =
       -- Try to parse as integer: "0_i64", "1_i64", "10_i64", etc.
       let numPart = T.takeWhile (\c -> c == '-' || isDigit c) t
@@ -366,6 +368,32 @@ parseConstLit t
       | c >= 'a' && c <= 'f' = Just (fromEnum c - fromEnum 'a' + 10)
       | c >= 'A' && c <= 'F' = Just (fromEnum c - fromEnum 'A' + 10)
       | otherwise            = Nothing
+
+-- | Recognise MIR float literals like "3.1415899999999999f64" or
+-- "1.5f32" (also "-2.5f64", "0e0f64").  The float value is bit-cast
+-- to a 64-bit integer pattern (f32 bits are zero-extended into the
+-- low 32 bits of the i64) so the rest of Core can carry it through as
+-- a normal LitInt.  The bridge wraps the value with
+-- rust_arg_f64 / rust_arg_f32, which tags the heap cell so the
+-- runtime knows to reinterpret the bits as a float when printing.
+parseFloatBits :: Text -> Maybe Integer
+parseFloatBits t
+  | Just numStr <- T.stripSuffix "f64" t
+  , looksLikeFloat numStr
+  , Just d <- readFloatStr (T.unpack numStr)
+  = Just (toInteger (castDoubleToWord64 d))
+  | Just numStr <- T.stripSuffix "f32" t
+  , looksLikeFloat numStr
+  , Just f <- readFloatStr (T.unpack numStr)
+  = Just (toInteger (castFloatToWord32 f))
+  | otherwise = Nothing
+  where
+    looksLikeFloat s = T.any (== '.') s
+                    || T.any (== 'e') (T.toLower s)
+    readFloatStr :: Read a => String -> Maybe a
+    readFloatStr s = case reads s of
+      [(x, "")] -> Just x
+      _         -> Nothing
 
 -- | Map MIR binary operator names to Core operator names
 mirBinOpToName :: Text -> Text
@@ -567,6 +595,8 @@ displayTypeWrapper funcName
   | "<i16>"   `T.isInfixOf` funcName = Just "rust_arg_i16"
   | "<u8>"    `T.isInfixOf` funcName = Just "rust_arg_u8"
   | "<i8>"    `T.isInfixOf` funcName = Just "rust_arg_i8"
+  | "<f64>"   `T.isInfixOf` funcName = Just "rust_arg_f64"
+  | "<f32>"   `T.isInfixOf` funcName = Just "rust_arg_f32"
   | "<usize>" `T.isInfixOf` funcName = Just "rust_arg_u64"
   | "<isize>" `T.isInfixOf` funcName = Nothing  -- isize on x86-64 = i64
   | otherwise = Nothing

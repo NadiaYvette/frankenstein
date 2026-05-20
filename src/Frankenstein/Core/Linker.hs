@@ -555,6 +555,7 @@ runtimeNames = Set.fromList
   , "write_file", "writeFile"
   , "file_exists", "fileExists"
   , "read_line", "getLine"
+  , "string_empty"
   , "system", "shell"
   , "getenv", "getEnv"
   -- Command-line arguments and process exit
@@ -591,6 +592,7 @@ runtimeNames = Set.fromList
   , "rust_arg_u32", "rust_arg_i32", "rust_arg_u64"
   , "rust_arg_u16", "rust_arg_i16"
   , "rust_arg_u8", "rust_arg_i8"
+  , "rust_arg_f64", "rust_arg_f32"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

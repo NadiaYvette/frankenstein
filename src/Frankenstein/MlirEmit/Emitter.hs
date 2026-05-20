@@ -2101,6 +2101,10 @@ emitAppVarWith0 fn
       resultName <- freshName "v"
       pure ( [ "%" <> resultName <> " = func.call @kk_read_line() : () -> i64" ]
            , resultName)
+  | n `elem` ["string_empty"] = do
+      resultName <- freshName "v"
+      pure ( [ "%" <> resultName <> " = func.call @kk_string_empty() : () -> i64" ]
+           , resultName)
   | n `elem` ["args_count", "numArgs"] = do
       resultName <- freshName "v"
       pure ( [ "%" <> resultName <> " = func.call @kk_args_count() : () -> i64" ]
@@ -3304,6 +3308,7 @@ externalRuntimeFns = Set.fromList
   , "rust_struct_5", "rust_struct_6", "rust_struct_7", "rust_struct_8"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
   , "read_line", "getLine", "read_file", "write_file"
+  , "string_empty"
   , "args_count", "args_get", "args_progname"
   , "new_ref", "get_ref", "set_ref"
   , "kk_println_con"
@@ -3342,7 +3347,7 @@ externalRuntimeArity = Map.fromList
   , ("rust_struct_5", 7), ("rust_struct_6", 8), ("rust_struct_7", 9), ("rust_struct_8", 10)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
   , ("show_int", 1)
-  , ("read_line", 0), ("getLine", 0)
+  , ("read_line", 0), ("getLine", 0), ("string_empty", 0)
   , ("read_file", 1), ("write_file", 2)
   , ("args_count", 0), ("args_get", 1), ("args_progname", 0)
   , ("new_ref", 1), ("get_ref", 1), ("set_ref", 2)

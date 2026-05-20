@@ -417,9 +417,18 @@ parseRvalue t
       Just op -> RvUse op
       Nothing -> RvRaw t
   | "const " `T.isPrefixOf` t = RvUse (OpConst (T.drop 6 t))
-  -- Reference: &_N
+  -- Reference: &_N or &mut _N.  The bridge treats both as immutable
+  -- aliases since Frankenstein's IR is referentially transparent —
+  -- callers that mutate through &mut have their effect captured
+  -- specifically at CoreTranslate's call-site recognition (e.g.
+  -- Stdin::read_line rebinds the buffer).
   | "&_" `T.isPrefixOf` t =
       let (digits, _) = T.span isDigit (T.drop 2 t)
+      in case reads (T.unpack digits) of
+           [(n, _)] -> RvRef n
+           _        -> RvRaw t
+  | "&mut _" `T.isPrefixOf` t =
+      let (digits, _) = T.span isDigit (T.drop 6 t)
       in case reads (T.unpack digits) of
            [(n, _)] -> RvRef n
            _        -> RvRaw t
@@ -696,6 +705,25 @@ parseTerminator t
   -- _N = func(args) -> [return: bbN, unwind ...]
   | isCallTerm t =
       parseCallTerm t
+  -- drop(_N) -> [return: bbM, unwind …]
+  | "drop(_" `T.isPrefixOf` t =
+      let afterUnder = T.drop 6 t   -- skip "drop(_"
+          (digits, _) = T.span isDigit afterUnder
+          afterArrow = T.strip $ T.drop 1 $ T.dropWhile (/= '[') t
+          targets = T.takeWhile (/= ']') afterArrow
+          retPart = T.strip $ T.takeWhile (/= ',') targets
+      in case (reads (T.unpack digits), T.stripPrefix "return: bb" retPart) of
+           ([(localIdx, _)], Just retDigits) ->
+             case reads (T.unpack retDigits) of
+               [(bb, _)] -> TermDrop localIdx bb
+               _         -> TermRaw t
+           _ -> TermRaw t
+  -- resume; — only reachable via unwinding.  We don't unwind, so the
+  -- block is dead code; mark it as a return so the CFG walker exits
+  -- cleanly without emitting an unresolved mir_term call.
+  | "resume" `T.isPrefixOf` T.strip t = TermReturn
+  -- unreachable — same shape as resume, treat as a return.
+  | "unreachable" `T.isPrefixOf` T.strip t = TermReturn
   -- assert(...) -> [success: bbN, ...]
   | "assert(" `T.isPrefixOf` t =
       let afterArrow = T.strip $ T.drop 1 $ T.dropWhile (/= '[') t
@@ -731,10 +759,13 @@ parseCallTerm t =
         [(_destIdx, _)] ->
           let -- after " = "
               afterEq = T.strip $ T.drop 3 afterDest
-              -- Find the function name: everything up to first "("
-              funcName = T.takeWhile (/= '(') afterEq
-              -- Extract args between first "(" and matching ")"
-              argsAndRest = T.drop 1 $ T.dropWhile (/= '(') afterEq
+              -- Find the function name: everything up to the first "("
+              -- that is NOT inside an angle-bracketed generic parameter.
+              -- Generic params can contain unit type `()`, tuple types
+              -- `(A, B)`, etc., so a naive takeWhile (/= '(') splits
+              -- `Result::<(), Err>::unwrap` at the wrong paren.
+              (funcName, afterFn) = splitAtCallParen afterEq
+              argsAndRest = T.drop 1 afterFn
               -- Find the args part before " -> ["
               beforeArrow = T.strip $ fst $ T.breakOn " -> [" argsAndRest
               -- strip trailing ")"
@@ -754,6 +785,23 @@ parseCallTerm t =
           in TermCallSimple funcName (map T.strip argParts) retBb
         _ -> TermRaw t
     _ -> TermRaw t
+
+-- | Split a call's "name(args)" text at the open-paren that begins
+-- the argument list, skipping any open-parens that sit inside
+-- angle-bracket-delimited generic parameter lists.  Returns (name,
+-- rest-starting-with-open-paren); if no balanced split is found,
+-- falls back to splitting at the very first '('.
+splitAtCallParen :: Text -> (Text, Text)
+splitAtCallParen t = go 0 0
+  where
+    n = T.length t
+    go i depth
+      | i >= n     = (t, T.empty)
+      | c == '<'   = go (i+1) (depth+1)
+      | c == '>' && depth > 0 = go (i+1) (depth-1)
+      | c == '(' && depth == 0 = (T.take i t, T.drop i t)
+      | otherwise  = go (i+1) depth
+      where c = T.index t i
 
 -- | Parse switch targets: "0: bb2, otherwise: bb1"
 parseSwitchTargets :: Text -> [MirSwitchTarget]

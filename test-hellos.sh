@@ -113,6 +113,44 @@ run_hello "rust-dbg-enum"     $'Circle(10)\nRect { w: 7, h: 13 }\nOrigin' "examp
 run_hello "rust-float"        $'3.14159\n0\n-2.5\n0.5\n3.14\n4\n+3.14159\n      3.14' "examples/rust_float.rs"
 
 echo ""
+echo "--- Rust file I/O + stdin ---"
+echo "Hello from a file!" > /tmp/frankenstein-rust-file-read.txt
+run_hello "rust-file-read"    "Hello from a file!" "examples/rust_file_read.rs"
+rm -f /tmp/frankenstein-rwrite.txt
+run_hello "rust-file-write"   "round trip ok"      "examples/rust_file_write.rs"
+
+# rust-stdin is special: the test driver runs the binary with no stdin
+# input by default, so explicitly pipe one line.
+run_stdin_hello() {
+    local name="$1"
+    local stdin_input="$2"
+    local expected="$3"
+    shift 3
+    local sources=("$@")
+    local output_bin="$BUILD_DIR/${name}"
+    printf "  %-40s" "$name"
+    local compile_output
+    compile_output=$($FRANK "${sources[@]}" --compile -o "$output_bin" 2>&1)
+    local compile_rc=$?
+    if [ $compile_rc -ne 0 ] || [ ! -x "$output_bin" ]; then
+        echo "FAIL (compile)"
+        echo "$compile_output" | tail -5 | sed 's/^/    /'
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    local actual
+    actual=$(printf '%s\n' "$stdin_input" | "$output_bin" 2>&1)
+    if [ "$actual" = "$expected" ]; then
+        echo "PASS  ($actual)"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL  (expected '$expected', got '$actual')"
+        FAIL=$((FAIL + 1))
+    fi
+}
+run_stdin_hello "rust-stdin"  "frankenstein" "got: frankenstein" "examples/rust_stdin.rs"
+
+echo ""
 echo "========================================"
 if [ "$FAIL" -eq 0 ]; then
     echo "  ALL HELLOS PASS ($PASS/$((PASS+FAIL)))"

@@ -479,6 +479,20 @@ translateTermExpr body visited term _raw = case term of
             EApp (EVar (Name "rust_arg_octal" 0)) [a]
           (_, (a:_)) | "Argument::<'_>::new_binary" `T.isInfixOf` funcName ->
             EApp (EVar (Name "rust_arg_binary" 0)) [a]
+          -- `Result::<T, E>::unwrap(r)` — the bridge represents the
+          -- result of fallible I/O calls (read_file, write_file, …)
+          -- as the raw success value (empty string on error, etc.),
+          -- so unwrap is identity.  Same for `Result::expect` and the
+          -- `?` operator's `Try::branch` which lowers to a similar
+          -- shape.
+          (_, (a:_))
+            | "Result::<" `T.isPrefixOf` funcName
+            , "::unwrap" `T.isSuffixOf` funcName
+            -> a
+          (_, (a:_))
+            | "Result::<" `T.isPrefixOf` funcName
+            , "::expect" `T.isInfixOf` funcName
+            -> a
           -- Arguments::<'_>::new::<N, M>(template, args) builds a
           -- packed (template, args) cell at runtime.  std::io::_print
           -- below dispatches: if the value is a kk_string the
@@ -487,6 +501,22 @@ translateTermExpr body visited term _raw = case term of
           (_, (template:argsArr:_))
             | "Arguments::<'_>::new" `T.isPrefixOf` funcName ->
               EApp (EVar (Name "rust_args_pack" 0)) [template, argsArr]
+          -- Stdin::read_line(self, &mut buf) — fold the call into a
+          -- direct kk_read_line() with no args.  The buf-rebind side
+          -- effect is materialised separately below by emitting a
+          -- second let-binding for the variable behind the &mut.
+          (_, _) | funcName == "Stdin::read_line"
+                 || "io::Stdin::read_line" `T.isSuffixOf` funcName ->
+            EApp (EVar (Name "read_line" 0)) []
+          -- stdin() / stdout() — these return handle values that our
+          -- runtime doesn't use (the read_line/write/_print helpers
+          -- talk to libc stdin/stdout directly).  Return a sentinel.
+          (_, _) | funcName == "stdin" || "io::stdin" `T.isSuffixOf` funcName
+                 || "::stdin" `T.isSuffixOf` funcName ->
+            ELit (LitInt 0)
+          (_, _) | "String::new" `T.isSuffixOf` funcName
+                 || "string::String::new" `T.isSuffixOf` funcName ->
+            EApp (EVar (Name "string_empty" 0)) []
           _ -> EApp (EVar (Name (remapRustIntrinsic funcName) 0)) argExprs
         -- Find the destination variable: look at the raw terminator
         -- _N = func(args) -> [return: bbM, ...]
@@ -498,10 +528,32 @@ translateTermExpr body visited term _raw = case term of
                    Nothing -> unitType
         -- Continue translating from the return block
         contExpr = translateBlockAt body visited retBb
-    in case destName of
-      Just n ->
+        -- For Stdin::read_line(_, &mut _N), rebind the underlying
+        -- buffer variable _N to the kk_read_line() result so that
+        -- subsequent reads of _N see the line content.  Use the body's
+        -- statement scan to chase argStrs[1] (e.g. "copy _6") through
+        -- a prior `_6 = &mut _N` statement.
+        bufRebind =
+          case (funcName, argStrs) of
+            (fn, _:secondArg:_)
+              | fn == "Stdin::read_line"
+                || "io::Stdin::read_line" `T.isSuffixOf` fn
+              , Just refIdx <- argIndex secondArg
+              , Just target <- findMutRefTarget body refIdx
+              -> Just target
+            _ -> Nothing
+    in case (bufRebind, destName) of
+      (Just bufIdx, Just n) ->
+        let bufName = Name ("_" <> T.pack (show bufIdx)) 0
+            bufTy   = case findLocal body bufIdx of
+                        Just l  -> localTypeToType l
+                        Nothing -> unitType
+        in ELet [[ Bind bufName bufTy (EApp (EVar (Name "read_line" 0)) []) DefVal
+                 , Bind (Name n 0) destTy (ELit (LitInt 0)) DefVal
+                 ]] contExpr
+      (_, Just n) ->
         ELet [[Bind (Name n 0) destTy callExpr DefVal]] contExpr
-      Nothing ->
+      (_, Nothing) ->
         ELet [[Bind (Name "_call" 0) unitType callExpr DefVal]] contExpr
 
   TermAssert _msg successBb ->
@@ -539,6 +591,49 @@ findCallDest t =
          then Just ("_" <> digits)
          else Nothing
     _ -> Nothing
+
+-- | Extract the local index from an MIR operand text fragment like
+-- "move _6" or "copy _6" or bare "_6".  Returns Nothing for
+-- non-local args.
+argIndex :: Text -> Maybe Int
+argIndex t =
+  let stripped = T.strip t
+      bare = case T.words stripped of
+        [_, w] -> w     -- "move _N" / "copy _N"
+        [w]    -> w     -- "_N"
+        _      -> T.empty
+  in case T.stripPrefix "_" bare of
+       Just digits ->
+         let (d, r) = T.span isDigit digits
+         in if not (T.null d) && T.null r
+            then case reads (T.unpack d) of
+                   [(n, _)] -> Just n
+                   _        -> Nothing
+            else Nothing
+       Nothing -> Nothing
+
+-- | Given a local index N, scan the body's basic blocks for a
+-- statement `Assign((_N, &mut _M))` or `Assign((_N, &_M))` and
+-- return M.  The text-MIR pipeline normalises statements into
+-- `Assign(...)` form by the time they reach `bbStatements`.
+findMutRefTarget :: MirBody -> Int -> Maybe Int
+findMutRefTarget body localIdx =
+  let nText = T.pack (show localIdx)
+      needle1 = "Assign((_" <> nText <> ", &mut _"
+      needle2 = "Assign((_" <> nText <> ", &_"
+      stmts = concatMap bbStatements (mirBlocks body)
+      tryMatch s
+        | Just rest <- T.stripPrefix needle1 (T.stripStart s) = parseTail rest
+        | Just rest <- T.stripPrefix needle2 (T.stripStart s) = parseTail rest
+        | otherwise = Nothing
+      parseTail rest =
+        let (d, _) = T.span isDigit rest
+        in case reads (T.unpack d) of
+             [(n, _)] -> Just n
+             _        -> Nothing
+  in case [n | s <- stmts, Just n <- [tryMatch s]] of
+    (n:_) -> Just n
+    []    -> Nothing
 
 -- | Find a local variable by name
 findLocalByName :: MirBody -> Text -> Maybe MirLocalDecl
@@ -612,4 +707,15 @@ remapRustIntrinsic n = case n of
   --     (no trailing newline — Rust's println! source already includes
   --     it in the format string).
   "std::io::_print"                 -> "rust_print_dispatch"
+  -- File I/O.  read_to_string/write/read both come from std::fs and
+  -- read_to_string/write also have monomorphic <&str> specialisations
+  -- — match all the variants we've observed.  Our bridge represents
+  -- the Result as the raw value (empty kk_string on failure for
+  -- reads, return code for writes), so the user's `.unwrap()` is
+  -- elided by the Result::unwrap pattern above.
+  "std::fs::read_to_string"                 -> "read_file"
+  "std::fs::read_to_string::<&str>"         -> "read_file"
+  "std::fs::write::<&str, &str>"            -> "write_file"
+  "std::fs::write::<&str, std::string::String>" -> "write_file"
+  "std::fs::write"                          -> "write_file"
   _                                 -> n

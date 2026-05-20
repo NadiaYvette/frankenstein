@@ -56,10 +56,15 @@ with placeholders — see `examples/rust_fmt.rs` (Display),
 `examples/rust_dbg.rs` (Debug), `examples/rust_radix.rs` (radix),
 `examples/rust_spec.rs` (width / align / fill / zero-pad).
 `examples/rust_float.rs` covers f64/f32 Display + `{:.N}` precision +
-`{:+}` sign flag.  Test driver runs 21/21 hellos.
+`{:+}` sign flag.  `examples/rust_file_read.rs`, `examples/rust_file_write.rs`,
+and `examples/rust_stdin.rs` cover `std::fs::read_to_string`,
+`std::fs::write`, and `io::stdin().read_line()` — all of which fall
+through to the existing kk_read_file / kk_write_file / kk_read_line
+runtime intrinsics via Rust-bridge call-name remapping.  Test driver
+runs 24/24 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-file/stdin handles, full UTF-8 re-encoding.
+full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

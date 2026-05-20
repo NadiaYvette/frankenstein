@@ -860,10 +860,19 @@ details.
   output via `%g` (`3.14159`, whole numbers trimmed: 3.0 → "3").
   `{:.N}` precision re-renders with `%.Nf` (`{:.2}` of pi → "3.14"),
   honoring `{:+}` sign flag and `{:W.Pf}` width.  See
-  `examples/rust_float.rs`.  Still blocked: float literals that
-  rustc promotes to `main::promoted[N]` (`println!("{:.0}", 3.5_f64)`
-  inline — bind to a `let` first), file/stdin handles, full UTF-8
-  re-encoding.
+  `examples/rust_float.rs`.
+  File I/O works via call-name remap: `std::fs::read_to_string` and
+  `std::fs::write::<&str, &str>` route to the existing
+  kk_read_file / kk_write_file intrinsics, with `Result::<T,E>::unwrap`
+  elided at the bridge.  `io::stdin().read_line(&mut buf)` works via
+  a special-cased rebind of the mutable-reference target — the bridge
+  scans the body's statements for `_N = &mut _M`, rewrites the call to
+  `kk_read_line()`, and emits a let-shadow that gives `_M` the read
+  line.  See `examples/rust_file_read.rs`,
+  `examples/rust_file_write.rs`, `examples/rust_stdin.rs`.  Still
+  blocked: float literals that rustc promotes to `main::promoted[N]`
+  (inline `println!("{:.0}", 3.5_f64)` — bind to a `let` first),
+  full UTF-8 re-encoding.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

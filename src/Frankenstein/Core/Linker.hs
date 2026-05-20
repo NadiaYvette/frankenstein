@@ -593,6 +593,17 @@ runtimeNames = Set.fromList
   , "rust_arg_u16", "rust_arg_i16"
   , "rust_arg_u8", "rust_arg_i8"
   , "rust_arg_f64", "rust_arg_f32"
+  -- Koka list constructors (the KokaBridge emits these as EVar refs
+  -- to the `kk_cons` / `kk_nil` runtime helpers).
+  , "kk_cons", "kk_nil"
+  -- Koka stdlib helpers wired by the bridge — defined in
+  -- runtime/kk_runtime.c or aliased to a kk_* implementation.
+  , "string/println", "string/print"
+  , "char/string", "chars/count"
+  , "range/list", "joinsep/join"
+  , "foreach"
+  , "from-int"
+  , "tuple2/fst", "tuple2/snd"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.
@@ -623,8 +634,22 @@ detectUndefinedSymbols prog =
       -- All names that are considered "known"
       allKnown = Set.unions [definedNames, conNames, primitiveNames, runtimeNames]
 
+      -- Stdlib constructors that bridges reference but don't emit
+      -- data declarations for (Koka's std/core/types, Haskell's
+      -- Maybe/Either/Tuple, etc.).  Treat as predeclared.
+      stdlibConQNames :: Set (Text, Text)
+      stdlibConQNames = Set.fromList
+        [ -- Koka std/core/types
+          ("std/core/types", "Tuple2"), ("std/core/types", "Tuple3")
+        , ("std/core/types", "Tuple4"), ("std/core/types", "Tuple5")
+        , ("std/core/types", "Unit"),   ("std/core/types", "True")
+        , ("std/core/types", "False"),  ("std/core/types", "Nothing")
+        , ("std/core/types", "Just"),   ("std/core/types", "@None")
+        , ("std/core/types", "Cons"),   ("std/core/types", "Nil")
+        ]
+
       -- All QNames that are considered "known" (for qualified references)
-      allKnownQ = Set.union definedQNames conQNames
+      allKnownQ = Set.unions [definedQNames, conQNames, stdlibConQNames]
 
       -- Collect all referenced names from expressions
       refdNames :: Set Text
@@ -633,8 +658,17 @@ detectUndefinedSymbols prog =
       refdQNames :: Set (Text, Text)
       refdQNames = Set.fromList $ concatMap (collectConQNames . defExpr) (progDefs prog)
 
+      -- Synthetic names that the bridge emits but never need to link
+      -- (Koka effect-row openers, GHC eta-expansion markers, etc.).
+      -- Their referenced form is purely a type-system artifact —
+      -- they never reach codegen.
+      isSyntheticRef n = T.isPrefixOf "@" n
+                       || n == "indexCharOffAddr#"
+                       || n == "plusAddr#"
+
       -- Undefined unqualified names
-      undefNames = Set.toList $ Set.difference refdNames allKnown
+      undefNames = filter (not . isSyntheticRef)
+                 $ Set.toList $ Set.difference refdNames allKnown
 
       -- Undefined qualified constructor references (only check if module is non-empty)
       undefQNames =

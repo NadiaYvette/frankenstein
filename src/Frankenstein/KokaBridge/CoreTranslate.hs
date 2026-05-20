@@ -166,8 +166,15 @@ translateDef kdef = do
 
 translateExpr :: KC.Expr -> Either Text F.Expr
 translateExpr = \case
-  KC.Var tname _varInfo ->
-    pure $ F.EVar (translateTNameToName tname)
+  KC.Var tname _varInfo
+    -- Bare-EVar reference to `++` (e.g. passed to a HOF like fold).
+    -- Route to `str_concat` so the linker sees a defined symbol.
+    | KN.nameStem (KC.getName tname) == "++" ->
+        pure $ F.EVar (F.Name "str_concat" 0)
+    | KN.nameLocal (KC.getName tname) == "++" ->
+        pure $ F.EVar (F.Name "str_concat" 0)
+    | otherwise ->
+        pure $ F.EVar (translateTNameToName tname)
 
   KC.Lit lit ->
     pure $ F.ELit (translateLit lit)
@@ -597,43 +604,93 @@ isKokaCons :: KN.Name -> Bool
 isKokaCons kn = KN.nameStem kn == "Cons"
              && KN.nameModule kn `elem` ["std/core/types", "std/core"]
 
--- | Check if a Koka name corresponds to a known stdlib builtin.
+-- | Check if a Koka name corresponds to a known stdlib builtin we
+-- want to intercept and translate to a direct runtime call.  Koka's
+-- name resolution picks a typed override (`string/println`,
+-- `int/println`, etc.) — we use the qualifier to route to the right
+-- runtime intrinsic.
 isKokaBuiltinApp :: KN.Name -> Bool
 isKokaBuiltinApp kn =
-  let stem = KN.nameStem kn
+  let stem  = KN.nameStem kn
       local = KN.nameLocal kn
+      qual  = KN.nameLocalQual kn
   in stem `elem` ["println", "print"]
   || local `elem` ["show/println", "show/print"]
-  || stem == "show" && KN.nameLocalQual kn `elem` ["show", ""]
+  || stem == "show" && qual `elem` ["show", ""]
+  || local == "++"
+  || stem == "++"
+  || local `elem` builtinIntrinsicNames
+
+-- | Names the bridge wires directly to a runtime call.  Pure-stem or
+-- pure-local form, depending on what's stable across Koka name
+-- conventions.
+builtinIntrinsicNames :: [String]
+builtinIntrinsicNames =
+  [ "char/string"
+  , "chars/count"
+  , "range/list"
+  , "joinsep/join"
+  , "from-int"
+  , "tuple2/fst"
+  , "tuple2/snd"
+  , "foreach"
+  ]
 
 -- | Translate a known Koka stdlib application to Frankenstein Core.
--- Koka's println : (a, ?show : a -> string) -> io ()
--- becomes: print_str(show(x)) or println_str(show(x))
+-- Koka's println dispatches by type: `string/println`, `int/println`,
+-- etc.  We use the qualifier (or local name) to pick the runtime
+-- function — strings go straight to `println_str`, ints route through
+-- `show_int` first.
 translateBuiltinApp :: KN.Name -> [KC.Expr] -> Either Text F.Expr
 translateBuiltinApp kn args = do
-  let stem = KN.nameStem kn
+  let stem  = KN.nameStem kn
       local = KN.nameLocal kn
-      printName = F.Name "println_str" 0
-      showIntName = F.Name "show_int" 0
-  case (stem, local, args) of
-    -- println(x, show) → println_str(show_int(x))
-    -- Koka passes the value and implicit show function; we call show directly
-    ("println", _, [val, _showFn]) -> do
+      qual  = KN.nameLocalQual kn
+      printName    = F.Name "println_str" 0
+      printNameNoNL = F.Name "print_str" 0
+      showIntName  = F.Name "show_int" 0
+      strConcatName = F.Name "str_concat" 0
+  case (stem, local, qual, args) of
+    -- `string/println(s)` — Koka's println for strings: pass the
+    -- string directly to the println_str runtime.
+    ("println", _, "string", val:_) -> do
+      val' <- translateExpr val
+      pure $ F.EApp (F.EVar printName) [val']
+    ("print", _, "string", val:_) -> do
+      val' <- translateExpr val
+      pure $ F.EApp (F.EVar printNameNoNL) [val']
+    -- `int/println(x)` and the generic `println(x, ?show)` form —
+    -- Koka passes the value and an implicit show; we call show_int.
+    ("println", _, _, val:_) -> do
       val' <- translateExpr val
       pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
-    ("println", _, [val]) -> do
+    (_, "show/println", _, val:_) -> do
       val' <- translateExpr val
       pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
-    (_, "show/println", [val, _showFn]) -> do
-      val' <- translateExpr val
-      pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
-    (_, "show/println", [val]) -> do
-      val' <- translateExpr val
-      pure $ F.EApp (F.EVar printName) [F.EApp (F.EVar showIntName) [val']]
-    -- show(x) → show_int(x)
-    ("show", _, [val]) -> do
+    -- show(x) → show_int(x)  (loses non-int Show; gap remains)
+    ("show", _, _, [val]) -> do
       val' <- translateExpr val
       pure $ F.EApp (F.EVar showIntName) [val']
+    -- Koka's binary `++` is string concat at the value level.  The
+    -- runtime helper kk_str_concat handles rope-based concatenation.
+    (_, "++", _, [a, b]) -> do
+      a' <- translateExpr a
+      b' <- translateExpr b
+      pure $ F.EApp (F.EVar strConcatName) [a', b']
+    ("++", _, _, [a, b]) -> do
+      a' <- translateExpr a
+      b' <- translateExpr b
+      pure $ F.EApp (F.EVar strConcatName) [a', b']
+    -- Other intrinsics: keep the bare name; the emitter and Linker
+    -- recognise them via the runtimeNames Set, so they pass through
+    -- to runtime/kk_runtime.c symbols of the same name (after
+    -- sanitizeName encodes the `/` as `_`).  Where the runtime
+    -- doesn't yet provide an implementation, the link still fails —
+    -- the names are at least visible in the Core dump for the
+    -- subsequent shim-writing pass.
+    (_, l, _, _) | l `elem` builtinIntrinsicNames -> do
+      args' <- mapM translateExpr args
+      pure $ F.EApp (F.EVar (translateNameK kn)) args'
     -- Fallback: generic translation
     _ -> do
       args' <- mapM translateExpr args

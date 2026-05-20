@@ -61,10 +61,11 @@ and `examples/rust_stdin.rs` cover `std::fs::read_to_string`,
 `std::fs::write`, and `io::stdin().read_line()` — all of which fall
 through to the existing kk_read_file / kk_write_file / kk_read_line
 runtime intrinsics via Rust-bridge call-name remapping.  Test driver
-runs 24/24 hellos.
+runs 26/26 hellos.  Haskell and Rust hello programs that contain
+non-ASCII characters (café / 한국어 / 🎉) now round-trip correctly —
+see `examples/hello_utf8.hs` and `examples/rust_utf8.rs`.
 
-Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-full UTF-8 re-encoding.
+Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

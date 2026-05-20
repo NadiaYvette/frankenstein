@@ -113,6 +113,11 @@ run_hello "rust-dbg-enum"     $'Circle(10)\nRect { w: 7, h: 13 }\nOrigin' "examp
 run_hello "rust-float"        $'3.14159\n0\n-2.5\n0.5\n3.14\n4\n+3.14159\n      3.14' "examples/rust_float.rs"
 
 echo ""
+echo "--- UTF-8 round-trip ---"
+run_hello "hello-utf8-haskell" $'ascii hello\ncafé\n한국어\n🎉 party' "examples/hello_utf8.hs"
+run_hello "hello-utf8-rust"    $'ascii hello\ncafé\n한국어\n🎉 party\nmixed: a → b 한 c 🎉' "examples/rust_utf8.rs"
+
+echo ""
 echo "--- Rust file I/O + stdin ---"
 echo "Hello from a file!" > /tmp/frankenstein-rust-file-read.txt
 run_hello "rust-file-read"    "Hello from a file!" "examples/rust_file_read.rs"

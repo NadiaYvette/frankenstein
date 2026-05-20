@@ -331,6 +331,24 @@ trExpr (App (App (Var v) (Lit (LitString bs))) tailExpr)
   | getOccString v `elem` ["unpackAppendCString#", "unpackAppendCStringUtf8#"] =
       unpackLitStringToCons bs (trExpr tailExpr)
 
+-- unpackFoldrCStringUtf8# @a "literal" cons z: GHC's foldr-style
+-- string unpacker, used after the simplifier inlines string list
+-- folds.  Polymorphic in `a`, so the first arg is a Type
+-- abstraction that we skip.  In nearly all hello-world cases the
+-- `cons` is `(:)` (sometimes as the lambda `\d ds -> d : ds`) and
+-- `z` is `[]`, so we treat it as a plain cons-list build — same
+-- semantics as unpackCStringUtf8#.  The bytes are UTF-8, so
+-- unpackLitStringToCons's UTF-8 decode produces the right
+-- codepoints.
+trExpr e@(App _ _)
+  | (Var v, args) <- collectArgs e
+  , getOccString v `elem`
+      [ "unpackFoldrCString#"
+      , "unpackFoldrCStringUtf8#"
+      ]
+  , Lit (LitString bs) : _rest <- filter (not . isTypeArg) args
+  = unpackLitStringToCons bs (F.ECon (F.QName T.empty (F.Name "[]" 0)))
+
 -- Specialised Show implementations reference the prefix literal via a
 -- top-level CAF in GHC.Internal.Show (e.g. $fShowMaybe1 = "Just "#).
 -- Recognise these by name and substitute the known content directly,

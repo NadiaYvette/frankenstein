@@ -716,8 +716,15 @@ details.
   binding the state token; `applyMainIfFunctionAlias` detects when the
   user's `main` is just an `EVar` reference to a lambda-bodied helper
   and rewrites the alias to apply it with a dummy state arg.  Codepoints
-  > 127 are written as raw bytes (Latin-1ish); full UTF-8 re-encoding
-  is future work.  `show :: Int -> String`, `print :: Int -> IO ()`, `show [Int]`,
+  > 127 are now UTF-8 encoded on output (`café`, `한국어`, `🎉` all
+  round-trip correctly through `putStrLn`): the runtime's
+  `kk_print_haskell_chars` runs each Char codepoint through a
+  `kk_putchar_utf8` helper that emits the appropriate 1-4 byte
+  sequence.  Bridge-side, `unpackFoldrCStringUtf8#` (the foldr-style
+  unpacker GHC emits after inlining string list folds) is now
+  recognised alongside `unpackCStringUtf8#`, so non-ASCII string
+  literals route through the same UTF-8-decoding cons-list builder
+  as ASCII literals.  See `examples/hello_utf8.hs`.  `show :: Int -> String`, `print :: Int -> IO ()`, `show [Int]`,
   `show (Maybe Int)` (`Just n` / `Nothing`) all now work natively.
   Routing:
     - Int show: `isShowIntWorker` recognises `$w$cshowsPrec2` and
@@ -869,10 +876,13 @@ details.
   scans the body's statements for `_N = &mut _M`, rewrites the call to
   `kk_read_line()`, and emits a let-shadow that gives `_M` the read
   line.  See `examples/rust_file_read.rs`,
-  `examples/rust_file_write.rs`, `examples/rust_stdin.rs`.  Still
-  blocked: float literals that rustc promotes to `main::promoted[N]`
-  (inline `println!("{:.0}", 3.5_f64)` — bind to a `let` first),
-  full UTF-8 re-encoding.
+  `examples/rust_file_write.rs`, `examples/rust_stdin.rs`.  Non-ASCII string literals (café / 한국어 / 🎉) round-trip cleanly
+  through `println!` — the bridge stores the raw UTF-8 bytes via
+  `kk_string_from_literal` and emits them verbatim (Rust source and
+  stdout are both UTF-8, no decode/re-encode needed).  See
+  `examples/rust_utf8.rs`.  Still blocked: float literals that rustc
+  promotes to `main::promoted[N]` (inline `println!("{:.0}", 3.5_f64)`
+  — bind to a `let` first).
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

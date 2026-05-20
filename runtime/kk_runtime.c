@@ -292,19 +292,44 @@ void kk_println_con(int64_t v) {
  * ":" = 46589 (Cons).  Field 0 of a Cons holds the Char codepoint
  * (i64), field 1 holds the tail.
  *
- * Each char is emitted via putchar as a single byte.  Codepoints > 127
- * are written verbatim (no UTF-8 re-encoding) — matching Haskell's
- * default Latin-1-ish behaviour for `putStrLn`-style output of
- * literal strings.  Trailing newline appended once at end.
+ * Each char is a Unicode codepoint (Int in the IR) — emitted via
+ * kk_putchar_utf8 as the appropriate UTF-8 byte sequence so that
+ * non-ASCII codepoints round-trip cleanly (`café` → 0x63 0x61 0x66
+ * 0xC3 0xA9).  Trailing newline appended once at end of println.
  */
 #define KK_HASKELL_NIL_TAG  31636
 #define KK_HASKELL_CONS_TAG 46589
+
+/* UTF-8-encode a Unicode codepoint to stdout.  Codepoints below
+ * 0x80 emit one byte; below 0x800 two bytes; below 0x10000 three;
+ * up to 0x10FFFF four.  Invalid codepoints (surrogates / > 0x10FFFF)
+ * are written as the Unicode replacement character U+FFFD. */
+static void kk_putchar_utf8(int32_t cp) {
+    if (cp < 0)                                    cp = 0xFFFD;
+    if (cp >= 0xD800 && cp <= 0xDFFF)              cp = 0xFFFD;
+    if (cp > 0x10FFFF)                             cp = 0xFFFD;
+    if (cp < 0x80) {
+        putchar((int)cp);
+    } else if (cp < 0x800) {
+        putchar((int)(0xC0 | (cp >> 6)));
+        putchar((int)(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        putchar((int)(0xE0 | (cp >> 12)));
+        putchar((int)(0x80 | ((cp >> 6) & 0x3F)));
+        putchar((int)(0x80 | (cp & 0x3F)));
+    } else {
+        putchar((int)(0xF0 | (cp >> 18)));
+        putchar((int)(0x80 | ((cp >> 12) & 0x3F)));
+        putchar((int)(0x80 | ((cp >> 6) & 0x3F)));
+        putchar((int)(0x80 | (cp & 0x3F)));
+    }
+}
 
 void kk_print_haskell_chars(int64_t list) {
     while (1) {
         if (kk_tag(list) == KK_HASKELL_NIL_TAG) break;
         int64_t ch = kk_field(list, 0);
-        putchar((int)(ch & 0xff));
+        kk_putchar_utf8((int32_t)ch);
         list = kk_field(list, 1);
     }
 }

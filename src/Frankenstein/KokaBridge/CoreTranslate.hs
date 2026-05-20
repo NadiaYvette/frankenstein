@@ -417,7 +417,17 @@ translatePatternBinders path (KC.PatCon tname pats _ _ _ _ _ _) = do
                   (zip [(0 :: Int)..] pats)
   let pats' = map fst results
       binders = concatMap snd results
-  pure (F.PatCon (translateTNameToQName tname) pats', binders)
+      -- Cons/Nil are constructed by the runtime (kk_cons/kk_nil) with
+      -- hardcoded tags, so their patterns must use the canonical
+      -- QName the ConTags override knows about.  Without this, Koka
+      -- emits the pattern under a qualifier-prefixed local name
+      -- (e.g. "list/Cons") whose djb2 tag differs from KK_CONS_TAG.
+      qn = if isKokaCons (KC.getName tname)
+              then F.QName "std/core/types" (F.Name "Cons" 0)
+           else if isKokaNil (KC.getName tname)
+              then F.QName "std/core/types" (F.Name "Nil" 0)
+           else translateTNameToQName tname
+  pure (F.PatCon qn pats', binders)
 
 -- | Project the i-th field of a value via the runtime's kk_field.
 -- Used to materialise as-binder bindings — each binder is a
@@ -543,7 +553,12 @@ translatePattern = \case
 
   KC.PatCon tname pats _conRepr _typeArgs _exists _typeRes _conInfo _skip -> do
     pats' <- mapM translatePattern pats
-    pure $ F.PatCon (translateTNameToQName tname) pats'
+    let qn = if isKokaCons (KC.getName tname)
+                then F.QName "std/core/types" (F.Name "Cons" 0)
+             else if isKokaNil (KC.getName tname)
+                then F.QName "std/core/types" (F.Name "Nil" 0)
+             else translateTNameToQName tname
+    pure $ F.PatCon qn pats'
 
 -- ============================================================================
 -- Type translation

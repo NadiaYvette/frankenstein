@@ -277,7 +277,7 @@ translateExpr = \case
   -- Single scrutinee: direct translation
   KC.Case [scrut] branches -> do
     scrut'    <- translateExpr scrut
-    branches' <- mapM translateBranch branches
+    branches' <- mapM (translateBranchWithScrut scrut') branches
     pure $ F.ECase scrut' branches'
 
   -- Multi-scrutinee: the simple "match scrut1 only" translation
@@ -358,6 +358,100 @@ translateExpr = \case
 -- ============================================================================
 -- Branch/Pattern translation
 -- ============================================================================
+
+-- | Walk a Koka pattern collecting as-binders (the names from
+-- `PatVar tname subPat` where subPat is non-trivial — Koka's
+-- as-pattern form binds tname to the matched value AND further
+-- destructures via subPat).  Our Frankenstein Pattern lacks
+-- as-patterns, so we recover the outer names as (Name, FieldPath)
+-- pairs and wrap the branch body with let-bindings that
+-- reconstruct the projection from the case's scrutinee.
+type AsBinder = (KN.Name, [Int])
+
+translatePatternBinders :: [Int] -> KC.Pattern -> Either Text (F.Pattern, [AsBinder])
+translatePatternBinders _path KC.PatWild =
+  pure (F.PatWild anyType, [])
+translatePatternBinders _path (KC.PatLit lit) =
+  pure (F.PatLit (translateLit lit), [])
+translatePatternBinders path (KC.PatVar tname subPat) =
+  case subPat of
+    KC.PatWild ->
+      -- Plain binding — Frankenstein PatVar handles it directly,
+      -- no extra binder needed.
+      pure ( F.PatVar (translateTNameToName tname)
+                      (translateTypeUnsafe (KC.tnameType tname))
+           , [])
+    _ -> do
+      -- As-pattern: keep the outer name, recurse into the inner
+      -- pattern (which becomes the actual structural match).
+      (innerPat, innerBinders) <- translatePatternBinders path subPat
+      pure (innerPat, (KC.getName tname, path) : innerBinders)
+translatePatternBinders path (KC.PatCon tname pats _ _ _ _ _ _) = do
+  -- Each sub-pattern's path is the current path with the field
+  -- index appended.  Field indices are 0-based at the IR level.
+  results <- mapM (\(i, p) -> translatePatternBinders (path ++ [i]) p)
+                  (zip [(0 :: Int)..] pats)
+  let pats' = map fst results
+      binders = concatMap snd results
+  pure (F.PatCon (translateTNameToQName tname) pats', binders)
+
+-- | Project the i-th field of a value via the runtime's kk_field.
+-- Used to materialise as-binder bindings — each binder is a
+-- projection from the case's scrutinee through its field-path.
+fieldProject :: F.Expr -> [Int] -> F.Expr
+fieldProject scrut [] = scrut
+fieldProject scrut (i:is) =
+  let scrut' = F.EApp (F.EVar (F.Name "kk_field" 0))
+                       [scrut, F.ELit (F.LitInt (fromIntegral i))]
+  in fieldProject scrut' is
+
+-- | Wrap a body expression with let-bindings for as-binders.
+wrapBodyWithAsBinders :: F.Expr -> [AsBinder] -> F.Expr -> F.Expr
+wrapBodyWithAsBinders _ [] body = body
+wrapBodyWithAsBinders scrut ((kn, path) : rest) body =
+  let fName = F.Name (T.pack (KN.nameLocal kn)) 0
+      bind  = F.Bind fName anyType (fieldProject scrut path) F.DefVal
+  in F.ELet [[bind]] (wrapBodyWithAsBinders scrut rest body)
+
+translateBranchWithScrut :: F.Expr -> KC.Branch -> Either Text F.Branch
+translateBranchWithScrut scrut (KC.Branch pats guards) = do
+  (pat, binders) <- case pats of
+    (p:_) -> translatePatternBinders [] p
+    []    -> pure (F.PatWild anyType, [])
+  -- Wrap any body with let-bindings for as-binders (typically empty)
+  let wrapBody = wrapBodyWithAsBinders scrut binders
+  case guards of
+    [KC.Guard test body] -> do
+      test' <- translateExpr test
+      body' <- translateExpr body
+      let mguard = if isExprTrue test then Nothing else Just test'
+      pure $ F.Branch pat mguard (wrapBody body')
+    guards'@(_:_:_) -> do
+      body' <- desugarGuards guards'
+      pure $ F.Branch pat Nothing (wrapBody body')
+    [] -> Left "Branch with no guards"
+  where
+    isExprTrue (KC.Con tname _) = KN.nameStem (KC.getName tname) == "True"
+    isExprTrue _ = False
+
+    desugarGuards [] = Left "Branch with no guards"
+    desugarGuards [KC.Guard test body] = do
+      test' <- translateExpr test
+      body' <- translateExpr body
+      if isExprTrue test then pure body'
+      else pure $ F.ECase test'
+        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+        , F.Branch (F.PatWild anyType) Nothing (F.ELit (F.LitInt 0))
+        ]
+    desugarGuards (KC.Guard test body : krest) = do
+      test' <- translateExpr test
+      body' <- translateExpr body
+      rest' <- desugarGuards krest
+      if isExprTrue test then pure body'
+      else pure $ F.ECase test'
+        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+        , F.Branch (F.PatWild anyType) Nothing rest'
+        ]
 
 translateBranch :: KC.Branch -> Either Text F.Branch
 translateBranch (KC.Branch pats guards) = do

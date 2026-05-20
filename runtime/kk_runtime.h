@@ -139,6 +139,7 @@ void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);
 int64_t kk_string_from_literal(int64_t bytes_ptr, int64_t byte_len);
 int64_t kk_string_from_cstr(int64_t cstr_ptr);
 int64_t kk_string_empty(void);
+int64_t kk_string_from_char(int64_t codepoint);
 
 /* String queries (all O(1) except char_len, which walks the rope) */
 int64_t kk_str_len(int64_t s);          /* total UTF-8 byte length */

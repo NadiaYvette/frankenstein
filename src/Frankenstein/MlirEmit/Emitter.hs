@@ -762,6 +762,7 @@ emitProgramText prog =
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
     , "  func.func private @kk_string_empty() -> i64"
+    , "  func.func private @kk_string_from_char(i64) -> i64"
     , "  func.func private @kk_println_str(i64) -> ()"
     , "  func.func private @kk_print_str(i64) -> ()"
     , "  func.func private @kk_str_concat(i64, i64) -> i64"
@@ -984,6 +985,7 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
     , "  func.func private @kk_string_empty() -> i64"
+    , "  func.func private @kk_string_from_char(i64) -> i64"
     , "  func.func private @kk_println_str(i64) -> ()"
     , "  func.func private @kk_print_str(i64) -> ()"
     , "  func.func private @kk_str_concat(i64, i64) -> i64"
@@ -1823,6 +1825,26 @@ emitAppVarWith2 fn a b
   | n `elem` ["andI#", "and#"]                    = emitBinOp "arith.andi" "i64" a b
   | n `elem` ["orI#", "or#"]                      = emitBinOp "arith.ori" "i64" a b
   | n `elem` ["xorI#", "xor#"]                    = emitBinOp "arith.xori" "i64" a b
+  -- Koka's int/max and int/min: select-based 2-arg primitives.
+  -- Match on bare `max` / `min` as well as qualified forms.
+  | n `elem` ["max", "int/max"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      cmpName <- freshName "v"
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> cmpName    <> " = arith.cmpi sgt, %" <> aName <> ", %" <> bName <> " : i64"
+        , "%" <> resultName <> " = arith.select %" <> cmpName <> ", %" <> aName <> ", %" <> bName <> " : i64"
+        ], resultName)
+  | n `elem` ["min", "int/min"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      cmpName <- freshName "v"
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> cmpName    <> " = arith.cmpi slt, %" <> aName <> ", %" <> bName <> " : i64"
+        , "%" <> resultName <> " = arith.select %" <> cmpName <> ", %" <> aName <> ", %" <> bName <> " : i64"
+        ], resultName)
   -- Address arithmetic (from inlined unpackCString#)
   | n == "plusAddr#"                               = emitBinOp "arith.addi" "i64" a b
   -- indexCharOffAddr# addr off: load byte at addr+off, zero-extend to i64
@@ -2122,6 +2144,58 @@ emitAppVarWith1 fn arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_flatten(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  -- Koka tuple accessors: Tuple2(a,b).fst is field 0, .snd is field 1.
+  | n `elem` ["tuple2/fst"] = do
+      (argOps, argName) <- emitExpr arg
+      idxName <- freshName "v"
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> idxName <> " = arith.constant 0 : i64"
+        , "%" <> resultName <> " = func.call @kk_field(%" <> argName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  | n `elem` ["tuple2/snd"] = do
+      (argOps, argName) <- emitExpr arg
+      idxName <- freshName "v"
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> idxName <> " = arith.constant 1 : i64"
+        , "%" <> resultName <> " = func.call @kk_field(%" <> argName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
+        ], resultName)
+  -- Koka `string/println(s)` and `string/print(s)` reach this path
+  -- when the function is referenced bare (as a HOF arg, in a PAP, …)
+  -- rather than directly applied: the bridge's App-shape intercept
+  -- doesn't fire on bare-EVar references.  Route to kk_println_str /
+  -- kk_print_str so the link succeeds.
+  | n `elem` ["string/println"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "func.call @kk_println_str(%" <> argName <> ") : (i64) -> ()"
+        , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+  | n `elem` ["string/print"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "func.call @kk_print_str(%" <> argName <> ") : (i64) -> ()"
+        , "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
+  -- Koka `chars/count(s)` is the codepoint count — wire to
+  -- kk_str_char_len.
+  | n `elem` ["chars/count"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_char_len(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  -- Koka `char/string(c)` makes a 1-char string from a codepoint.
+  -- Routes to a new runtime helper that UTF-8 encodes the codepoint.
+  | n `elem` ["char/string"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_string_from_char(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   | n `elem` ["show", "show_int", "str_show_int"] = do
       (argOps, argName) <- emitExpr arg

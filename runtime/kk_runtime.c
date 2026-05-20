@@ -1548,6 +1548,44 @@ int64_t kk_string_empty(void) {
     return r;
 }
 
+/* Build a single-character string from a Unicode codepoint.  UTF-8
+ * encodes the codepoint into 1-4 bytes (replacement char for invalid
+ * inputs).  Used by Koka's `char/string` intrinsic. */
+int64_t kk_string_from_char(int64_t codepoint) {
+    int32_t cp = (int32_t)codepoint;
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+        cp = 0xFFFD;
+    char buf[5];
+    int n;
+    if (cp < 0x80) {
+        buf[0] = (char)cp; n = 1;
+    } else if (cp < 0x800) {
+        buf[0] = (char)(0xC0 | (cp >> 6));
+        buf[1] = (char)(0x80 | (cp & 0x3F));
+        n = 2;
+    } else if (cp < 0x10000) {
+        buf[0] = (char)(0xE0 | (cp >> 12));
+        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (cp & 0x3F));
+        n = 3;
+    } else {
+        buf[0] = (char)(0xF0 | (cp >> 18));
+        buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[3] = (char)(0x80 | (cp & 0x3F));
+        n = 4;
+    }
+    buf[n] = '\0';
+    /* Copy into a fresh malloc'd buffer so the rope owns the bytes
+     * (kk_str_alloc_leaf with owns=1 takes responsibility for free). */
+    char* owned = (char*)malloc((size_t)n + 1);
+    if (!owned) return kk_string_empty();
+    memcpy(owned, buf, (size_t)n + 1);
+    int64_t r = (int64_t)kk_str_alloc_leaf(owned, n, 1);
+    kk_register_string(r);
+    return r;
+}
+
 int64_t kk_str_len(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return 0;

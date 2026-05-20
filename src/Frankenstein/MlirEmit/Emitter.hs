@@ -3117,6 +3117,27 @@ emitPatField scrutName _structTy (idx, PatVar n _) = do
 emitPatField _ _ (_, PatWild _) = do
   name <- freshName "v"
   pure (["// wildcard field ignored"], name)
+-- Nested constructor pattern: extract this slot's value and then
+-- recurse into the sub-patterns.  Without the recursion, PatVars
+-- inside e.g. `Cons((m2, c2), rest)`'s inner Tuple2 never get
+-- aliased — references to m2/c2 in the body would surface as
+-- unresolved externs.
+emitPatField scrutName structTy (idx, PatCon _ subPats) = do
+  let fieldIdx = idx - 1
+  idxName <- freshName "v"
+  fieldName <- freshName "v"
+  let extractOps =
+        [ "%" <> idxName <> " = arith.constant " <> T.pack (show fieldIdx) <> " : i64"
+        , "%" <> fieldName <> " = func.call @kk_field(%" <> scrutName <> ", %" <> idxName <> ") : (i64, i64) -> i64"
+        ]
+  -- Recurse: each sub-pattern at index (i+1) using fieldName as the
+  -- new scrutinee.  Returned SSA names from inner calls are
+  -- discarded (the inner emitPatField calls already register
+  -- aliases via esAliases).
+  subResults <- mapM (\(i, p) -> emitPatField fieldName structTy (i, p))
+                     (zip [(1 :: Int)..] subPats)
+  let subOps = concatMap fst subResults
+  pure (extractOps ++ subOps, fieldName)
 emitPatField scrutName _structTy (idx, _) = do
   let fieldIdx = idx - 1
   idxName <- freshName "v"

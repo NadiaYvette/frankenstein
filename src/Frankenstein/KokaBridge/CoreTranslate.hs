@@ -280,7 +280,73 @@ translateExpr = \case
     branches' <- mapM translateBranch branches
     pure $ F.ECase scrut' branches'
 
-  -- Multi-scrutinee: nest as tuple-like matching (desugar to first scrutinee for now)
+  -- Multi-scrutinee: the simple "match scrut1 only" translation
+  -- drops bindings from the other patterns, leaving the body's
+  -- references to e.g. `a2 b2 rest2` from the second pattern
+  -- unresolved.  Nest each branch's extra scrutinee/pattern pairs
+  -- into the body as inner ECase matches: each branch becomes
+  --   Branch p1 _ (ECase s2 [Branch p2 _ (ECase s3 [... body])])
+  -- The outer match dispatches on the first scrutinee; the inner
+  -- single-branch matches bind the additional pattern variables.
+  -- This is correct when every branch has shape-aligned patterns
+  -- (the common Koka `match (a,b) { (Pat1, Pat2) -> ... }` form
+  -- used for tuple-style decomposition); when patterns disagree
+  -- across branches, the outer match still distinguishes, and the
+  -- inner match's "no-fallback" is fine because the outer pattern
+  -- gates entry.
+  KC.Case scruts@(scrut:rest) branches | not (null rest) -> do
+    scrut'    <- translateExpr scrut
+    restScruts <- mapM translateExpr rest
+    branches' <- mapM (translateMultiBranch restScruts) branches
+    pure $ F.ECase scrut' branches'
+    where
+      translateMultiBranch :: [F.Expr] -> KC.Branch -> Either Text F.Branch
+      translateMultiBranch _ kbr@(KC.Branch pats _) | length pats < 2 =
+        translateBranch kbr
+      translateMultiBranch restEx (KC.Branch pats guards) = do
+        case pats of
+          (p0:_) -> do
+            outerPat <- translatePattern p0
+            innerBody <- buildNested restEx (tail pats) guards
+            pure $ F.Branch outerPat Nothing innerBody
+          [] -> Left "Multi-scrutinee branch with no patterns"
+
+      -- Wrap the guard body with successive inner ECase matches,
+      -- one per remaining scrutinee+pattern pair.  Each inner match
+      -- has a single branch with the corresponding pattern.
+      buildNested :: [F.Expr] -> [KC.Pattern] -> [KC.Guard] -> Either Text F.Expr
+      buildNested _ _ [] = Left "Branch with no guards"
+      buildNested [] _ guards = do
+        -- No more inner scrutinees — just translate the body.
+        case guards of
+          [KC.Guard _test body] -> translateExpr body
+          gs@(_:_:_) -> desugarGuardsMulti gs
+          [] -> Left "Branch with no guards"
+      buildNested (sEx:ssRest) (p:psRest) guards = do
+        pat <- translatePattern p
+        inner <- buildNested ssRest psRest guards
+        pure $ F.ECase sEx [F.Branch pat Nothing inner]
+      buildNested _ [] guards =
+        -- Extra scrutinees but no more patterns: just translate body.
+        case guards of
+          [KC.Guard _test body] -> translateExpr body
+          gs@(_:_:_) -> desugarGuardsMulti gs
+          [] -> Left "Branch with no guards"
+
+      desugarGuardsMulti :: [KC.Guard] -> Either Text F.Expr
+      desugarGuardsMulti [] = Left "no guards"
+      desugarGuardsMulti [KC.Guard _ body] = translateExpr body
+      desugarGuardsMulti (KC.Guard test body : grest) = do
+        test' <- translateExpr test
+        body' <- translateExpr body
+        rest' <- desugarGuardsMulti grest
+        pure $ F.ECase test'
+          [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+          , F.Branch (F.PatWild anyType) Nothing rest'
+          ]
+
+  -- Single scrutinee fallback (also handles `scrut:[]` since the
+  -- guard above only fires when `not (null rest)`).
   KC.Case (scrut:_) branches -> do
     scrut'    <- translateExpr scrut
     branches' <- mapM translateBranch branches

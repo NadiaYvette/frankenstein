@@ -186,6 +186,64 @@ emitPapClosure fnName arity suppliedArgs = do
     ) (zip [(1 :: Int)..length suppliedArgs] suppliedArgs)
   pure (allocOps ++ setOps, ptrName)
 
+-- | The MLIR symbol a PAP wrapper should call.  For intrinsics
+-- backed by a runtime helper (str_concat → kk_str_concat,
+-- read_line → kk_read_line, …) the wrapper must use the kk_-prefixed
+-- name; the linker only declares the runtime symbols.  For
+-- user-defined and top-level functions, the wrapper uses the name as
+-- given.  Mirrors the intrinsic remaps in `emitAppVarWith*` so the
+-- PAP path resolves the same symbols.
+papCallTarget :: Text -> Text
+papCallTarget n
+  | n `elem`
+      [ "str_concat", "++s", "concat_str", "bytes_concat"
+      , "str_len", "strlen", "bytes_len"
+      , "str_char_len", "char_len", "char_count", "length"
+      , "str_eq", "==s", "bytes_eq"
+      , "str_flatten", "flatten"
+      , "show_int", "str_show_int"
+      , "println_str", "print_str"
+      , "read_file", "readFile"
+      , "write_file", "writeFile"
+      , "file_exists", "fileExists"
+      , "read_line", "getLine"
+      , "string_empty"
+      , "system", "shell"
+      , "getenv", "getEnv"
+      , "args_count", "numArgs"
+      , "args_get", "getArg"
+      , "args_progname", "getProgName"
+      , "println_haskell_chars", "print_haskell_chars"
+      , "haskell_chars_concat"
+      , "int_to_haskell_chars", "int_list_to_haskell_chars"
+      ] = "kk_" <> stripDuplicateNames n
+  | otherwise = n
+  where
+    -- For the synonyms list above, map the canonical kk_ name.  e.g.
+    -- "writeFile" and "write_file" both alias to "kk_write_file".
+    stripDuplicateNames "writeFile"     = "write_file"
+    stripDuplicateNames "readFile"      = "read_file"
+    stripDuplicateNames "fileExists"    = "file_exists"
+    stripDuplicateNames "getLine"       = "read_line"
+    stripDuplicateNames "getEnv"        = "getenv"
+    stripDuplicateNames "numArgs"       = "args_count"
+    stripDuplicateNames "getArg"        = "args_get"
+    stripDuplicateNames "getProgName"   = "args_progname"
+    stripDuplicateNames "shell"         = "system"
+    stripDuplicateNames "strlen"        = "str_len"
+    stripDuplicateNames "bytes_len"     = "str_len"
+    stripDuplicateNames "char_len"      = "str_char_len"
+    stripDuplicateNames "char_count"    = "str_char_len"
+    stripDuplicateNames "length"        = "str_char_len"
+    stripDuplicateNames "++s"           = "str_concat"
+    stripDuplicateNames "concat_str"    = "str_concat"
+    stripDuplicateNames "bytes_concat"  = "str_concat"
+    stripDuplicateNames "==s"           = "str_eq"
+    stripDuplicateNames "bytes_eq"      = "str_eq"
+    stripDuplicateNames "flatten"       = "str_flatten"
+    stripDuplicateNames "str_show_int"  = "str_show_int"
+    stripDuplicateNames other           = other
+
 -- | Ensure a PAP wrapper function exists for (fnName, nSupplied). Emits the
 -- wrapper lazily and returns its MLIR symbol name. The wrapper takes
 -- (closure, remaining_args...) and dispatches to @fnName(captured..., remaining...).
@@ -202,6 +260,14 @@ ensurePapWrapper fnName arity nSupplied = do
       let remainingParams = [ "%r" <> T.pack (show i) <> ": i64" | i <- [0 .. nRemaining - 1] ]
           paramList = T.intercalate ", " ("%clos: i64" : remainingParams)
           origParamTys = T.intercalate ", " (replicate arity "i64")
+          -- Bridge intrinsics (str_concat, read_line, etc.) live in the
+          -- runtime as kk_-prefixed symbols.  The direct-call path
+          -- (emitAppVarWith*) rewrites these at the call site; the PAP
+          -- wrapper, which generates a call from the wrapper's own
+          -- body, would otherwise emit `@str_concat` and break linking.
+          -- Remap to the runtime name when the unprefixed name is a
+          -- known intrinsic.
+          callTarget = papCallTarget fnName
       -- Body: extract captured args from closure fields 1..nSupplied, then call original.
       -- Each capture must be retained because PAP wrappers may be called multiple
       -- times (e.g. via mapM). Without retain, the callee's Perceus-inserted drops
@@ -217,7 +283,7 @@ ensurePapWrapper fnName arity nSupplied = do
           capturedArgRefs = [ "%c" <> T.pack (show i) | i <- [1 .. nSupplied] ]
           remainingArgRefs = [ "%r" <> T.pack (show i) | i <- [0 .. nRemaining - 1] ]
           allArgRefs = T.intercalate ", " (capturedArgRefs ++ remainingArgRefs)
-          callLine = "    %result = func.call @" <> fnName <> "(" <> allArgRefs
+          callLine = "    %result = func.call @" <> callTarget <> "(" <> allArgRefs
                      <> ") : (" <> origParamTys <> ") -> i64"
           wrapperText = T.unlines $
             [ "  func.func @" <> wrapperName <> "(" <> paramList <> ") -> i64 {"

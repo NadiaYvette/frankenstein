@@ -309,11 +309,31 @@ emitFnAsValueWithArgs fnName arity suppliedArgs
 recordType :: Text -> Text -> Emit ()
 recordType name ty = modify (\s -> s { esTypeEnv = Map.insert name ty (esTypeEnv s) })
 
--- | Look up the MLIR type for an SSA name (default: "i64")
+-- | Mark an SSA name as semantically holding a float64 value, even
+-- though its MLIR type is `i64` (the value is the IEEE bit pattern).
+-- emitBinOp checks this tag to decide whether to dispatch float
+-- arith (`arith.mulf`) instead of integer arith (`arith.muli`).
+-- The tag is stored as `f64bits` in esTypeEnv; `lookupType` strips
+-- it to keep call-site MLIR types accurate.
+f64BitsTag :: Text
+f64BitsTag = "f64bits"
+
+recordF64Bits :: Text -> Emit ()
+recordF64Bits name = recordType name f64BitsTag
+
+-- | Look up the MLIR type for an SSA name (default: "i64").
+-- Strips the `f64bits` semantic tag so call signatures use i64.
 lookupType :: Text -> Emit Text
 lookupType name = do
   env <- gets esTypeEnv
-  pure $ Map.findWithDefault "i64" name env
+  let t = Map.findWithDefault "i64" name env
+  pure $ if t == f64BitsTag then "i64" else t
+
+-- | Is the SSA value semantically a float64 (with i64 MLIR type)?
+isF64Bits :: Text -> Emit Bool
+isF64Bits name = do
+  env <- gets esTypeEnv
+  pure $ Map.lookup name env == Just f64BitsTag
 
 -- | Collect a string literal, returning its global name
 addStringLit :: Text -> Emit Text
@@ -1333,9 +1353,17 @@ emitExpr (ELit (LitInt n)) = do
   pure (["%" <> name <> " = arith.constant " <> T.pack (show n) <> " : i64"], name)
 
 emitExpr (ELit (LitFloat n)) = do
-  name <- freshName "v"
-  recordType name "f64"
-  pure (["%" <> name <> " = arith.constant " <> T.pack (show n) <> " : f64"], name)
+  -- Emit the float constant in f64 form, then bit-cast to i64 so the
+  -- value flows through the uniformly-i64 closure ABI.  Tag the SSA
+  -- name as `f64bits` so emitBinOp dispatches subsequent arithmetic
+  -- to the float variants.
+  fName    <- freshName "v"
+  bitsName <- freshName "v"
+  recordF64Bits bitsName
+  pure ( [ "%" <> fName    <> " = arith.constant " <> T.pack (show n) <> " : f64"
+         , "%" <> bitsName <> " = arith.bitcast %" <> fName <> " : f64 to i64"
+         ]
+       , bitsName)
 
 emitExpr (ELit (LitChar c)) = do
   name <- freshName "v"
@@ -2569,10 +2597,46 @@ emitBinOp :: Text -> Text -> Expr -> Expr -> Emit ([Text], Text)
 emitBinOp op ty a b = do
   (aOps, aName) <- emitExpr a
   (bOps, bName) <- emitExpr b
-  resultName <- freshName "v"
-  recordType resultName ty
-  let binOp = "%" <> resultName <> " = " <> op <> " %" <> aName <> ", %" <> bName <> " : " <> ty
-  pure (aOps ++ bOps ++ [binOp], resultName)
+  -- If both operands are tagged as f64-bits (LitFloat or a prior
+  -- float arith), rewrite the integer-arith opcode to the float
+  -- variant and bit-cast the operands and result around the call.
+  -- This lets Koka's generic `*`, `+`, etc. work for float64 args
+  -- without each call-site knowing the operand type, while keeping
+  -- every SSA value at MLIR type `i64` (matching the closure ABI).
+  aIsF <- isF64Bits aName
+  bIsF <- isF64Bits bName
+  if aIsF && bIsF
+    then do
+      aF        <- freshName "v"
+      bF        <- freshName "v"
+      rF        <- freshName "v"
+      resultName <- freshName "v"
+      recordF64Bits resultName
+      let fOp = floatVariant op
+      pure ( aOps ++ bOps ++
+        [ "%" <> aF        <> " = arith.bitcast %" <> aName <> " : i64 to f64"
+        , "%" <> bF        <> " = arith.bitcast %" <> bName <> " : i64 to f64"
+        , "%" <> rF        <> " = " <> fOp <> " %" <> aF <> ", %" <> bF <> " : f64"
+        , "%" <> resultName <> " = arith.bitcast %" <> rF <> " : f64 to i64"
+        ]
+        , resultName)
+    else do
+      resultName <- freshName "v"
+      recordType resultName ty
+      let binOp = "%" <> resultName <> " = " <> op <> " %" <> aName <> ", %" <> bName <> " : " <> ty
+      pure (aOps ++ bOps ++ [binOp], resultName)
+
+-- | Rewrite an integer arithmetic op to its float-arith counterpart.
+-- For ops without a direct float variant, fall through to the
+-- integer op unchanged — the caller will see a type mismatch and
+-- we'll know to extend this table.
+floatVariant :: Text -> Text
+floatVariant "arith.addi"  = "arith.addf"
+floatVariant "arith.subi"  = "arith.subf"
+floatVariant "arith.muli"  = "arith.mulf"
+floatVariant "arith.divsi" = "arith.divf"
+floatVariant "arith.divui" = "arith.divf"
+floatVariant other         = other
 
 emitCmpOp :: Text -> Expr -> Expr -> Emit ([Text], Text)
 emitCmpOp pred' a b = do

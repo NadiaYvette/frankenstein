@@ -1523,10 +1523,22 @@ emitExpr (EVar n) = do
   topFns <- gets esTopFns
   -- If the name already has a module qualifier or was linker-mangled, it's
   -- already fully qualified — don't prepend esModulePrefix again.
-  qualSanitized <- do
+  initialQual <- do
     pfx <- gets esModulePrefix
     pure $ if T.any (== '/') (nameText n) || T.isPrefixOf pfx sanitized
            then sanitized else pfx <> sanitized
+  -- Mirror emitAppVarGeneral's suffix-resolver: when an EVar is used
+  -- as a value (HOF arg, PAP, …) and the bare-qualified name isn't a
+  -- known top-level fn, look for one whose MLIR symbol ENDS with
+  -- "_<initialQual>".  This catches Koka type-qualifier names like
+  -- `rational/show` resolving to `surd_rational_show`.
+  let qualSanitized =
+        if Set.member initialQual topFns
+        then initialQual
+        else case [ tn | tn <- Set.toList topFns
+                       , T.isSuffixOf ("_" <> initialQual) tn ] of
+               (resolved:_) -> resolved
+               [] -> initialQual
   arityMap <- gets esTopFnArity
   case Map.lookup sname aliases of
     Just target -> pure ([], target)

@@ -652,6 +652,12 @@ isKokaBuiltinApp kn =
   || stem == "++"
   || stem `elem` ["pretend-no-div", "pretend-nodiv-cast"
                  , "pretend-decreasing"]
+  -- @open is Koka's synthetic effect-row opener — a value-level
+  -- identity that lets a less-effectful expression be used where
+  -- a more-effectful row is expected.  Treat it as id() at the
+  -- bridge level so no extern reference is emitted.
+  || stem == "@open"
+  || local == "@open"
   || local `elem` builtinIntrinsicNames
 
 -- | Names the bridge wires directly to a runtime call.  Pure-stem or
@@ -728,6 +734,10 @@ translateBuiltinApp kn args = do
     -- `pretend-decreasing(x)` is also identity (it's a structural
     -- recursion hint, no runtime effect).
     ("pretend-decreasing", _, _, [x]) -> translateExpr x
+    -- `@open(value)` is identity at the value level (purely a
+    -- type-system coercion that lifts a smaller effect row into
+    -- a larger one).  Drop the wrapper.
+    ("@open", _, _, [v]) -> translateExpr v
     -- Other intrinsics: keep the bare name; the emitter and Linker
     -- recognise them via the runtimeNames Set, so they pass through
     -- to runtime/kk_runtime.c symbols of the same name (after

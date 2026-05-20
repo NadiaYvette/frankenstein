@@ -1818,7 +1818,7 @@ emitAppVarWith3 fn _dict a b
   | nameText fn `elem` ["foldl", "list/foldl"]
   = emitListHOF3 "kk_list_foldl" _dict a b
   | n `elem` ["==", "eq"]   = emitCmpOp "eq" a b
-  | n `elem` ["/=", "ne"]   = emitCmpOp "ne" a b
+  | n `elem` ["/=", "ne", "!="] = emitCmpOp "ne" a b
   | n `elem` ["<", "lt"]    = emitCmpOp "slt" a b
   | n `elem` [">", "gt"]    = emitCmpOp "sgt" a b
   | n `elem` ["<=", "le"]   = emitCmpOp "sle" a b
@@ -1827,7 +1827,7 @@ emitAppVarWith3 fn _dict a b
   | n `elem` ["-", "sub"]   = emitBinOp "arith.subi" "i64" a b
   | n `elem` ["*", "mul"]   = emitBinOp "arith.muli" "i64" a b
   | n `elem` ["/", "div"]   = emitBinOp "arith.divsi" "i64" a b
-  | n `elem` ["mod"]        = emitBinOp "arith.remsi" "i64" a b
+  | n `elem` ["mod", "%"]   = emitBinOp "arith.remsi" "i64" a b
   | otherwise = emitAppVarGeneral fn [_dict, a, b]
   where n = nameText fn
 
@@ -1854,9 +1854,9 @@ emitAppVarWith2 fn a b
   | n `elem` ["-", "sub", "-#", "$fNumInt_$c-"] = emitBinOp "arith.subi" "i64" a b
   | n `elem` ["*", "mul", "*#", "$fNumInt_$c*"] = emitBinOp "arith.muli" "i64" a b
   | n `elem` ["/", "div", "quot#", "quotInt#"]  = emitBinOp "arith.divsi" "i64" a b
-  | n `elem` ["mod", "rem#", "remInt#"]          = emitBinOp "arith.remsi" "i64" a b
+  | n `elem` ["mod", "rem#", "remInt#", "%"]     = emitBinOp "arith.remsi" "i64" a b
   | n `elem` ["==", "eq", "==#"]                 = emitCmpOp "eq" a b
-  | n `elem` ["/=", "ne", "/=#"]                 = emitCmpOp "ne" a b
+  | n `elem` ["/=", "ne", "/=#", "!="]           = emitCmpOp "ne" a b
   | n `elem` ["<", "lt", "<#"]                   = emitCmpOp "slt" a b
   | n `elem` [">", "gt", ">#"]                   = emitCmpOp "sgt" a b
   | n `elem` ["<=", "le", "<=#"]                 = emitCmpOp "sle" a b

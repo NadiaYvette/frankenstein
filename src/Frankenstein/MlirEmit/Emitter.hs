@@ -1946,31 +1946,41 @@ emitAppVarWith2 fn a b
         [ "%" <> cmpName    <> " = arith.cmpi slt, %" <> aName <> ", %" <> bName <> " : i64"
         , "%" <> resultName <> " = arith.select %" <> cmpName <> ", %" <> aName <> ", %" <> bName <> " : i64"
         ], resultName)
-  -- `cmp(a, b)` returns an `order` value.  We encode order as a
-  -- plain int: -1 (Lt) / 0 (Eq) / 1 (Gt).  The is-lt / is-eq /
-  -- is-gt predicates above check the sign.  Implementation:
-  --   diff = a - b
-  --   lt = (diff < 0) ? -1 : 0
-  --   final = (diff > 0) ? 1 : lt
-  -- All via arith ops; no branching.
+  -- `cmp(a, b)` returns an Order value (Lt | Eq | Gt — see the
+  -- synthetic DataDecl injected by KokaBridge for `order`).  Look
+  -- up the per-program tag for each constructor, then allocate
+  -- one of three pre-built nullary cells via scf.if.  Surd code
+  -- pattern-matches on cmp's result against Lt/Eq/Gt, so an
+  -- integer encoding doesn't work.
   | n `elem` ["cmp", "int/cmp"] = do
+      ltTag <- lookupConTag (QName "std/core/types" (Name "Lt" 0))
+      eqTag <- lookupConTag (QName "std/core/types" (Name "Eq" 0))
+      gtTag <- lookupConTag (QName "std/core/types" (Name "Gt" 0))
       (aOps, aName) <- emitExpr a
       (bOps, bName) <- emitExpr b
-      zeroName <- freshName "v"
-      negOneName <- freshName "v"
-      oneName  <- freshName "v"
-      ltCmp    <- freshName "v"
-      gtCmp    <- freshName "v"
-      ltSel    <- freshName "v"
+      ltCmp <- freshName "v"
+      gtCmp <- freshName "v"
+      ltTagN <- freshName "v"
+      eqTagN <- freshName "v"
+      gtTagN <- freshName "v"
+      zeroFlds <- freshName "v"
+      ltCell <- freshName "v"
+      eqCell <- freshName "v"
+      gtCell <- freshName "v"
+      gtOrEq <- freshName "v"
       resultName <- freshName "v"
       pure (aOps ++ bOps ++
-        [ "%" <> zeroName   <> " = arith.constant 0 : i64"
-        , "%" <> negOneName <> " = arith.constant -1 : i64"
-        , "%" <> oneName    <> " = arith.constant 1 : i64"
-        , "%" <> ltCmp      <> " = arith.cmpi slt, %" <> aName <> ", %" <> bName <> " : i64"
-        , "%" <> ltSel      <> " = arith.select %" <> ltCmp <> ", %" <> negOneName <> ", %" <> zeroName <> " : i64"
-        , "%" <> gtCmp      <> " = arith.cmpi sgt, %" <> aName <> ", %" <> bName <> " : i64"
-        , "%" <> resultName <> " = arith.select %" <> gtCmp <> ", %" <> oneName <> ", %" <> ltSel <> " : i64"
+        [ "%" <> ltCmp <> " = arith.cmpi slt, %" <> aName <> ", %" <> bName <> " : i64"
+        , "%" <> gtCmp <> " = arith.cmpi sgt, %" <> aName <> ", %" <> bName <> " : i64"
+        , "%" <> ltTagN <> " = arith.constant " <> T.pack (show ltTag) <> " : i64"
+        , "%" <> eqTagN <> " = arith.constant " <> T.pack (show eqTag) <> " : i64"
+        , "%" <> gtTagN <> " = arith.constant " <> T.pack (show gtTag) <> " : i64"
+        , "%" <> zeroFlds <> " = arith.constant 0 : i64"
+        , "%" <> ltCell <> " = func.call @kk_alloc_con(%" <> ltTagN <> ", %" <> zeroFlds <> ") : (i64, i64) -> i64"
+        , "%" <> eqCell <> " = func.call @kk_alloc_con(%" <> eqTagN <> ", %" <> zeroFlds <> ") : (i64, i64) -> i64"
+        , "%" <> gtCell <> " = func.call @kk_alloc_con(%" <> gtTagN <> ", %" <> zeroFlds <> ") : (i64, i64) -> i64"
+        , "%" <> gtOrEq <> " = arith.select %" <> gtCmp <> ", %" <> gtCell <> ", %" <> eqCell <> " : i64"
+        , "%" <> resultName <> " = arith.select %" <> ltCmp <> ", %" <> ltCell <> ", %" <> gtOrEq <> " : i64"
         ], resultName)
   -- 2-arg libm: atan2, pow.
   | n `elem` ["atan2", "double/atan2", "float64/atan2"] = emitLibm2 "atan2" a b
@@ -2377,9 +2387,13 @@ emitAppVarWith1 fn arg
   -- Koka Order predicates.  We encode `order` as a plain integer:
   -- -1 (Lt), 0 (Eq), 1 (Gt) — see emitAppVarWith2's `cmp` intercept.
   -- The predicates are a sign test.
-  | n `elem` ["is-lt", "order/is-lt"] = emitOrderPred "slt" arg
-  | n `elem` ["is-eq", "order/is-eq"] = emitOrderPred "eq"  arg
-  | n `elem` ["is-gt", "order/is-gt"] = emitOrderPred "sgt" arg
+  -- Order predicates: compare the Order cell's tag against the
+  -- expected constructor tag.  Replaces the earlier int-sign hack
+  -- (which produced false answers when surd code pattern-matched
+  -- on the Order value).
+  | n `elem` ["is-lt", "order/is-lt"] = emitOrderPredTag "Lt" arg
+  | n `elem` ["is-eq", "order/is-eq"] = emitOrderPredTag "Eq" arg
+  | n `elem` ["is-gt", "order/is-gt"] = emitOrderPredTag "Gt" arg
   -- Int predicates.
   | n `elem` ["is-even", "int/is-even"] = emitParityPred "eq" arg
   | n `elem` ["is-odd",  "int/is-odd"]  = emitParityPred "ne" arg
@@ -3002,8 +3016,26 @@ emitLambdaLift params body = do
 
 -- Helpers
 
--- | Order predicate: cmpi against 0, then zero-extend i1 → i64 so
--- the result flows through the closure ABI as a proper i64 bool.
+-- | Order predicate: check the Order cell's tag against the
+-- bridge-assigned tag for `Lt`, `Eq`, or `Gt` (via assignProgramTags
+-- on the synthetic Order DataDecl).  Result is 0/1 (i64).
+emitOrderPredTag :: Text -> Expr -> Emit ([Text], Text)
+emitOrderPredTag ctor arg = do
+  tagInt <- lookupConTag (QName "std/core/types" (Name ctor 0))
+  (argOps, argName) <- emitExpr arg
+  tagN <- freshName "v"
+  expectN <- freshName "v"
+  cmpN <- freshName "v"
+  resultName <- freshName "v"
+  pure (argOps ++
+    [ "%" <> tagN     <> " = func.call @kk_tag(%" <> argName <> ") : (i64) -> i64"
+    , "%" <> expectN  <> " = arith.constant " <> T.pack (show tagInt) <> " : i64"
+    , "%" <> cmpN     <> " = arith.cmpi eq, %" <> tagN <> ", %" <> expectN <> " : i64"
+    , "%" <> resultName <> " = arith.extui %" <> cmpN <> " : i1 to i64"
+    ], resultName)
+
+-- | (legacy, unused — kept for symmetry).  cmpi against 0,
+-- zero-extend i1 → i64.
 emitOrderPred :: Text -> Expr -> Emit ([Text], Text)
 emitOrderPred pred' arg = do
   (argOps, argName) <- emitExpr arg

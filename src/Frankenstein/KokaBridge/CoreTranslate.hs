@@ -66,7 +66,24 @@ translateProgram kcore = do
             ]
         , F.dataVis    = F.Public
         }
-      allDataDecls = listDecl : dataDecls
+      -- Inject the `order` type (Lt | Eq | Gt) so the emitter has
+      -- tags for it via assignProgramTags.  Used by the `cmp`
+      -- intercept and the `is-lt` / `is-eq` / `is-gt` predicates
+      -- to build / match proper Order values.
+      orderDecl = F.DataDecl
+        { F.dataName   = F.QName "std/core/types" (F.Name "order" 0)
+        , F.dataParams = []
+        , F.dataCons   =
+            [ F.ConDecl { F.conName = F.QName "std/core/types" (F.Name "Lt" 0)
+                        , F.conFields = [], F.conVis = F.Public }
+            , F.ConDecl { F.conName = F.QName "std/core/types" (F.Name "Eq" 0)
+                        , F.conFields = [], F.conVis = F.Public }
+            , F.ConDecl { F.conName = F.QName "std/core/types" (F.Name "Gt" 0)
+                        , F.conFields = [], F.conVis = F.Public }
+            ]
+        , F.dataVis    = F.Public
+        }
+      allDataDecls = listDecl : orderDecl : dataDecls
   pure F.Program
     { F.progName    = translateQName (KC.coreProgName kcore)
     , F.progDefs    = defs''

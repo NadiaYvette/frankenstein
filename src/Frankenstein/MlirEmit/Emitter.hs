@@ -2197,6 +2197,30 @@ emitAppVarWith1 fn arg
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_string_from_char(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
+  -- Koka bool not: `!x` = `x XOR 1`.  Bools are represented as i64
+  -- 0 (False) or 1 (True) in our ABI, so XOR with 1 flips them.
+  | n `elem` ["bool/!", "!"] = do
+      (argOps, argName) <- emitExpr arg
+      oneName <- freshName "v"
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> oneName    <> " = arith.constant 1 : i64"
+        , "%" <> resultName <> " = arith.xori %" <> argName <> ", %" <> oneName <> " : i64"
+        ], resultName)
+  -- Koka `int/float64(i)` and bare `float64(i)`: int → float64
+  -- coercion.  Emit `arith.sitofp` (signed int to fp) then bit-cast
+  -- to i64 so the value flows through the uniformly-i64 closure ABI;
+  -- tag the SSA so downstream arith dispatches to the float
+  -- variants (see emitBinOp's f64bits handling).
+  | n `elem` ["int/float64", "float64", "Float64", "f64", "toFloat64"] = do
+      (argOps, argName) <- emitExpr arg
+      fName    <- freshName "v"
+      bitsName <- freshName "v"
+      recordF64Bits bitsName
+      pure (argOps ++
+        [ "%" <> fName    <> " = arith.sitofp %" <> argName <> " : i64 to f64"
+        , "%" <> bitsName <> " = arith.bitcast %" <> fName <> " : f64 to i64"
+        ], bitsName)
   | n `elem` ["show", "show_int", "str_show_int"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"

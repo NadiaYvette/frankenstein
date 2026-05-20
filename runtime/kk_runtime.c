@@ -408,6 +408,7 @@ int64_t kk_dummy_show_caf(int64_t) __attribute__((alias("dummy_show_caf")));
 #define KK_RUST_I16_TAG     0x42100116
 #define KK_RUST_U8_TAG      0x42100008
 #define KK_RUST_I8_TAG      0x42100108
+#define KK_RUST_STRUCT_TAG  0x575C7C70  /* derive(Debug) struct cell */
 
 int64_t kk_rust_args_pack(int64_t template_str, int64_t args_struct) {
     int64_t cell = kk_alloc_con(KK_RUST_FMT_TAG, 2);
@@ -509,22 +510,40 @@ static void kk_rust_print_one_arg(int64_t v) {
         if (tag == KK_RUST_DEBUG_TAG) {
             if (kk_is_string(inner)) {
                 kk_rust_print_str_debug(inner);
+            } else if (kk_is_heap_ptr(inner)
+                       && kk_tag(inner) == KK_RUST_STRUCT_TAG
+                       && kk_nfields(inner) >= 2) {
+                /* Named-struct Debug: read type name + field names
+                 * from fields 0/1, then iterate value fields. */
+                int64_t name_s  = kk_field(inner, 0);
+                int64_t names_s = kk_field(inner, 1);
+                int64_t nvals   = kk_nfields(inner) - 2;
+                /* Print type name verbatim (e.g. "Point"). */
+                if (kk_is_string(name_s)) kk_print_str(name_s);
+                /* Field-name string is comma-separated. */
+                char* fnbuf = kk_is_string(names_s) ? kk_str_dup_cstr(names_s) : NULL;
+                fputs(" { ", stdout);
+                const char* p = fnbuf;
+                for (int64_t i = 0; i < nvals; i++) {
+                    if (i > 0) fputs(", ", stdout);
+                    if (p) {
+                        const char* comma = strchr(p, ',');
+                        size_t flen = comma ? (size_t)(comma - p) : strlen(p);
+                        fwrite(p, 1, flen, stdout);
+                        fputs(": ", stdout);
+                        p = comma ? comma + 1 : p + flen;
+                    }
+                    kk_rust_print_one_arg(kk_field(inner, 2 + i));
+                }
+                fputs(" }", stdout);
+                if (fnbuf) free(fnbuf);
             } else if (kk_is_heap_ptr(inner)) {
-                /* Generic ADT/struct debug print.  Rust's full
-                 * `derive(Debug)` format `Point { x: 7, y: 13 }`
-                 * needs field name metadata that the bridge erases
-                 * (everything becomes `std.tuple` with hashed tag);
-                 * fall back to positional `(7, 13)` for now. */
+                /* Unknown heap cell: positional fallback. */
                 int64_t n = kk_nfields(inner);
                 putchar('(');
                 for (int64_t i = 0; i < n; i++) {
                     if (i > 0) { putchar(','); putchar(' '); }
                     int64_t fv = kk_field(inner, i);
-                    /* Recurse via the print-one-arg dispatcher; ints
-                     * print as %ld, nested cells get their own
-                     * positional form.  Wrap each field in a Debug
-                     * cell on the stack — but we don't have stack
-                     * cells, so just call the dispatcher directly. */
                     kk_rust_print_one_arg(fv);
                 }
                 putchar(')');
@@ -590,6 +609,65 @@ int64_t kk_rust_arg_u16(int64_t v) { return kk_rust_arg_radix(KK_RUST_U16_TAG, v
 int64_t kk_rust_arg_i16(int64_t v) { return kk_rust_arg_radix(KK_RUST_I16_TAG, v); }
 int64_t kk_rust_arg_u8(int64_t v)  { return kk_rust_arg_radix(KK_RUST_U8_TAG, v); }
 int64_t kk_rust_arg_i8(int64_t v)  { return kk_rust_arg_radix(KK_RUST_I8_TAG, v); }
+
+/* Named-struct builders.  Cell layout:
+ *   tag        = KK_RUST_STRUCT_TAG
+ *   field 0    = kk_string holding the type name (e.g. "Point")
+ *   field 1    = kk_string holding comma-separated field names
+ *                (e.g. "x,y") — empty string for tuple-style ctors
+ *   field 2..N = value of each named field, in source order
+ *
+ * The Debug printer looks at fields 0/1 to format
+ *   Point { x: 7, y: 13 }
+ * and skips the metadata when iterating field values. */
+static int64_t kk_rust_struct_alloc(int64_t nvals, int64_t name, int64_t names) {
+    int64_t cell = kk_alloc_con(KK_RUST_STRUCT_TAG, 2 + nvals);
+    kk_set_field(cell, 0, name);
+    kk_set_field(cell, 1, names);
+    return cell;
+}
+int64_t kk_rust_struct_1(int64_t name, int64_t names, int64_t a) {
+    int64_t c = kk_rust_struct_alloc(1, name, names);
+    kk_set_field(c, 2, a); return c;
+}
+int64_t kk_rust_struct_2(int64_t name, int64_t names, int64_t a, int64_t b) {
+    int64_t c = kk_rust_struct_alloc(2, name, names);
+    kk_set_field(c, 2, a); kk_set_field(c, 3, b); return c;
+}
+int64_t kk_rust_struct_3(int64_t name, int64_t names, int64_t a, int64_t b, int64_t cc) {
+    int64_t c = kk_rust_struct_alloc(3, name, names);
+    kk_set_field(c, 2, a); kk_set_field(c, 3, b); kk_set_field(c, 4, cc); return c;
+}
+int64_t kk_rust_struct_4(int64_t name, int64_t names, int64_t a, int64_t b, int64_t cc, int64_t d) {
+    int64_t c = kk_rust_struct_alloc(4, name, names);
+    kk_set_field(c, 2, a); kk_set_field(c, 3, b); kk_set_field(c, 4, cc); kk_set_field(c, 5, d); return c;
+}
+int64_t kk_rust_struct_5(int64_t name, int64_t names,
+                          int64_t a, int64_t b, int64_t cc, int64_t d, int64_t e) {
+    int64_t c = kk_rust_struct_alloc(5, name, names);
+    kk_set_field(c, 2, a); kk_set_field(c, 3, b); kk_set_field(c, 4, cc);
+    kk_set_field(c, 5, d); kk_set_field(c, 6, e); return c;
+}
+int64_t kk_rust_struct_6(int64_t name, int64_t names,
+                          int64_t a, int64_t b, int64_t cc, int64_t d, int64_t e, int64_t f) {
+    int64_t c = kk_rust_struct_alloc(6, name, names);
+    kk_set_field(c, 2, a); kk_set_field(c, 3, b); kk_set_field(c, 4, cc);
+    kk_set_field(c, 5, d); kk_set_field(c, 6, e); kk_set_field(c, 7, f); return c;
+}
+int64_t kk_rust_struct_7(int64_t name, int64_t names,
+                          int64_t a, int64_t b, int64_t cc, int64_t d, int64_t e, int64_t f, int64_t g) {
+    int64_t c = kk_rust_struct_alloc(7, name, names);
+    kk_set_field(c, 2, a); kk_set_field(c, 3, b); kk_set_field(c, 4, cc);
+    kk_set_field(c, 5, d); kk_set_field(c, 6, e); kk_set_field(c, 7, f);
+    kk_set_field(c, 8, g); return c;
+}
+int64_t kk_rust_struct_8(int64_t name, int64_t names,
+                          int64_t a, int64_t b, int64_t cc, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h) {
+    int64_t c = kk_rust_struct_alloc(8, name, names);
+    kk_set_field(c, 2, a); kk_set_field(c, 3, b); kk_set_field(c, 4, cc);
+    kk_set_field(c, 5, d); kk_set_field(c, 6, e); kk_set_field(c, 7, f);
+    kk_set_field(c, 8, g); kk_set_field(c, 9, h); return c;
+}
 
 /* Render an arg to a freshly-malloc'd C string.  Caller frees.
  * Mirrors kk_rust_print_one_arg but goes to a buffer instead of stdout. */
@@ -1055,6 +1133,22 @@ int64_t rust_arg_u16(int64_t) __attribute__((alias("kk_rust_arg_u16")));
 int64_t rust_arg_i16(int64_t) __attribute__((alias("kk_rust_arg_i16")));
 int64_t rust_arg_u8(int64_t)  __attribute__((alias("kk_rust_arg_u8")));
 int64_t rust_arg_i8(int64_t)  __attribute__((alias("kk_rust_arg_i8")));
+int64_t rust_struct_1(int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_1")));
+int64_t rust_struct_2(int64_t, int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_2")));
+int64_t rust_struct_3(int64_t, int64_t, int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_3")));
+int64_t rust_struct_4(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_4")));
+int64_t rust_struct_5(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_5")));
+int64_t rust_struct_6(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_6")));
+int64_t rust_struct_7(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_7")));
+int64_t rust_struct_8(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_8")));
 
 /* List append for Haskell [Char] cons-lists: a ++ b.
  * Walks a (collecting into a buffer), then prepends each element onto

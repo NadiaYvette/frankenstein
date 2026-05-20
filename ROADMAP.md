@@ -830,19 +830,25 @@ details.
   the sign-bit-set i32 it'd otherwise look like).  See
   `examples/rust_numeric.rs`.
 
-  `#[derive(Debug)]` user ADTs compile and run, but with degraded
-  output.  The bridge filters out the derived `<impl Debug for T>::fmt`
-  bodies (they call `Formatter::debug_struct_field2_finish` which we
-  don't shim).  Without those bodies, `{:?}` on a Point falls through
-  to `kk_rust_print_one_arg`'s positional ADT printer.  Today the
-  struct construction (`Point { x: 7, y: 13 }`) isn't parsed by our
-  MIR shim as an aggregate — it lands as a literal-string RvRaw
-  fallback — so the result is the MIR source text printed inside
-  quotes.  Functional but not Rust-faithful.  See
-  `examples/rust_dbg_adt.rs`.  Still blocked: faithful
-  `Point { x: 7, y: 13 }` output (needs MIR struct-construction
-  parsing + heap-allocation in the bridge); f32/f64 floats; float
-  `{:.N}` decimal places.
+  `#[derive(Debug)]` user struct printing produces faithful
+  `Point { x: 7, y: 13 }` output.  The bridge:
+    - MirParse recognises `Name { field: val, … }` syntax and emits
+      an RvStruct rvalue with type name + named fields.
+    - CoreTranslate dispatches to one of `rust_struct_1`..`rust_struct_8`
+      based on field count, passing the type name and comma-joined
+      field names as metadata strings.
+    - Runtime helpers allocate a KK_RUST_STRUCT_TAG cell with
+      fields [name_str, field_names_str, val0, val1, …].
+    - The Debug formatter reads the metadata and prints
+      `TypeName { field0: val0, field1: val1, … }`.
+    - Derived `<impl Debug for T>::fmt` bodies still filtered (they
+      reference unshimmed Formatter helpers).
+  Structs with >8 fields fall back to positional `(v0, v1, …)`.
+  See `examples/rust_dbg_adt.rs`.  Still degraded: enum-variant
+  printing (e.g. `Color::Red`) lands in the RvRaw fallback and
+  prints as quoted MIR source text; full fix would parse
+  `Variant(args)` and `Variant { fields }` syntaxes too.  Still
+  blocked: f32/f64 floats, float `{:.N}` decimal places.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

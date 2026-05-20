@@ -233,6 +233,21 @@ translateRvalue body rv = case rv of
     EApp (ECon (QName "std" (Name "tuple" 0)))
          (map (translateOperand body) ops)
 
+  RvStruct name fields ->
+    -- Named struct construction: pass type name + comma-separated
+    -- field names alongside the values into a runtime helper that
+    -- builds a KK_RUST_STRUCT_TAG cell.  The Debug printer reads
+    -- the metadata from the cell.  Up to 8 fields supported via
+    -- per-arity helpers (`rust_struct_N`); larger structs fall back
+    -- to a positional aggregate so they still link.
+    let n = length fields
+        fieldNames = T.intercalate "," (map fst fields)
+        vals = map (translateOperand body . snd) fields
+        metaArgs = ELit (LitString name) : ELit (LitString fieldNames) : vals
+    in if n >= 1 && n <= 8
+       then EApp (EVar (Name ("rust_struct_" <> T.pack (show n)) 0)) metaArgs
+       else EApp (ECon (QName "std" (Name "tuple" 0))) vals
+
   RvRef idx ->
     ERetain (EVar (Name ("_" <> T.pack (show idx)) 0))
 

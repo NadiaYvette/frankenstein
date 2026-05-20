@@ -84,6 +84,7 @@ data MirRvalue
   | RvBinOp !Text !MirOperand !MirOperand -- ^ Binary operation: Eq, Sub, Mul, Add, etc.
   | RvWithOverflow !Text !MirOperand !MirOperand -- ^ SubWithOverflow, MulWithOverflow, etc.
   | RvAggregate ![MirOperand]             -- ^ Tuple/array aggregate
+  | RvStruct !Text ![(Text, MirOperand)]  -- ^ struct/enum-variant: name + named fields
   | RvRef !Int                            -- ^ &_N
   | RvFieldAccess !Int !Int !Text         -- ^ (_N.F: Type) - field projection
   | RvRaw !Text                           -- ^ Unparsed rvalue
@@ -428,7 +429,72 @@ parseRvalue t
           parts = splitOperands inner
           ops = [op | Just op <- map (parseOperand . T.strip) parts]
       in RvAggregate ops
+  -- Struct construction:  Point { x: const 7_i64, y: const 13_i64 }
+  -- Enum variant ctor:    Color::Red  (no fields)
+  --                       Shape::Circle(const 10_i64)
+  | Just rv <- parseStructCtor t = rv
   | otherwise = RvRaw t
+
+-- | Recognise Rust MIR's struct-construction and enum-ctor syntaxes
+-- and emit an RvStruct rvalue, preserving the type name and field
+-- names so the runtime Debug formatter can produce
+-- `Point { x: 7, y: 13 }` rather than the positional fallback.
+parseStructCtor :: Text -> Maybe MirRvalue
+parseStructCtor t
+  -- `Name { field: val, … }` shape.
+  | Just nameEnd <- T.findIndex (== '{') t
+  , let prefix = T.strip (T.take nameEnd t)
+  , looksLikeTypeName prefix
+  , let afterName = T.drop nameEnd t
+  , Just closeBrace <- findMatchingClose '{' '}' afterName
+  , let inside = T.drop 1 (T.take closeBrace afterName)
+  , let fields = parseStructFields inside
+  , not (null fields)
+  = Just (RvStruct prefix fields)
+  | otherwise = Nothing
+
+-- | Parse `field: value, field: value, …` and return [(field, value)].
+parseStructFields :: Text -> [(Text, MirOperand)]
+parseStructFields txt =
+  [ (T.strip name, op)
+  | part <- splitOperands txt
+  , let stripped = T.strip part
+  , not (T.null stripped)
+  , Just (name, val) <- [splitOnColon stripped]
+  , Just op <- [parseOperand (T.strip val)]
+  ]
+  where
+    splitOnColon s = case T.breakOn ":" s of
+      (_, rest) | T.null rest -> Nothing
+      (a, b) -> Just (a, T.drop 1 b)
+
+-- | True if the text looks like a Rust type or path identifier:
+-- starts with an uppercase letter, contains only alphanumerics,
+-- underscores, and `::` path separators.  Excludes operators and
+-- numeric prefixes that shouldn't trigger struct parsing.
+looksLikeTypeName :: Text -> Bool
+looksLikeTypeName t = case T.uncons t of
+  Just (c, _) | c >= 'A' && c <= 'Z'
+              , T.all (\ch -> ch == ':' || ch == '_'
+                            || (ch >= 'A' && ch <= 'Z')
+                            || (ch >= 'a' && ch <= 'z')
+                            || (ch >= '0' && ch <= '9')) t
+              -> True
+  _ -> False
+
+-- | Given text that starts with `open`, find the index of the
+-- matching `close`.  Returns the offset of the close character from
+-- the start of the input.
+findMatchingClose :: Char -> Char -> Text -> Maybe Int
+findMatchingClose open close txt = go 0 0 (T.unpack txt)
+  where
+    go _ _     [] = Nothing
+    go i depth (c:cs)
+      | c == open  = go (i + 1) (depth + 1) cs
+      | c == close = if depth == 1
+                     then Just i
+                     else go (i + 1) (depth - 1) cs
+      | otherwise  = go (i + 1) depth cs
 
 -- | Parse binary op from inside parens: "copy _1, const 0_i64)"
 parseBinOpRv :: Text -> Text -> MirRvalue

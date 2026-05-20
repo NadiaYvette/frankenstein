@@ -108,7 +108,7 @@ run_hello "rust-dbg"          $'Display: 42\nDebug:   42\nDisplay: hello\tworld\
 run_hello "rust-radix"        $'dec: 255\nhex: ff\nHEX: FF\noct: 377\nbin: 11111111' "examples/rust_radix.rs"
 run_hello "rust-spec"         $'[   42]\n[42   ]\n[   42]\n[ 42  ]\n[00042]\n[-0007]\n[xxx42]\n[000000ff]\n[hi   ]\n[frank]\n[00042]\n[frank     ]\n[+42]\n[-7]\n[+0042]\n[0xff]\n[0o377]\n[0b11111111]\n[0x000000ff]' "examples/rust_spec.rs"
 run_hello "rust-numeric"      $'u32: 4000000000\ni32: -12345\nu64: 18000000000000000000\nu8:  200\ni8:  -50' "examples/rust_numeric.rs"
-run_hello "rust-dbg-adt"      $'"Point { x: const 7_i64, y: const 13_i64 }"\n"Color::Red"' "examples/rust_dbg_adt.rs"
+run_hello "rust-dbg-adt"      $'Point { x: 7, y: 13 }\n"Color::Red"' "examples/rust_dbg_adt.rs"
 
 echo ""
 echo "========================================"

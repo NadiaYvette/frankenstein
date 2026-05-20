@@ -93,6 +93,19 @@ int64_t kk_rust_arg_i16(int64_t v);
 int64_t kk_rust_arg_u8(int64_t v);
 int64_t kk_rust_arg_i8(int64_t v);
 
+/* Named-struct builders for `#[derive(Debug)]` types.  Bridge emits a
+ * call to one of these per struct-construction site; the Debug
+ * printer reads the embedded type-name and field-name metadata to
+ * produce `Point { x: 7, y: 13 }`-style output. */
+int64_t kk_rust_struct_1(int64_t name, int64_t names, int64_t a);
+int64_t kk_rust_struct_2(int64_t name, int64_t names, int64_t a, int64_t b);
+int64_t kk_rust_struct_3(int64_t name, int64_t names, int64_t a, int64_t b, int64_t c);
+int64_t kk_rust_struct_4(int64_t name, int64_t names, int64_t a, int64_t b, int64_t c, int64_t d);
+int64_t kk_rust_struct_5(int64_t name, int64_t names, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e);
+int64_t kk_rust_struct_6(int64_t name, int64_t names, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f);
+int64_t kk_rust_struct_7(int64_t name, int64_t names, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g);
+int64_t kk_rust_struct_8(int64_t name, int64_t names, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

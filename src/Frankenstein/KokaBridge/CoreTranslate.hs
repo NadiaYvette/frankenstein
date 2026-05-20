@@ -9,8 +9,10 @@
 --   4. Multiplicity: defaults to Many (Perceus re-derives)
 --   5. Koka ConRepr/DataRepr backend info → discarded
 
+{-# LANGUAGE NamedFieldPuns #-}
 module Frankenstein.KokaBridge.CoreTranslate
   ( translateProgram
+  , translateProgramMulti
   , translateExpr
   , translateType
   ) where
@@ -71,6 +73,35 @@ translateProgram kcore = do
     , F.progData    = allDataDecls
     , F.progEffects = effects
     }
+
+-- | Translate a root Koka module plus a list of imported modules into
+-- a single Frankenstein Program.  The root drives `progName`; defs,
+-- data declarations, and effects from every supplied module are
+-- merged together.  Duplicate QNames are de-duped (last-write-wins),
+-- which matters when the synthetic `list` decl from translateProgram
+-- shows up in both the root's output and an imported module's
+-- output.
+translateProgramMulti :: KC.Core -> [KC.Core] -> Either Text F.Program
+translateProgramMulti rootCore importCores = do
+  rootProg <- translateProgram rootCore
+  importProgs <- mapM translateProgram importCores
+  let allProgs = rootProg : importProgs
+      mergedDefs = dedupDefs $ concatMap F.progDefs allProgs
+      mergedData = dedupData $ concatMap F.progData allProgs
+      mergedEffs = concatMap F.progEffects allProgs
+  pure rootProg
+    { F.progDefs    = mergedDefs
+    , F.progData    = mergedData
+    , F.progEffects = mergedEffs
+    }
+  where
+    -- Last-write-wins de-dup keyed by QName.  Imported-module
+    -- duplicates are rare but happen when two modules both depend
+    -- on the same Koka-stdlib helper that gets re-exported.
+    dedupDefs :: [F.Def] -> [F.Def]
+    dedupDefs = Map.elems . Map.fromList . map (\d -> (F.defName d, d))
+    dedupData :: [F.DataDecl] -> [F.DataDecl]
+    dedupData = Map.elems . Map.fromList . map (\d -> (F.dataName d, d))
 
 -- ============================================================================
 -- External (extern) declarations → name rewriting

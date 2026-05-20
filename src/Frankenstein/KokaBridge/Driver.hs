@@ -19,11 +19,13 @@ import Compile.BuildContext (BuildContext(..), buildcEmpty, buildcAddRootSources
 import Compile.Module (Module(..), modCore, modName)
 import Common.Error (errors)
 import Common.Name (showPlain)
+import Common.Name qualified as KN
 import System.FilePath (takeDirectory, (</>))
 import System.Directory (doesDirectoryExist, getCurrentDirectory, makeAbsolute)
 
 import Frankenstein.Core.Types qualified as F
-import Frankenstein.KokaBridge.CoreTranslate (translateProgram)
+import Frankenstein.KokaBridge.CoreTranslate (translateProgramMulti)
+import Data.List (isPrefixOf)
 
 -- | Compile a .kk file and translate to Frankenstein Core
 compileKokaFile :: FilePath -> IO (Either Text F.Program)
@@ -49,18 +51,26 @@ compileKokaFile inputFile = do
     (bc, rootNames) <- buildcAddRootSources [absFile] (buildcEmpty flags)
     bc' <- buildcTypeCheck [] bc
     let mods = buildcModules bc'
-        -- Find the root module by matching against rootNames
         rootMods = [m | m <- mods, modName m `elem` rootNames]
-    case rootMods of
-      [] -> pure $ Left "No root module found after compilation"
-      (rootMod:_) ->
-        case modCore rootMod of
-          Just core -> pure $ Right core
-          Nothing ->
-            -- Type checking failed — report errors from the module
-            let modErrs = errors (modErrors rootMod)
-                errMsgs = map (T.pack . show) modErrs
-            in pure $ Left $ "Koka type error:\n" <> T.intercalate "\n" errMsgs
+        rootModNames = [modName m | m <- rootMods]
+        -- Non-root, non-stdlib modules — anything under std/ is
+        -- treated as predeclared (handled by the runtime), so we
+        -- skip its definitions to avoid emitting empty Core for
+        -- runtime-resident functions like println_str.
+        userMods   = [ m | m <- mods
+                         , not (modName m `elem` rootModNames)
+                         , not (isStdlibModule (modName m)) ]
+        rootCores  = [c | m <- rootMods, Just c <- [modCore m]]
+        userCores  = [c | m <- userMods, Just c <- [modCore m]]
+    case rootCores of
+      [] ->
+        let modErrs = concatMap (errors . modErrors) rootMods
+            errMsgs = map (T.pack . show) modErrs
+        in pure $ Left $ "No root module Core after compilation"
+                       <> (if null errMsgs then ""
+                           else ":\n" <> T.intercalate "\n" errMsgs)
+      (rootCore:_) ->
+        pure $ Right (rootCore, userCores)
 
   case result of
     Left errs -> do
@@ -70,10 +80,19 @@ compileKokaFile inputFile = do
     Right (inner, _warnings) ->
       case inner of
         Left err -> pure $ Left err
-        Right core ->
-          case translateProgram core of
+        Right (rootCore, userCores) ->
+          case translateProgramMulti rootCore userCores of
             Left err   -> pure $ Left $ "Koka Core translation error: " <> err
             Right prog -> pure $ Right prog
+
+-- | Is this Koka module name part of the standard library?  Anything
+-- under `std/` (std/core, std/core/types, std/num/int64, …) is
+-- handled by the runtime — emitting Core for it would shadow the C
+-- implementations and miss inlining opportunities.
+isStdlibModule :: KN.Name -> Bool
+isStdlibModule mn =
+  let s = showPlain mn
+  in "std/" `isPrefixOf` s || s == "std"
 
 -- | Find the Koka standard library directory
 -- Looks in common locations relative to CWD and the source tree

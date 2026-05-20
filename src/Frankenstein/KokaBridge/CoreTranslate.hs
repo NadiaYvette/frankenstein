@@ -216,11 +216,10 @@ translateExpr :: KC.Expr -> Either Text F.Expr
 translateExpr = \case
   KC.Var tname _varInfo
     -- Bare-EVar reference to `++` (e.g. passed to a HOF like fold).
-    -- Route to `str_concat` so the linker sees a defined symbol.
-    | KN.nameStem (KC.getName tname) == "++" ->
-        pure $ F.EVar (F.Name "str_concat" 0)
-    | KN.nameLocal (KC.getName tname) == "++" ->
-        pure $ F.EVar (F.Name "str_concat" 0)
+    -- Koka overloads `++` for both string and list; the function's
+    -- type tells us which.  String → kk_str_concat, list → kk_list_concat.
+    | isPlusPlusName (KC.getName tname) ->
+        pure $ F.EVar (F.Name (T.pack (plusPlusRuntime (KC.tnameType tname))) 0)
     | otherwise ->
         pure $ F.EVar (translateTNameToName tname)
 
@@ -240,11 +239,11 @@ translateExpr = \case
   -- direct runtime calls rather than higher-order closure applications.
   KC.App (KC.TypeApp (KC.Var tname _) _) args
     | isKokaBuiltinApp (KC.getName tname) -> do
-        translateBuiltinApp (KC.getName tname) args
+        translateBuiltinApp tname args
 
   KC.App (KC.Var tname _) args
     | isKokaBuiltinApp (KC.getName tname) -> do
-        translateBuiltinApp (KC.getName tname) args
+        translateBuiltinApp tname args
 
   -- Cons(h, t) → EApp (EVar kk_cons) [h, t]
   KC.App (KC.TypeApp (KC.Con tname _) _) args
@@ -820,6 +819,47 @@ isKokaCons :: KN.Name -> Bool
 isKokaCons kn = KN.nameStem kn == "Cons"
              && KN.nameModule kn `elem` ["std/core/types", "std/core"]
 
+-- | True when the name is Koka's overloaded `++` operator (any qualifier).
+isPlusPlusName :: KN.Name -> Bool
+isPlusPlusName kn = KN.nameStem kn == "++" || KN.nameLocal kn == "++"
+
+-- | The stem of the head TypeCon of the function's first parameter type,
+-- after stripping any leading `forall`s.  Used to disambiguate Koka's
+-- overloaded operators by their argument shape (string vs list vs …).
+firstParamTypeHead :: KT.Type -> Maybe String
+firstParamTypeHead ty = firstParamTypeName (stripForall ty)
+  where
+    stripForall (KT.TForall _ rho) = stripForall rho
+    stripForall t                  = t
+
+    firstParamTypeName (KT.TFun ((_, t1):_) _ _) = typeConHead t1
+    firstParamTypeName _                          = Nothing
+
+    typeConHead (KT.TCon tc)        = Just (KN.nameStem (KT.typeconName tc))
+    typeConHead (KT.TApp h _)       = typeConHead h
+    typeConHead (KT.TSyn _ _ body)  = typeConHead body
+    typeConHead _                   = Nothing
+
+-- | Pick the runtime helper name for Koka's `++` based on the function's
+-- type.  `string -> string -> string` → "str_concat" (the emitter routes
+-- str_concat → kk_str_concat); list<a> → "kk_list_concat" (already
+-- runtime-prefixed; the emitter has dedicated dispatch + papCallTarget
+-- mapping entry).  Defaults to str_concat when the type is unknown.
+plusPlusRuntime :: KT.Type -> String
+plusPlusRuntime ty = case firstParamTypeHead ty of
+  Just "string" -> "str_concat"
+  Just "list"   -> "kk_list_concat"
+  _             -> "str_concat"
+
+-- | Pick the runtime helper for Koka's `length`/`count` based on the
+-- function's first-arg type.  string → "str_char_len" (utf-8 char count);
+-- list → "kk_list_length" (cons-cell count).
+lengthRuntime :: KT.Type -> String
+lengthRuntime ty = case firstParamTypeHead ty of
+  Just "list"   -> "kk_list_length"
+  Just "string" -> "str_char_len"
+  _             -> "str_char_len"
+
 -- | Check if a Koka name corresponds to a known stdlib builtin we
 -- want to intercept and translate to a direct runtime call.  Koka's
 -- name resolution picks a typed override (`string/println`,
@@ -835,6 +875,11 @@ isKokaBuiltinApp kn =
   || stem == "show" && qual `elem` ["show", ""]
   || local == "++"
   || stem == "++"
+  -- Length-like overloads: route by first-arg type.  Koka's `length`
+  -- and `count` resolve to either string or list specialisations; the
+  -- bridge picks the right runtime helper.
+  || stem `elem` ["length", "count"]
+  || local `elem` ["length", "count"]
   || stem `elem` ["pretend-no-div", "pretend-nodiv-cast"
                  , "pretend-decreasing"]
   -- @open is Koka's synthetic effect-row opener — a value-level
@@ -865,15 +910,20 @@ builtinIntrinsicNames =
 -- etc.  We use the qualifier (or local name) to pick the runtime
 -- function — strings go straight to `println_str`, ints route through
 -- `show_int` first.
-translateBuiltinApp :: KN.Name -> [KC.Expr] -> Either Text F.Expr
-translateBuiltinApp kn args = do
-  let stem  = KN.nameStem kn
+translateBuiltinApp :: KC.TName -> [KC.Expr] -> Either Text F.Expr
+translateBuiltinApp tname args = do
+  let kn    = KC.getName tname
+      stem  = KN.nameStem kn
       local = KN.nameLocal kn
       qual  = KN.nameLocalQual kn
       printName    = F.Name "println_str" 0
       printNameNoNL = F.Name "print_str" 0
       showIntName  = F.Name "show_int" 0
-      strConcatName = F.Name "str_concat" 0
+      -- For `++`: pick str_concat or kk_list_concat from the type.
+      ppName       = F.Name (T.pack (plusPlusRuntime (KC.tnameType tname))) 0
+      -- For `length`/`count`: pick str_char_len or kk_list_length from
+      -- the function's first-arg type.
+      lenName      = F.Name (T.pack (lengthRuntime (KC.tnameType tname))) 0
   case (stem, local, qual, args) of
     -- `string/println(s)` — Koka's println for strings: pass the
     -- string directly to the println_str runtime.
@@ -895,16 +945,25 @@ translateBuiltinApp kn args = do
     ("show", _, _, [val]) -> do
       val' <- translateExpr val
       pure $ F.EApp (F.EVar showIntName) [val']
-    -- Koka's binary `++` is string concat at the value level.  The
-    -- runtime helper kk_str_concat handles rope-based concatenation.
+    -- Koka's binary `++` is overloaded for both string and list.  Pick
+    -- the runtime helper by inspecting the function's first-arg type:
+    -- `string -> string -> string` → kk_str_concat; everything else
+    -- (list<a>, etc.) → kk_list_concat.
     (_, "++", _, [a, b]) -> do
       a' <- translateExpr a
       b' <- translateExpr b
-      pure $ F.EApp (F.EVar strConcatName) [a', b']
+      pure $ F.EApp (F.EVar ppName) [a', b']
     ("++", _, _, [a, b]) -> do
       a' <- translateExpr a
       b' <- translateExpr b
-      pure $ F.EApp (F.EVar strConcatName) [a', b']
+      pure $ F.EApp (F.EVar ppName) [a', b']
+    -- Length/count: emit the type-correct runtime helper name.
+    (s, _, _, [a]) | s `elem` ["length", "count"] -> do
+      a' <- translateExpr a
+      pure $ F.EApp (F.EVar lenName) [a']
+    (_, l, _, [a]) | l `elem` ["length", "count"] -> do
+      a' <- translateExpr a
+      pure $ F.EApp (F.EVar lenName) [a']
     -- std/core/undiv: `pretend-no-div(action)` is defined in Koka
     -- as `pretend-nodiv-cast(action)()` — it just runs the thunk.
     -- Filter the std/ module out at the multi-module driver level

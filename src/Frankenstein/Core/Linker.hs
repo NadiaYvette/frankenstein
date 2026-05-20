@@ -596,6 +596,9 @@ runtimeNames = Set.fromList
   -- Koka list constructors (the KokaBridge emits these as EVar refs
   -- to the `kk_cons` / `kk_nil` runtime helpers).
   , "kk_cons", "kk_nil"
+  -- Koka list `++` and `length`/`count` for lists (bridge dispatches
+  -- by argument type).  Runtime helpers defined in runtime/kk_runtime.c.
+  , "kk_list_concat", "kk_list_length"
   -- Koka stdlib helpers wired by the bridge — defined in
   -- runtime/kk_runtime.c or aliased to a kk_* implementation.
   , "string/println", "string/print"

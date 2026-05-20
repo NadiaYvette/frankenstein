@@ -2816,6 +2816,16 @@ int64_t kk_list_take(int64_t xs, int64_t n) {
     return kk_list_reverse(acc);
 }
 
+/* List length: count cons cells (O(n)). */
+int64_t kk_list_length(int64_t xs) {
+    int64_t n = 0;
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        n++;
+        xs = kk_field(xs, 1);
+    }
+    return n;
+}
+
 /* List concatenation: append ys to the end of xs. */
 int64_t kk_list_concat(int64_t xs, int64_t ys) {
     int64_t acc = ys;
@@ -2939,16 +2949,23 @@ int64_t kk_list_map_indexed(int64_t xs, int64_t f) {
  * adjacent elements.  Each cons cell of xs holds a kk_string head. */
 int64_t kk_joinsep_join(int64_t xs, int64_t sep) {
     if (!(kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG)) {
+        kk_str_drop(sep);
         return kk_string_empty();
     }
     int64_t acc = kk_field(xs, 0);
     xs = kk_field(xs, 1);
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        /* Each kk_str_concat consumes a refcount of `sep`; retain so the
+         * caller's single ownership survives every loop iteration.  Without
+         * this, an empty `sep` is freed by kk_str_concat's b->byte_len==0
+         * branch on iteration 1 and subsequent iterations read garbage. */
+        kk_str_retain(sep);
         acc = kk_str_concat(acc, sep);
         acc = kk_str_concat(acc, h);
         xs = kk_field(xs, 1);
     }
+    kk_str_drop(sep);
     return acc;
 }
 

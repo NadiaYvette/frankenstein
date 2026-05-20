@@ -22,6 +22,7 @@ import Common.Name (showPlain)
 import Common.Name qualified as KN
 import System.FilePath (takeDirectory, (</>))
 import System.Directory (doesDirectoryExist, getCurrentDirectory, makeAbsolute)
+import System.Environment (lookupEnv)
 
 import Frankenstein.Core.Types qualified as F
 import Frankenstein.KokaBridge.CoreTranslate (translateProgramMulti)
@@ -34,7 +35,15 @@ compileKokaFile inputFile = do
   absFile <- makeAbsolute inputFile
   let srcDir = takeDirectory absFile
   kokaLibDir <- findKokaLib
-  let flags = flagsNull { includePath = [srcDir] ++ kokaLibDir }
+  -- Honor KOKA_INCLUDE (colon-separated extra include dirs) so projects
+  -- whose `module foo/bar/baz` declaration sits below a deeper root can
+  -- be compiled without surgery: e.g. `surd/demo/trig-table.kk` needs
+  -- /home/nyc/src/surd/koka on the path so `surd/rational` resolves.
+  envInc <- lookupEnv "KOKA_INCLUDE"
+  let extra = case envInc of
+        Just p | not (null p) -> splitOnChar ':' p
+        _                     -> []
+  let flags = flagsNull { includePath = [srcDir] ++ extra ++ kokaLibDir }
 
   -- Collect errors for reporting
   errRef <- newIORef ([] :: [String])
@@ -84,6 +93,14 @@ compileKokaFile inputFile = do
           case translateProgramMulti rootCore userCores of
             Left err   -> pure $ Left $ "Koka Core translation error: " <> err
             Right prog -> pure $ Right prog
+
+-- | Split a string on a single-char delimiter (avoids a Data.List.Split dep).
+splitOnChar :: Char -> String -> [FilePath]
+splitOnChar d = foldr step [[]]
+  where step c acc@(cur:rest)
+          | c == d    = [] : acc
+          | otherwise = (c:cur) : rest
+        step _ []     = [[]]
 
 -- | Is this Koka module name part of the standard library?  Anything
 -- under `std/` (std/core, std/core/types, std/num/int64, …) is

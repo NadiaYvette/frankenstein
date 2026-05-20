@@ -774,6 +774,7 @@ emitProgramText prog =
     , "  func.func private @kk_list_filter_map(i64, i64) -> i64"
     , "  func.func private @kk_list_foreach(i64, i64) -> i64"
     , "  func.func private @kk_list_concat(i64, i64) -> i64"
+    , "  func.func private @kk_list_length(i64) -> i64"
     , "  func.func private @kk_is_nil(i64) -> i64"
     , "  func.func private @cos(f64) -> f64"
     , "  func.func private @sin(f64) -> f64"
@@ -1025,6 +1026,7 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_list_filter_map(i64, i64) -> i64"
     , "  func.func private @kk_list_foreach(i64, i64) -> i64"
     , "  func.func private @kk_list_concat(i64, i64) -> i64"
+    , "  func.func private @kk_list_length(i64) -> i64"
     , "  func.func private @kk_is_nil(i64) -> i64"
     , "  func.func private @cos(f64) -> f64"
     , "  func.func private @sin(f64) -> f64"
@@ -2064,6 +2066,15 @@ emitAppVarWith2 fn a b
       pure (aOps ++ bOps ++
         [ "%" <> resultName <> " = func.call @kk_str_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
         ], resultName)
+  -- List `++` — bridge emits this for list-typed `++` references.  The
+  -- runtime helper builds a fresh appended list with proper refcounts.
+  | n == "kk_list_concat" = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_list_concat(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+        ], resultName)
   -- int_to_haskell_chars(value, tail) → kk_int_to_haskell_chars.  Used
   -- by the GHC bridge as the rewrite target for Show Int (via the
   -- $w$cshowsPrec2 worker name).  Builds a [Char] cons-list with the
@@ -2325,6 +2336,13 @@ emitAppVarWith1 fn arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_char_len(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  -- List length — bridge picks this for list-typed `length`/`count`.
+  | n == "kk_list_length" = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_list_length(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   | n `elem` ["str_flatten", "flatten"] = do
       (argOps, argName) <- emitExpr arg
@@ -3921,6 +3939,7 @@ externalRuntimeFns = Set.fromList
   , "rust_struct_1", "rust_struct_2", "rust_struct_3", "rust_struct_4"
   , "rust_struct_5", "rust_struct_6", "rust_struct_7", "rust_struct_8"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
+  , "kk_list_concat", "kk_list_length"
   , "read_line", "getLine", "read_file", "write_file"
   , "string_empty"
   , "args_count", "args_get", "args_progname"
@@ -3960,6 +3979,7 @@ externalRuntimeArity = Map.fromList
   , ("rust_struct_1", 3), ("rust_struct_2", 4), ("rust_struct_3", 5), ("rust_struct_4", 6)
   , ("rust_struct_5", 7), ("rust_struct_6", 8), ("rust_struct_7", 9), ("rust_struct_8", 10)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
+  , ("kk_list_concat", 2), ("kk_list_length", 1)
   , ("show_int", 1)
   , ("read_line", 0), ("getLine", 0), ("string_empty", 0)
   , ("read_file", 1), ("write_file", 2)

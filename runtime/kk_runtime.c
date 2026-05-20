@@ -2864,6 +2864,105 @@ int64_t kk_list_filter_map(int64_t xs, int64_t f) {
     return kk_list_reverse(acc);
 }
 
+/* `range/list(lo, hi)` — build the list [lo, lo+1, ..., hi].
+ * Returns nil if lo > hi.  Used by Koka's `list(lo, hi)` /
+ * `range/list` stdlib intrinsic. */
+int64_t kk_range_list(int64_t lo, int64_t hi) {
+    int64_t r = kk_nil();
+    for (int64_t i = hi; i >= lo; i--) {
+        r = kk_cons(i, r);
+    }
+    return r;
+}
+
+/* `unjust(m)` — extract the value from a Just; on Nothing, return 0
+ * (we don't have proper exceptions here; the surd code expects to
+ * only call this on Just values). */
+int64_t kk_unjust(int64_t maybe_v) {
+    if (kk_is_heap_ptr(maybe_v) && kk_nfields(maybe_v) >= 1) {
+        return kk_field(maybe_v, 0);
+    }
+    return 0;
+}
+
+/* `maybe/head(xs)` — head of a list as a Maybe.  Returns Nothing
+ * (encoded as nil) for empty lists, or Just(head) wrapped in a Cons-
+ * shaped cell (compatible with our maybe encoding). */
+int64_t kk_maybe_head(int64_t xs) {
+    if (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        /* Just(head) — allocate a 1-field cell holding the head.
+         * The tag we use here matches Cons since our maybe
+         * encoding piggy-backs on Cons / Nil. */
+        int64_t h = kk_field(xs, 0);
+        return kk_cons(h, kk_nil());
+    }
+    /* Nothing → nil */
+    return kk_nil();
+}
+
+/* `list.zip(ys)` — pair corresponding elements, stopping at the
+ * shorter list's end.  Returns a list of Tuple2 cells. */
+int64_t kk_list_zip(int64_t xs, int64_t ys) {
+    int64_t acc = kk_nil();
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG
+        && kk_is_heap_ptr(ys) && kk_tag(ys) == KK_CONS_TAG) {
+        int64_t x = kk_field(xs, 0);
+        int64_t y = kk_field(ys, 0);
+        /* Build Tuple2(x, y) using KK_CONS_TAG (Koka represents
+         * Tuple2 as a 2-field cell; tag value doesn't matter for
+         * field access). */
+        int64_t pair = kk_alloc_con(KK_CONS_TAG, 2);
+        kk_set_field(pair, 0, x);
+        kk_set_field(pair, 1, y);
+        acc = kk_cons(pair, acc);
+        xs = kk_field(xs, 1);
+        ys = kk_field(ys, 1);
+    }
+    return kk_list_reverse(acc);
+}
+
+/* `list.map-indexed(f)` — like map, but f takes (index, element). */
+int64_t kk_list_map_indexed(int64_t xs, int64_t f) {
+    int64_t acc = kk_nil();
+    int64_t i = 0;
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        int64_t mapped = kk_call_closure_2(f, i, h);
+        acc = kk_cons(mapped, acc);
+        xs = kk_field(xs, 1);
+        i++;
+    }
+    return kk_list_reverse(acc);
+}
+
+/* `joinsep/join(xs, sep)` — join a list of strings with sep between
+ * adjacent elements.  Each cons cell of xs holds a kk_string head. */
+int64_t kk_joinsep_join(int64_t xs, int64_t sep) {
+    if (!(kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG)) {
+        return kk_string_empty();
+    }
+    int64_t acc = kk_field(xs, 0);
+    xs = kk_field(xs, 1);
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        acc = kk_str_concat(acc, sep);
+        acc = kk_str_concat(acc, h);
+        xs = kk_field(xs, 1);
+    }
+    return acc;
+}
+
+/* `throw(msg)` — generic exception.  We don't have proper effect
+ * handlers wired for exn yet; just print the message to stderr
+ * and exit. */
+int64_t kk_throw(int64_t msg) {
+    char* buf = kk_str_dup_cstr(msg);
+    fprintf(stderr, "throw: %s\n", buf ? buf : "(unknown)");
+    if (buf) free(buf);
+    exit(1);
+    return 0;
+}
+
 /* `list.foreach(f)` — apply f to each element for its side effect;
  * return unit (0). */
 int64_t kk_list_foreach(int64_t xs, int64_t f) {

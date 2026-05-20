@@ -774,6 +774,23 @@ emitProgramText prog =
     , "  func.func private @kk_list_filter_map(i64, i64) -> i64"
     , "  func.func private @kk_list_foreach(i64, i64) -> i64"
     , "  func.func private @kk_list_concat(i64, i64) -> i64"
+    , "  func.func private @kk_is_nil(i64) -> i64"
+    , "  func.func private @cos(f64) -> f64"
+    , "  func.func private @sin(f64) -> f64"
+    , "  func.func private @tan(f64) -> f64"
+    , "  func.func private @sqrt(f64) -> f64"
+    , "  func.func private @log(f64) -> f64"
+    , "  func.func private @exp(f64) -> f64"
+    , "  func.func private @atan2(f64, f64) -> f64"
+    , "  func.func private @pow(f64, f64) -> f64"
+    , "  func.func private @fmod(f64, f64) -> f64"
+    , "  func.func private @kk_range_list(i64, i64) -> i64"
+    , "  func.func private @kk_list_zip(i64, i64) -> i64"
+    , "  func.func private @kk_list_map_indexed(i64, i64) -> i64"
+    , "  func.func private @kk_joinsep_join(i64, i64) -> i64"
+    , "  func.func private @kk_unjust(i64) -> i64"
+    , "  func.func private @kk_maybe_head(i64) -> i64"
+    , "  func.func private @kk_throw(i64) -> i64"
     , "  func.func private @kk_println_str(i64) -> ()"
     , "  func.func private @kk_print_str(i64) -> ()"
     , "  func.func private @kk_str_concat(i64, i64) -> i64"
@@ -1008,6 +1025,23 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_list_filter_map(i64, i64) -> i64"
     , "  func.func private @kk_list_foreach(i64, i64) -> i64"
     , "  func.func private @kk_list_concat(i64, i64) -> i64"
+    , "  func.func private @kk_is_nil(i64) -> i64"
+    , "  func.func private @cos(f64) -> f64"
+    , "  func.func private @sin(f64) -> f64"
+    , "  func.func private @tan(f64) -> f64"
+    , "  func.func private @sqrt(f64) -> f64"
+    , "  func.func private @log(f64) -> f64"
+    , "  func.func private @exp(f64) -> f64"
+    , "  func.func private @atan2(f64, f64) -> f64"
+    , "  func.func private @pow(f64, f64) -> f64"
+    , "  func.func private @fmod(f64, f64) -> f64"
+    , "  func.func private @kk_range_list(i64, i64) -> i64"
+    , "  func.func private @kk_list_zip(i64, i64) -> i64"
+    , "  func.func private @kk_list_map_indexed(i64, i64) -> i64"
+    , "  func.func private @kk_joinsep_join(i64, i64) -> i64"
+    , "  func.func private @kk_unjust(i64) -> i64"
+    , "  func.func private @kk_maybe_head(i64) -> i64"
+    , "  func.func private @kk_throw(i64) -> i64"
     , "  func.func private @kk_println_str(i64) -> ()"
     , "  func.func private @kk_print_str(i64) -> ()"
     , "  func.func private @kk_str_concat(i64, i64) -> i64"
@@ -1314,6 +1348,19 @@ builtinWrapperSpec name = case name of
   -- tagToEnum# is identity (Bool 0/1 = Int 0/1)
   "tagToEnum#" -> Just ("__kk_builtin_tagToEnum", 1,
     "    func.return %arg0 : i64")
+  -- Koka tuple accessors as first-class values.  When `tuple2/fst`
+  -- is passed to a HOF (e.g. `xs.map(tuple2/fst)`), the bridge
+  -- needs a real function symbol — synthesise one that extracts
+  -- field 0 from its arg via the runtime's kk_field.  Similarly
+  -- for tuple2/snd → field 1.
+  "tuple2/fst" -> Just ("__kk_builtin_tuple2_fst", 1,
+    T.unlines [ "    %idx = arith.constant 0 : i64"
+              , "    %r = func.call @kk_field(%arg0, %idx) : (i64, i64) -> i64"
+              , "    func.return %r : i64" ])
+  "tuple2/snd" -> Just ("__kk_builtin_tuple2_snd", 1,
+    T.unlines [ "    %idx = arith.constant 1 : i64"
+              , "    %r = func.call @kk_field(%arg0, %idx) : (i64, i64) -> i64"
+              , "    func.return %r : i64" ])
   _ -> Nothing
   where
     binOp op = T.unlines ["    %r = " <> op <> " %arg0, %arg1 : i64", "    func.return %r : i64"]
@@ -1899,6 +1946,82 @@ emitAppVarWith2 fn a b
         [ "%" <> cmpName    <> " = arith.cmpi slt, %" <> aName <> ", %" <> bName <> " : i64"
         , "%" <> resultName <> " = arith.select %" <> cmpName <> ", %" <> aName <> ", %" <> bName <> " : i64"
         ], resultName)
+  -- `cmp(a, b)` returns an `order` value.  We encode order as a
+  -- plain int: -1 (Lt) / 0 (Eq) / 1 (Gt).  The is-lt / is-eq /
+  -- is-gt predicates above check the sign.  Implementation:
+  --   diff = a - b
+  --   lt = (diff < 0) ? -1 : 0
+  --   final = (diff > 0) ? 1 : lt
+  -- All via arith ops; no branching.
+  | n `elem` ["cmp", "int/cmp"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, bName) <- emitExpr b
+      zeroName <- freshName "v"
+      negOneName <- freshName "v"
+      oneName  <- freshName "v"
+      ltCmp    <- freshName "v"
+      gtCmp    <- freshName "v"
+      ltSel    <- freshName "v"
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> zeroName   <> " = arith.constant 0 : i64"
+        , "%" <> negOneName <> " = arith.constant -1 : i64"
+        , "%" <> oneName    <> " = arith.constant 1 : i64"
+        , "%" <> ltCmp      <> " = arith.cmpi slt, %" <> aName <> ", %" <> bName <> " : i64"
+        , "%" <> ltSel      <> " = arith.select %" <> ltCmp <> ", %" <> negOneName <> ", %" <> zeroName <> " : i64"
+        , "%" <> gtCmp      <> " = arith.cmpi sgt, %" <> aName <> ", %" <> bName <> " : i64"
+        , "%" <> resultName <> " = arith.select %" <> gtCmp <> ", %" <> oneName <> ", %" <> ltSel <> " : i64"
+        ], resultName)
+  -- 2-arg libm: atan2, pow.
+  | n `elem` ["atan2", "double/atan2", "float64/atan2"] = emitLibm2 "atan2" a b
+  | n `elem` ["pow", "double/pow", "float64/pow"]       = emitLibm2 "pow" a b
+  | n `elem` ["fmod", "double/fmod", "float64/fmod"]    = emitLibm2 "fmod" a b
+  -- More list HOFs / generators.
+  | n `elem` ["range/list", "list"]              = emitListHOF2 "kk_range_list" a b
+  | n `elem` ["zip", "list/zip"]                 = emitListHOF2 "kk_list_zip" a b
+  | n `elem` ["map-indexed", "list/map-indexed"] = emitListHOF2 "kk_list_map_indexed" a b
+  | n `elem` ["joinsep/join", "joinsep_join", "list/joinsep/join"] = emitListHOF2 "kk_joinsep_join" a b
+  -- Koka's `throw(msg, info)` 2-arg form: the second arg is the
+  -- effect-handler context, which we ignore.  Routes to kk_throw
+  -- with just the message.
+  | n `elem` ["throw", "exn/throw"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, _)     <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_throw(%" <> aName <> ") : (i64) -> i64"
+        ], resultName)
+  -- Koka's `show(x, dict)` 2-arg form: when the implicit show
+  -- dictionary is explicit (no specialisation), the bridge sees
+  -- `show(val, ?show-dict)`.  Default to int show; for non-int
+  -- types this loses fidelity but at least links.
+  | n `elem` ["show", "show/show"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, _)     <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_str_show_int(%" <> aName <> ") : (i64) -> i64"
+        ], resultName)
+  -- 2-arg `unjust(m, info)`: Koka passes an effect-info second arg
+  -- (the file/line context for the panic message).  We ignore it
+  -- and use the kk_unjust single-arg form.
+  | n `elem` ["unjust", "maybe/unjust"] = do
+      (aOps, aName) <- emitExpr a
+      (bOps, _)     <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = func.call @kk_unjust(%" <> aName <> ") : (i64) -> i64"
+        ], resultName)
+  -- `file/kk-file-line(file, line)`: Koka's source-location info for
+  -- panics / assertions.  The runtime doesn't display source loc,
+  -- so just return a placeholder int.
+  | n `elem` ["file/kk-file-line"] = do
+      (aOps, _) <- emitExpr a
+      (bOps, _) <- emitExpr b
+      resultName <- freshName "v"
+      pure (aOps ++ bOps ++
+        [ "%" <> resultName <> " = arith.constant 0 : i64"
+        ], resultName)
   -- Address arithmetic (from inlined unpackCString#)
   | n == "plusAddr#"                               = emitBinOp "arith.addi" "i64" a b
   -- indexCharOffAddr# addr off: load byte at addr+off, zero-extend to i64
@@ -2251,6 +2374,57 @@ emitAppVarWith1 fn arg
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_string_from_char(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
+  -- Koka Order predicates.  We encode `order` as a plain integer:
+  -- -1 (Lt), 0 (Eq), 1 (Gt) — see emitAppVarWith2's `cmp` intercept.
+  -- The predicates are a sign test.
+  | n `elem` ["is-lt", "order/is-lt"] = emitOrderPred "slt" arg
+  | n `elem` ["is-eq", "order/is-eq"] = emitOrderPred "eq"  arg
+  | n `elem` ["is-gt", "order/is-gt"] = emitOrderPred "sgt" arg
+  -- Int predicates.
+  | n `elem` ["is-even", "int/is-even"] = emitParityPred "eq" arg
+  | n `elem` ["is-odd",  "int/is-odd"]  = emitParityPred "ne" arg
+  -- `is-empty` for lists: tag == KK_NIL_TAG.  kk_is_nil returns 1 / 0.
+  | n `elem` ["is-empty", "list/is-empty"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_is_nil(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  -- `int/char(c)` and `char/int(n)`: bijection between codepoint
+  -- and int in our representation.  Identity.
+  | n `elem` ["int/char", "char/int", "char.int"] = emitExpr arg
+  -- `int(x)` is the general int conversion — identity at runtime
+  -- since everything is i64.
+  | n `elem` ["int"] = emitExpr arg
+  -- Koka's `Just(x).unjust` returns x (panic on Nothing); we
+  -- represent Just as Cons-like with field 0 = x.
+  | n `elem` ["unjust", "maybe/unjust"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_unjust(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | n `elem` ["maybe/head", "list/head", "head"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_maybe_head(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | n `elem` ["throw", "exn/throw"] = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_throw(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  -- 1-arg libm math: cos, sin.  Bit-cast i64 → f64, call libm,
+  -- bit-cast result back.  The f64bits tag flows through the
+  -- existing float-aware binop dispatch.
+  | n `elem` ["cos", "double/cos", "float64/cos"] = emitLibm1 "cos" arg
+  | n `elem` ["sin", "double/sin", "float64/sin"] = emitLibm1 "sin" arg
+  | n `elem` ["tan", "double/tan", "float64/tan"] = emitLibm1 "tan" arg
+  | n `elem` ["sqrt", "double/sqrt", "float64/sqrt"] = emitLibm1 "sqrt" arg
+  | n `elem` ["log", "double/log", "float64/log"] = emitLibm1 "log" arg
+  | n `elem` ["exp", "double/exp", "float64/exp"] = emitLibm1 "exp" arg
   -- Koka bool not: `!x` = `x XOR 1`.  Bools are represented as i64
   -- 0 (False) or 1 (True) in our ABI, so XOR with 1 flips them.
   | n `elem` ["bool/!", "!"] = do
@@ -2827,6 +3001,71 @@ emitLambdaLift params body = do
 
 
 -- Helpers
+
+-- | Order predicate: cmpi against 0, then zero-extend i1 → i64 so
+-- the result flows through the closure ABI as a proper i64 bool.
+emitOrderPred :: Text -> Expr -> Emit ([Text], Text)
+emitOrderPred pred' arg = do
+  (argOps, argName) <- emitExpr arg
+  zeroName <- freshName "v"
+  cmpName  <- freshName "v"
+  resultName <- freshName "v"
+  pure (argOps ++
+    [ "%" <> zeroName   <> " = arith.constant 0 : i64"
+    , "%" <> cmpName    <> " = arith.cmpi " <> pred' <> ", %" <> argName <> ", %" <> zeroName <> " : i64"
+    , "%" <> resultName <> " = arith.extui %" <> cmpName <> " : i1 to i64"
+    ], resultName)
+
+-- | is-even / is-odd: take remainder mod 2, compare to 0, then
+-- zero-extend i1 → i64.
+emitParityPred :: Text -> Expr -> Emit ([Text], Text)
+emitParityPred pred' arg = do
+  (argOps, argName) <- emitExpr arg
+  twoName <- freshName "v"
+  remName <- freshName "v"
+  zeroName <- freshName "v"
+  cmpName  <- freshName "v"
+  resultName <- freshName "v"
+  pure (argOps ++
+    [ "%" <> twoName    <> " = arith.constant 2 : i64"
+    , "%" <> remName    <> " = arith.remsi %" <> argName <> ", %" <> twoName <> " : i64"
+    , "%" <> zeroName   <> " = arith.constant 0 : i64"
+    , "%" <> cmpName    <> " = arith.cmpi " <> pred' <> ", %" <> remName <> ", %" <> zeroName <> " : i64"
+    , "%" <> resultName <> " = arith.extui %" <> cmpName <> " : i1 to i64"
+    ], resultName)
+
+-- | Emit a call to a 1-arg libm function (cos, sin, sqrt, …).
+-- The arg is an i64 bit-pattern (the f64bits ABI); we cast to f64,
+-- invoke the libm function, cast back, and tag the result.
+emitLibm1 :: Text -> Expr -> Emit ([Text], Text)
+emitLibm1 fname arg = do
+  (argOps, argName) <- emitExpr arg
+  fIn <- freshName "v"
+  fOut <- freshName "v"
+  iOut <- freshName "v"
+  recordF64Bits iOut
+  pure (argOps ++
+    [ "%" <> fIn  <> " = arith.bitcast %" <> argName <> " : i64 to f64"
+    , "%" <> fOut <> " = func.call @" <> fname <> "(%" <> fIn <> ") : (f64) -> f64"
+    , "%" <> iOut <> " = arith.bitcast %" <> fOut <> " : f64 to i64"
+    ], iOut)
+
+-- | Emit a call to a 2-arg libm function (atan2, pow).
+emitLibm2 :: Text -> Expr -> Expr -> Emit ([Text], Text)
+emitLibm2 fname a b = do
+  (aOps, aName) <- emitExpr a
+  (bOps, bName) <- emitExpr b
+  fInA <- freshName "v"
+  fInB <- freshName "v"
+  fOut <- freshName "v"
+  iOut <- freshName "v"
+  recordF64Bits iOut
+  pure (aOps ++ bOps ++
+    [ "%" <> fInA <> " = arith.bitcast %" <> aName <> " : i64 to f64"
+    , "%" <> fInB <> " = arith.bitcast %" <> bName <> " : i64 to f64"
+    , "%" <> fOut <> " = func.call @" <> fname <> "(%" <> fInA <> ", %" <> fInB <> ") : (f64, f64) -> f64"
+    , "%" <> iOut <> " = arith.bitcast %" <> fOut <> " : f64 to i64"
+    ], iOut)
 
 -- | Emit a 2-arg call to a kk_list_* HOF runtime shim.  Used for
 -- map / filter / all / any / drop / take / flatmap / filter-map /
@@ -3794,7 +4033,7 @@ compileToExecutableLink config llPath =
                 Right _ -> do
                   r4 <- runCmd (ecClangPath config)
                     ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath,
-                     "-o", ecOutputPath config, optFlag] "" "clang (link)"
+                     "-o", ecOutputPath config, optFlag, "-lm"] "" "clang (link)"
                   case r4 of
                     Left e  -> pure (Left e)
                     Right _ -> pure (Right (ecOutputPath config))

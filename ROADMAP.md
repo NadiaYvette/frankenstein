@@ -844,11 +844,15 @@ details.
     - Derived `<impl Debug for T>::fmt` bodies still filtered (they
       reference unshimmed Formatter helpers).
   Structs with >8 fields fall back to positional `(v0, v1, …)`.
-  See `examples/rust_dbg_adt.rs`.  Still degraded: enum-variant
-  printing (e.g. `Color::Red`) lands in the RvRaw fallback and
-  prints as quoted MIR source text; full fix would parse
-  `Variant(args)` and `Variant { fields }` syntaxes too.  Still
-  blocked: f32/f64 floats, float `{:.N}` decimal places.
+  Enum variants print correctly across all three shapes:
+  unit (`Origin` → "Origin"), tuple (`Circle(10)` → "Circle(10)"),
+  and struct (`Rect { w: 7, h: 13 }` → "Rect { w: 7, h: 13 }").
+  MirParse's `parseEnumTupleCtor` / `parseEnumUnitCtor` recognise
+  the `Enum::Variant(args)` / `Enum::Variant` shapes and emit
+  RvStruct rvalues whose name is the last path segment (so the
+  enum prefix is stripped from Debug output, matching Rust).
+  See `examples/rust_dbg_adt.rs` and `examples/rust_dbg_enum.rs`.
+  Still blocked: f32/f64 floats, float `{:.N}` decimal places.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

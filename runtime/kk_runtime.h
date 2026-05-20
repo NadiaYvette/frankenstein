@@ -97,6 +97,7 @@ int64_t kk_rust_arg_i8(int64_t v);
  * call to one of these per struct-construction site; the Debug
  * printer reads the embedded type-name and field-name metadata to
  * produce `Point { x: 7, y: 13 }`-style output. */
+int64_t kk_rust_struct_0(int64_t name, int64_t names);
 int64_t kk_rust_struct_1(int64_t name, int64_t names, int64_t a);
 int64_t kk_rust_struct_2(int64_t name, int64_t names, int64_t a, int64_t b);
 int64_t kk_rust_struct_3(int64_t name, int64_t names, int64_t a, int64_t b, int64_t c);

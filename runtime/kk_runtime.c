@@ -513,30 +513,61 @@ static void kk_rust_print_one_arg(int64_t v) {
             } else if (kk_is_heap_ptr(inner)
                        && kk_tag(inner) == KK_RUST_STRUCT_TAG
                        && kk_nfields(inner) >= 2) {
-                /* Named-struct Debug: read type name + field names
-                 * from fields 0/1, then iterate value fields. */
+                /* Tagged-struct Debug.  Shape variants:
+                 *   - field_names empty → unit variant (no body):
+                 *       `Origin`
+                 *   - field_names empty BUT >0 values →
+                 *     positional tuple variant: `Circle(10)`
+                 *   - field_names non-empty → named-field struct/variant:
+                 *       `Point { x: 7, y: 13 }` or `Rect { w: 7, h: 13 }`
+                 */
                 int64_t name_s  = kk_field(inner, 0);
                 int64_t names_s = kk_field(inner, 1);
                 int64_t nvals   = kk_nfields(inner) - 2;
-                /* Print type name verbatim (e.g. "Point"). */
                 if (kk_is_string(name_s)) kk_print_str(name_s);
-                /* Field-name string is comma-separated. */
-                char* fnbuf = kk_is_string(names_s) ? kk_str_dup_cstr(names_s) : NULL;
-                fputs(" { ", stdout);
-                const char* p = fnbuf;
-                for (int64_t i = 0; i < nvals; i++) {
-                    if (i > 0) fputs(", ", stdout);
-                    if (p) {
-                        const char* comma = strchr(p, ',');
-                        size_t flen = comma ? (size_t)(comma - p) : strlen(p);
-                        fwrite(p, 1, flen, stdout);
-                        fputs(": ", stdout);
-                        p = comma ? comma + 1 : p + flen;
+                if (nvals == 0) {
+                    /* unit variant: just the name */
+                } else {
+                    /* Determine whether field names are present.  An
+                     * empty kk_string (or string consisting only of
+                     * commas) signals positional fields. */
+                    size_t nlen = kk_is_string(names_s) ? (size_t)kk_str_len(names_s) : 0;
+                    char* fnbuf = nlen > 0 ? kk_str_dup_cstr(names_s) : NULL;
+                    int has_field_names = 0;
+                    if (fnbuf) {
+                        for (size_t k = 0; k < nlen; k++) {
+                            if (fnbuf[k] != ',' && fnbuf[k] != ' ') {
+                                has_field_names = 1;
+                                break;
+                            }
+                        }
                     }
-                    kk_rust_print_one_arg(kk_field(inner, 2 + i));
+                    if (has_field_names) {
+                        fputs(" { ", stdout);
+                        const char* p = fnbuf;
+                        for (int64_t i = 0; i < nvals; i++) {
+                            if (i > 0) fputs(", ", stdout);
+                            if (p) {
+                                const char* comma = strchr(p, ',');
+                                size_t flen = comma ? (size_t)(comma - p) : strlen(p);
+                                fwrite(p, 1, flen, stdout);
+                                fputs(": ", stdout);
+                                p = comma ? comma + 1 : p + flen;
+                            }
+                            kk_rust_print_one_arg(kk_field(inner, 2 + i));
+                        }
+                        fputs(" }", stdout);
+                    } else {
+                        /* positional tuple variant — `Name(v0, v1, …)` */
+                        putchar('(');
+                        for (int64_t i = 0; i < nvals; i++) {
+                            if (i > 0) fputs(", ", stdout);
+                            kk_rust_print_one_arg(kk_field(inner, 2 + i));
+                        }
+                        putchar(')');
+                    }
+                    if (fnbuf) free(fnbuf);
                 }
-                fputs(" }", stdout);
-                if (fnbuf) free(fnbuf);
             } else if (kk_is_heap_ptr(inner)) {
                 /* Unknown heap cell: positional fallback. */
                 int64_t n = kk_nfields(inner);
@@ -625,6 +656,9 @@ static int64_t kk_rust_struct_alloc(int64_t nvals, int64_t name, int64_t names) 
     kk_set_field(cell, 0, name);
     kk_set_field(cell, 1, names);
     return cell;
+}
+int64_t kk_rust_struct_0(int64_t name, int64_t names) {
+    return kk_rust_struct_alloc(0, name, names);
 }
 int64_t kk_rust_struct_1(int64_t name, int64_t names, int64_t a) {
     int64_t c = kk_rust_struct_alloc(1, name, names);
@@ -1133,6 +1167,8 @@ int64_t rust_arg_u16(int64_t) __attribute__((alias("kk_rust_arg_u16")));
 int64_t rust_arg_i16(int64_t) __attribute__((alias("kk_rust_arg_i16")));
 int64_t rust_arg_u8(int64_t)  __attribute__((alias("kk_rust_arg_u8")));
 int64_t rust_arg_i8(int64_t)  __attribute__((alias("kk_rust_arg_i8")));
+int64_t rust_struct_0(int64_t, int64_t)
+  __attribute__((alias("kk_rust_struct_0")));
 int64_t rust_struct_1(int64_t, int64_t, int64_t)
   __attribute__((alias("kk_rust_struct_1")));
 int64_t rust_struct_2(int64_t, int64_t, int64_t, int64_t)

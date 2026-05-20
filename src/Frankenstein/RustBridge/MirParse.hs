@@ -432,7 +432,10 @@ parseRvalue t
   -- Struct construction:  Point { x: const 7_i64, y: const 13_i64 }
   -- Enum variant ctor:    Color::Red  (no fields)
   --                       Shape::Circle(const 10_i64)
+  --                       Shape::Rect { w: const 7_i64, h: const 13_i64 }
   | Just rv <- parseStructCtor t = rv
+  | Just rv <- parseEnumTupleCtor t = rv
+  | Just rv <- parseEnumUnitCtor t = rv
   | otherwise = RvRaw t
 
 -- | Recognise Rust MIR's struct-construction and enum-ctor syntaxes
@@ -450,8 +453,48 @@ parseStructCtor t
   , let inside = T.drop 1 (T.take closeBrace afterName)
   , let fields = parseStructFields inside
   , not (null fields)
-  = Just (RvStruct prefix fields)
+  -- Strip enum-prefix for struct variants: `Shape::Rect { w, h }`
+  -- prints as `Rect { w, h }`, not `Shape::Rect { w, h }`.
+  = Just (RvStruct (lastPathSegment prefix) fields)
   | otherwise = Nothing
+
+-- | `Enum::Variant(args…)` tuple-variant ctor.  Produces an RvStruct
+-- with the variant's last-segment name (so Debug prints just `Circle(10)`
+-- without the enum prefix, matching Rust output).  Field names are
+-- empty for positional tuple variants — the runtime printer renders
+-- them as parens.
+parseEnumTupleCtor :: Text -> Maybe MirRvalue
+parseEnumTupleCtor t
+  | Just openIdx <- T.findIndex (== '(') t
+  , let prefix = T.strip (T.take openIdx t)
+  , looksLikeTypeName prefix
+  , "::" `T.isInfixOf` prefix  -- distinguish from plain `(args)` tuple
+  , let afterName = T.drop openIdx t
+  , Just closeIdx <- findMatchingClose '(' ')' afterName
+  , let inside = T.drop 1 (T.take closeIdx afterName)
+  , let ops = [op | Just op <- map (parseOperand . T.strip) (splitOperands inside)]
+  , not (null ops)
+  = let variant = lastPathSegment prefix
+        positionalFields = [ ("", o) | o <- ops ]
+    in Just (RvStruct variant positionalFields)
+  | otherwise = Nothing
+
+-- | `Enum::Variant` unit-variant ctor (no args, no braces).  Produces
+-- an RvStruct with the variant name and zero fields.
+parseEnumUnitCtor :: Text -> Maybe MirRvalue
+parseEnumUnitCtor t
+  | let stripped = T.strip t
+  , looksLikeTypeName stripped
+  , "::" `T.isInfixOf` stripped
+  = Just (RvStruct (lastPathSegment stripped) [])
+  | otherwise = Nothing
+
+-- | Return the segment after the final `::`.
+-- `Shape::Circle` → `Circle`; no separator → whole name.
+lastPathSegment :: Text -> Text
+lastPathSegment s = case T.breakOnEnd "::" s of
+  ("", n) -> n
+  (_,  n) -> n
 
 -- | Parse `field: value, field: value, …` and return [(field, value)].
 parseStructFields :: Text -> [(Text, MirOperand)]

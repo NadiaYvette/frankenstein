@@ -237,14 +237,24 @@ translateRvalue body rv = case rv of
     -- Named struct construction: pass type name + comma-separated
     -- field names alongside the values into a runtime helper that
     -- builds a KK_RUST_STRUCT_TAG cell.  The Debug printer reads
-    -- the metadata from the cell.  Up to 8 fields supported via
-    -- per-arity helpers (`rust_struct_N`); larger structs fall back
-    -- to a positional aggregate so they still link.
+    -- the metadata from the cell.
+    --
+    -- Three shapes:
+    --   * Named-field structs: field names = "x,y,…" (non-empty).
+    --   * Positional tuple variants: field names = "" (empty entries),
+    --     joined to a sequence of commas (e.g. ",," for 3-tuple).
+    --     The printer detects "no real names" by checking if the
+    --     metadata string is empty after splitting and renders parens.
+    --   * Unit variants (0 fields): rust_struct_0 returns a cell
+    --     with just the name and no values.
     let n = length fields
         fieldNames = T.intercalate "," (map fst fields)
         vals = map (translateOperand body . snd) fields
         metaArgs = ELit (LitString name) : ELit (LitString fieldNames) : vals
-    in if n >= 1 && n <= 8
+    in if n == 0
+       then EApp (EVar (Name "rust_struct_0" 0))
+                 [ELit (LitString name), ELit (LitString "")]
+       else if n >= 1 && n <= 8
        then EApp (EVar (Name ("rust_struct_" <> T.pack (show n)) 0)) metaArgs
        else EApp (ECon (QName "std" (Name "tuple" 0))) vals
 

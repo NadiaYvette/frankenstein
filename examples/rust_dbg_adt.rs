@@ -33,6 +33,6 @@ pub fn main() {
     let c = Color::Red;
     // Output: Point { x: 7, y: 13 }
     println!("{:?}", p);
-    // Output today: "Color::Red"  (enum variants still degraded)
+    // Output: Red  (last-path-segment of Color::Red)
     println!("{:?}", c);
 }

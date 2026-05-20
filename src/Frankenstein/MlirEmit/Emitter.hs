@@ -1617,16 +1617,28 @@ emitExpr (EVar n) = do
                      <> "() : () -> i64"], stubName)
 
 -- Constructor reference: allocate a boxed value via the runtime
-emitExpr (ECon qn) = do
-  tag <- lookupConTag qn
-  tagName <- freshName "v"
-  nfieldsName <- freshName "v"
-  resultName <- freshName "v"
-  cycleOp <- emitCycleCandidate resultName
-  pure ([ "%" <> tagName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
-        , "%" <> nfieldsName <> " = arith.constant 0 : i64"
-        , "%" <> resultName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
-        ] ++ cycleOp, resultName)
+emitExpr (ECon qn)
+  -- Koka's True/False are unboxed in our representation: i64 1 / 0.
+  -- Pattern dispatch (emitBoolConCase) treats the scrutinee that way,
+  -- so the construction side must match.  Allocating a heap cell would
+  -- produce a non-zero pointer that always reads as True and survives
+  -- `.show` as a giant integer.
+  | nameText (qnameName qn) == "True" = do
+      resultName <- freshName "v"
+      pure ([ "%" <> resultName <> " = arith.constant 1 : i64" ], resultName)
+  | nameText (qnameName qn) == "False" = do
+      resultName <- freshName "v"
+      pure ([ "%" <> resultName <> " = arith.constant 0 : i64" ], resultName)
+  | otherwise = do
+      tag <- lookupConTag qn
+      tagName <- freshName "v"
+      nfieldsName <- freshName "v"
+      resultName <- freshName "v"
+      cycleOp <- emitCycleCandidate resultName
+      pure ([ "%" <> tagName <> " = arith.constant " <> T.pack (show tag) <> " : i64"
+            , "%" <> nfieldsName <> " = arith.constant 0 : i64"
+            , "%" <> resultName <> " = func.call @kk_alloc_con(%" <> tagName <> ", %" <> nfieldsName <> ") : (i64, i64) -> i64"
+            ] ++ cycleOp, resultName)
 
 -- Constructor application: allocate via runtime, set fields
 emitExpr (EApp (ECon qn) args) = do

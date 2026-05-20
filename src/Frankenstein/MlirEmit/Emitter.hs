@@ -763,6 +763,17 @@ emitProgramText prog =
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
     , "  func.func private @kk_string_empty() -> i64"
     , "  func.func private @kk_string_from_char(i64) -> i64"
+    , "  func.func private @kk_list_map(i64, i64) -> i64"
+    , "  func.func private @kk_list_filter(i64, i64) -> i64"
+    , "  func.func private @kk_list_foldl(i64, i64, i64) -> i64"
+    , "  func.func private @kk_list_all(i64, i64) -> i64"
+    , "  func.func private @kk_list_any(i64, i64) -> i64"
+    , "  func.func private @kk_list_drop(i64, i64) -> i64"
+    , "  func.func private @kk_list_take(i64, i64) -> i64"
+    , "  func.func private @kk_list_flatmap(i64, i64) -> i64"
+    , "  func.func private @kk_list_filter_map(i64, i64) -> i64"
+    , "  func.func private @kk_list_foreach(i64, i64) -> i64"
+    , "  func.func private @kk_list_concat(i64, i64) -> i64"
     , "  func.func private @kk_println_str(i64) -> ()"
     , "  func.func private @kk_print_str(i64) -> ()"
     , "  func.func private @kk_str_concat(i64, i64) -> i64"
@@ -986,6 +997,17 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
     , "  func.func private @kk_string_empty() -> i64"
     , "  func.func private @kk_string_from_char(i64) -> i64"
+    , "  func.func private @kk_list_map(i64, i64) -> i64"
+    , "  func.func private @kk_list_filter(i64, i64) -> i64"
+    , "  func.func private @kk_list_foldl(i64, i64, i64) -> i64"
+    , "  func.func private @kk_list_all(i64, i64) -> i64"
+    , "  func.func private @kk_list_any(i64, i64) -> i64"
+    , "  func.func private @kk_list_drop(i64, i64) -> i64"
+    , "  func.func private @kk_list_take(i64, i64) -> i64"
+    , "  func.func private @kk_list_flatmap(i64, i64) -> i64"
+    , "  func.func private @kk_list_filter_map(i64, i64) -> i64"
+    , "  func.func private @kk_list_foreach(i64, i64) -> i64"
+    , "  func.func private @kk_list_concat(i64, i64) -> i64"
     , "  func.func private @kk_println_str(i64) -> ()"
     , "  func.func private @kk_print_str(i64) -> ()"
     , "  func.func private @kk_str_concat(i64, i64) -> i64"
@@ -1778,6 +1800,11 @@ emitAppVar fn args = case args of
 -- so operators like (==) arrive with 3 args instead of 2.
 emitAppVarWith3 :: Name -> Expr -> Expr -> Expr -> Emit ([Text], Text)
 emitAppVarWith3 fn _dict a b
+  -- Koka stdlib foldl: real 3-arg call (list, acc, fn).  Intercept
+  -- before the dict-strip path that handles GHC's 2-arg dict-passing
+  -- form; foldl's first arg is NOT a dict.
+  | nameText fn `elem` ["foldl", "list/foldl"]
+  = emitListHOF3 "kk_list_foldl" _dict a b
   | n `elem` ["==", "eq"]   = emitCmpOp "eq" a b
   | n `elem` ["/=", "ne"]   = emitCmpOp "ne" a b
   | n `elem` ["<", "lt"]    = emitCmpOp "slt" a b
@@ -1825,6 +1852,21 @@ emitAppVarWith2 fn a b
   | n `elem` ["andI#", "and#"]                    = emitBinOp "arith.andi" "i64" a b
   | n `elem` ["orI#", "or#"]                      = emitBinOp "arith.ori" "i64" a b
   | n `elem` ["xorI#", "xor#"]                    = emitBinOp "arith.xori" "i64" a b
+  -- Koka stdlib list HOFs.  We provide these as kk_list_* runtime
+  -- shims that walk the cons-list and call the user closure via the
+  -- standard ABI (field 0 = fn ptr, takes (closure, args...)).  The
+  -- alternative — translating std/core/list through the multi-module
+  -- pass — would pull in too much surface area.
+  | n `elem` ["map", "list/map"]                   = emitListHOF2 "kk_list_map" a b
+  | n `elem` ["filter", "list/filter"]             = emitListHOF2 "kk_list_filter" a b
+  | n `elem` ["all", "list/all"]                   = emitListHOF2 "kk_list_all" a b
+  | n `elem` ["any", "list/any"]                   = emitListHOF2 "kk_list_any" a b
+  | n `elem` ["drop", "list/drop"]                 = emitListHOF2 "kk_list_drop" a b
+  | n `elem` ["take", "list/take"]                 = emitListHOF2 "kk_list_take" a b
+  | n `elem` ["flatmap", "list/flatmap"]           = emitListHOF2 "kk_list_flatmap" a b
+  | n `elem` ["filter-map", "list/filter-map"]     = emitListHOF2 "kk_list_filter_map" a b
+  | n `elem` ["foreach", "list/foreach"]           = emitListHOF2 "kk_list_foreach" a b
+  | n == "++l"                                      = emitListHOF2 "kk_list_concat" a b
   -- Koka's int/max and int/min: select-based 2-arg primitives.
   -- Match on bare `max` / `min` as well as qualified forms.
   | n `elem` ["max", "int/max"] = do
@@ -2773,6 +2815,29 @@ emitLambdaLift params body = do
 
 
 -- Helpers
+
+-- | Emit a 2-arg call to a kk_list_* HOF runtime shim.  Used for
+-- map / filter / all / any / drop / take / flatmap / filter-map /
+-- foreach / list-concat.
+emitListHOF2 :: Text -> Expr -> Expr -> Emit ([Text], Text)
+emitListHOF2 rt a b = do
+  (aOps, aName) <- emitExpr a
+  (bOps, bName) <- emitExpr b
+  resultName <- freshName "v"
+  pure (aOps ++ bOps ++
+    [ "%" <> resultName <> " = func.call @" <> rt <> "(%" <> aName <> ", %" <> bName <> ") : (i64, i64) -> i64"
+    ], resultName)
+
+-- | Emit a 3-arg call to a kk_list_* HOF runtime shim.  Used for foldl.
+emitListHOF3 :: Text -> Expr -> Expr -> Expr -> Emit ([Text], Text)
+emitListHOF3 rt a b c = do
+  (aOps, aName) <- emitExpr a
+  (bOps, bName) <- emitExpr b
+  (cOps, cName) <- emitExpr c
+  resultName <- freshName "v"
+  pure (aOps ++ bOps ++ cOps ++
+    [ "%" <> resultName <> " = func.call @" <> rt <> "(%" <> aName <> ", %" <> bName <> ", %" <> cName <> ") : (i64, i64, i64) -> i64"
+    ], resultName)
 
 emitBinOp :: Text -> Text -> Expr -> Expr -> Emit ([Text], Text)
 emitBinOp op ty a b = do

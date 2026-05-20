@@ -2702,6 +2702,179 @@ int64_t kk_is_nil(int64_t list) {
     return kk_tag(list) == KK_NIL_TAG && kk_nfields(list) == 0;
 }
 
+/* Closure-call helpers.  A Koka closure is a heap cell tagged
+ * KK_CLOSURE_TAG ('CLOS') whose field 0 holds the function pointer
+ * (as i64) and fields 1..N hold captured values.  The wrapper at
+ * the function pointer takes the closure as its first argument
+ * followed by the remaining arguments; the PAP wrapper extracts
+ * captures from the closure on entry.  These helpers are used by
+ * the list HOF shims below to invoke the user-provided callback.
+ */
+static int64_t kk_call_closure_1(int64_t closure, int64_t a) {
+    int64_t fptr_i64 = kk_field(closure, 0);
+    typedef int64_t (*fn_t)(int64_t, int64_t);
+    fn_t fn = (fn_t)(uintptr_t)fptr_i64;
+    return fn(closure, a);
+}
+
+static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b) {
+    int64_t fptr_i64 = kk_field(closure, 0);
+    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t);
+    fn_t fn = (fn_t)(uintptr_t)fptr_i64;
+    return fn(closure, a, b);
+}
+
+/* Reverse a list in place by walking head-to-tail and rebuilding
+ * with a fresh nil seed.  Used by kk_list_map / kk_list_filter to
+ * restore source order after their accumulator-tail builds. */
+static int64_t kk_list_reverse(int64_t xs) {
+    int64_t r = kk_nil();
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        r = kk_cons(h, r);
+        xs = kk_field(xs, 1);
+    }
+    return r;
+}
+
+/* `list.map(f)` — apply f to each element, preserving order. */
+int64_t kk_list_map(int64_t xs, int64_t f) {
+    int64_t acc = kk_nil();
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        int64_t mapped = kk_call_closure_1(f, h);
+        acc = kk_cons(mapped, acc);
+        xs = kk_field(xs, 1);
+    }
+    return kk_list_reverse(acc);
+}
+
+/* `list.filter(p)` — keep elements where p returns nonzero. */
+int64_t kk_list_filter(int64_t xs, int64_t p) {
+    int64_t acc = kk_nil();
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        if (kk_call_closure_1(p, h)) {
+            acc = kk_cons(h, acc);
+        }
+        xs = kk_field(xs, 1);
+    }
+    return kk_list_reverse(acc);
+}
+
+/* `list.foldl(z, f)` — left fold; f takes (acc, x) -> new-acc. */
+int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f) {
+    int64_t acc = z;
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        acc = kk_call_closure_2(f, acc, h);
+        xs = kk_field(xs, 1);
+    }
+    return acc;
+}
+
+/* `list.all(p)` — short-circuit conjunction of p applied to each element.
+ * Returns 1 if every element satisfies p (or list is empty), 0 otherwise. */
+int64_t kk_list_all(int64_t xs, int64_t p) {
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        if (!kk_call_closure_1(p, h)) return 0;
+        xs = kk_field(xs, 1);
+    }
+    return 1;
+}
+
+/* `list.any(p)` — short-circuit disjunction. */
+int64_t kk_list_any(int64_t xs, int64_t p) {
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        if (kk_call_closure_1(p, h)) return 1;
+        xs = kk_field(xs, 1);
+    }
+    return 0;
+}
+
+/* `list.drop(n)` — return list with the first n elements removed.
+ * If n exceeds the list length, returns nil. */
+int64_t kk_list_drop(int64_t xs, int64_t n) {
+    while (n > 0 && kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        xs = kk_field(xs, 1);
+        n--;
+    }
+    return xs;
+}
+
+/* `list.take(n)` — return the first n elements (or fewer if shorter). */
+int64_t kk_list_take(int64_t xs, int64_t n) {
+    int64_t acc = kk_nil();
+    while (n > 0 && kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        acc = kk_cons(h, acc);
+        xs = kk_field(xs, 1);
+        n--;
+    }
+    return kk_list_reverse(acc);
+}
+
+/* List concatenation: append ys to the end of xs. */
+int64_t kk_list_concat(int64_t xs, int64_t ys) {
+    int64_t acc = ys;
+    int64_t rev = kk_list_reverse(xs);
+    while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
+        int64_t h = kk_field(rev, 0);
+        acc = kk_cons(h, acc);
+        rev = kk_field(rev, 1);
+    }
+    return acc;
+}
+
+/* `list.flatmap(f)` — map then concat: f maps each x to a list and
+ * we concatenate the result lists in order. */
+int64_t kk_list_flatmap(int64_t xs, int64_t f) {
+    int64_t acc = kk_nil();
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        int64_t sub = kk_call_closure_1(f, h);
+        /* Append `sub` to acc. */
+        while (kk_is_heap_ptr(sub) && kk_tag(sub) == KK_CONS_TAG) {
+            int64_t sh = kk_field(sub, 0);
+            acc = kk_cons(sh, acc);
+            sub = kk_field(sub, 1);
+        }
+        xs = kk_field(xs, 1);
+    }
+    return kk_list_reverse(acc);
+}
+
+/* `list.filter-map(f)` — f maps each element to a maybe<b>; keep
+ * the Just values.  Koka stdlib: `pub fun filter-map(xs, f) ...`. */
+int64_t kk_list_filter_map(int64_t xs, int64_t f) {
+    int64_t acc = kk_nil();
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        int64_t r = kk_call_closure_1(f, h);
+        /* Maybe is Cons(x) for Just and Nil for Nothing in our
+         * representation (matches Koka's encoding for now).  Skip
+         * Nothing; for Just(v), unwrap to v and append. */
+        if (kk_is_heap_ptr(r) && kk_tag(r) == KK_CONS_TAG) {
+            acc = kk_cons(kk_field(r, 0), acc);
+        }
+        xs = kk_field(xs, 1);
+    }
+    return kk_list_reverse(acc);
+}
+
+/* `list.foreach(f)` — apply f to each element for its side effect;
+ * return unit (0). */
+int64_t kk_list_foreach(int64_t xs, int64_t f) {
+    while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
+        int64_t h = kk_field(xs, 0);
+        (void)kk_call_closure_1(f, h);
+        xs = kk_field(xs, 1);
+    }
+    return 0;
+}
+
 int64_t kk_pair(int64_t a, int64_t b) {
     int64_t p = kk_alloc_con(KK_PAIR_TAG, 2);
     kk_set_field(p, 0, a);

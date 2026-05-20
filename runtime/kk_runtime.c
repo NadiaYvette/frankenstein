@@ -509,6 +509,25 @@ static void kk_rust_print_one_arg(int64_t v) {
         if (tag == KK_RUST_DEBUG_TAG) {
             if (kk_is_string(inner)) {
                 kk_rust_print_str_debug(inner);
+            } else if (kk_is_heap_ptr(inner)) {
+                /* Generic ADT/struct debug print.  Rust's full
+                 * `derive(Debug)` format `Point { x: 7, y: 13 }`
+                 * needs field name metadata that the bridge erases
+                 * (everything becomes `std.tuple` with hashed tag);
+                 * fall back to positional `(7, 13)` for now. */
+                int64_t n = kk_nfields(inner);
+                putchar('(');
+                for (int64_t i = 0; i < n; i++) {
+                    if (i > 0) { putchar(','); putchar(' '); }
+                    int64_t fv = kk_field(inner, i);
+                    /* Recurse via the print-one-arg dispatcher; ints
+                     * print as %ld, nested cells get their own
+                     * positional form.  Wrap each field in a Debug
+                     * cell on the stack — but we don't have stack
+                     * cells, so just call the dispatcher directly. */
+                    kk_rust_print_one_arg(fv);
+                }
+                putchar(')');
             } else {
                 printf("%ld", (long)inner);
             }

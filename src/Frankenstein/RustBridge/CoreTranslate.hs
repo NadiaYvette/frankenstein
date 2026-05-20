@@ -51,13 +51,25 @@ import Text.Printf (printf)
 -- and emit enum/struct declarations as JSON alongside MIR bodies.)
 translateMir :: MirProgram -> Either Text Program
 translateMir prog = do
-  defs <- mapM translateBody (mirBodies prog)
+  -- Filter out derive(Debug)-generated `<impl at ...>::fmt` bodies
+  -- before translation.  Their bodies reference
+  -- core::fmt::Formatter::debug_struct_field*_finish helpers that the
+  -- runtime doesn't shim, and our dispatch doesn't actually invoke
+  -- them (we handle `{:?}` directly in kk_rust_print_one_arg's
+  -- positional ADT fallback).  Compiling these would just create
+  -- unresolved-symbol link failures.
+  let interestingBodies =
+        [ b | b <- mirBodies prog, not (isDerivedFmt (mirName b)) ]
+  defs <- mapM translateBody interestingBodies
   Right $ Program
     { progName = QName "rust" (Name "main" 0)
     , progDefs = defs
     , progData = []     -- See note above: MIR lacks direct ADT declarations
     , progEffects = []  -- Rust has no user-defined effects (IO is implicit)
     }
+  where
+    isDerivedFmt n =
+      "<impl " `T.isPrefixOf` n && "::fmt" `T.isSuffixOf` n
 
 -- | Translate a single MIR function body to a Frankenstein definition
 translateBody :: MirBody -> Either Text Def

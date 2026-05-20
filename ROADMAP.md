@@ -828,8 +828,21 @@ details.
   masks to the correct width and uses %u/%d/%llu as appropriate
   (e.g. u32 of 4_000_000_000 prints as 4000000000 rather than as
   the sign-bit-set i32 it'd otherwise look like).  See
-  `examples/rust_numeric.rs`.  Still blocked: f32/f64 floats,
-  float `{:.N}` decimal places, `{:?}` for ADTs.
+  `examples/rust_numeric.rs`.
+
+  `#[derive(Debug)]` user ADTs compile and run, but with degraded
+  output.  The bridge filters out the derived `<impl Debug for T>::fmt`
+  bodies (they call `Formatter::debug_struct_field2_finish` which we
+  don't shim).  Without those bodies, `{:?}` on a Point falls through
+  to `kk_rust_print_one_arg`'s positional ADT printer.  Today the
+  struct construction (`Point { x: 7, y: 13 }`) isn't parsed by our
+  MIR shim as an aggregate — it lands as a literal-string RvRaw
+  fallback — so the result is the MIR source text printed inside
+  quotes.  Functional but not Rust-faithful.  See
+  `examples/rust_dbg_adt.rs`.  Still blocked: faithful
+  `Point { x: 7, y: 13 }` output (needs MIR struct-construction
+  parsing + heap-allocation in the bridge); f32/f64 floats; float
+  `{:.N}` decimal places.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

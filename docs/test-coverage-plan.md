@@ -58,8 +58,8 @@ with placeholders — see `examples/rust_fmt.rs` (Display),
 Test driver runs 17/17 hellos.
 
 Remaining out-of-scope-for-hello-world gaps are listed in ROADMAP:
-f32/f64 floats, `{:?}` for ADTs, file/stdin handles, full UTF-8
-re-encoding.
+faithful `{:?}` ADT output, f32/f64 floats, file/stdin handles,
+full UTF-8 re-encoding.
 
 **Goal**: prove each bridge's string ABI is wired end-to-end.
 

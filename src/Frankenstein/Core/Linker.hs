@@ -289,6 +289,14 @@ resolveName :: Text -> Text -> SymbolTable -> Name
             -> (Name, [Text], [LinkError])
 resolveName homeMod _selfName table nm =
   let fullName = nameText nm
+      -- Try a direct full-name lookup first: Koka emits type-qualified
+      -- names like "trig-result/pretty" where the slash is NOT a module
+      -- separator — it's a typeclass-style qualifier and the def is
+      -- registered in the symbol table under the full string.  Without
+      -- this, the GHC-style "Module/name" stripping below would treat
+      -- "trig-result" as a module, drop it, and resolve to the wrong
+      -- "pretty" (the rad-expr one).
+      directHit = Map.lookup fullName table
       -- GHC bridge encodes imported refs as "Module/name"
       (lookupMod, unqual) = case T.breakOn "/" fullName of
         (modPart, rest)
@@ -299,25 +307,36 @@ resolveName homeMod _selfName table nm =
       preferMod = case lookupMod of
         Just m  -> m
         Nothing -> homeMod
-  in case Map.lookup unqual table of
-    Nothing ->
-      (nm, [], [])
-    Just [(_, mangled)] ->
-      (nm { nameText = mangled }, [], [])
+  in case directHit of
+    Just [(_, mangled)] -> (nm { nameText = mangled }, [], [])
     Just candidates ->
-      case filter (\(m, _) -> m == preferMod) candidates of
+      case filter (\(m, _) -> m == homeMod) candidates of
         [(_,mangled)] -> (nm { nameText = mangled }, [], [])
-        [] ->
+        _ ->
           let mangledNames = nubTexts (map snd candidates)
           in case mangledNames of
             [m] -> (nm { nameText = m }, [], [])
-            _   -> (nm, [],
-                    [AmbiguousReference unqual (map fst candidates)])
-        ((_,mangled):_) ->
-          (nm { nameText = mangled },
-              ["Warning: multiple definitions of '" <> unqual
-                <> "' within module '" <> preferMod <> "'"],
-              [])
+            _   -> (nm, [], [AmbiguousReference fullName (map fst candidates)])
+    Nothing ->
+      case Map.lookup unqual table of
+        Nothing ->
+          (nm, [], [])
+        Just [(_, mangled)] ->
+          (nm { nameText = mangled }, [], [])
+        Just candidates ->
+          case filter (\(m, _) -> m == preferMod) candidates of
+            [(_,mangled)] -> (nm { nameText = mangled }, [], [])
+            [] ->
+              let mangledNames = nubTexts (map snd candidates)
+              in case mangledNames of
+                [m] -> (nm { nameText = m }, [], [])
+                _   -> (nm, [],
+                        [AmbiguousReference unqual (map fst candidates)])
+            ((_,mangled):_) ->
+              (nm { nameText = mangled },
+                  ["Warning: multiple definitions of '" <> unqual
+                    <> "' within module '" <> preferMod <> "'"],
+                  [])
 
 -- | Resolve a QName against a symbol table (for ECon / PatCon).
 resolveQName :: Text -> SymbolTable -> QName -> (QName, [Text], [LinkError])

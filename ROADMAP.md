@@ -822,8 +822,14 @@ details.
   upper-hex), `0o` (octal), `0b` (binary) and composes with all
   earlier features — `{:#010x}` on 255 → `0x000000ff` (prefix at
   the front, zeros between prefix and digits, total width 10).
-  Still blocked: non-i64 numeric types (i32/u64/f64), float
-  `{:.N}` decimal places, `{:?}` for ADTs.
+  Non-i64 integer types print correctly: the bridge inspects the
+  `Argument::<'_>::new_display::<T>` type parameter and wraps with
+  a per-type runtime tag (u32/i32/u64/u16/i16/u8/i8); the renderer
+  masks to the correct width and uses %u/%d/%llu as appropriate
+  (e.g. u32 of 4_000_000_000 prints as 4000000000 rather than as
+  the sign-bit-set i32 it'd otherwise look like).  See
+  `examples/rust_numeric.rs`.  Still blocked: f32/f64 floats,
+  float `{:.N}` decimal places, `{:?}` for ADTs.
 
 - **BRIDGE_mercury_strings**: Mercury `:- pred main(io::di, io::uo) is det.`
   with `io.write_string`/`io.write_line`/`io.nl` calls now runs end-to-end.

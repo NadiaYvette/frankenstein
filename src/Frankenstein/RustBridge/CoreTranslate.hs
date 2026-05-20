@@ -388,6 +388,12 @@ translateTermExpr body visited term _raw = case term of
           -- core::fmt::rt::Argument::<'_>::new_display::<T>(value)
           -- is a thin wrapper around the value — elide it so the
           -- argument's raw i64 reaches the Arguments::new args array.
+          -- new_display::<T>: i64 is the natural raw type, so elide.
+          -- For other integer widths the bridge wraps with a per-type
+          -- runtime tag so the dispatcher can mask / interpret the
+          -- bits correctly when printing.
+          (_, (a:_)) | Just wrapper <- displayTypeWrapper funcName ->
+            EApp (EVar (Name wrapper 0)) [a]
           (_, (a:_)) | "Argument::<'_>::new_display" `T.isInfixOf` funcName -> a
           -- Debug format: wrap with a marker cell so the runtime
           -- picks the debug formatter (quotes around strings,
@@ -509,6 +515,25 @@ lookupBlock body idx =
 -- names pass through unchanged (the emitter applies the rust_ module
 -- prefix and arity suffix, leaving them as unresolved externs that
 -- the user is expected to provide via FFI shim).
+-- | If `funcName` is `Argument::<'_>::new_display::<T>` for a numeric
+-- type T that needs special formatting (anything that isn't i64),
+-- return the corresponding runtime wrapper name.  Returns Nothing for
+-- i64 (the natural raw type) so the bridge falls through to the elide
+-- path.
+displayTypeWrapper :: Text -> Maybe Text
+displayTypeWrapper funcName
+  | not ("Argument::<'_>::new_display" `T.isInfixOf` funcName) = Nothing
+  | "<u32>"   `T.isInfixOf` funcName = Just "rust_arg_u32"
+  | "<i32>"   `T.isInfixOf` funcName = Just "rust_arg_i32"
+  | "<u64>"   `T.isInfixOf` funcName = Just "rust_arg_u64"
+  | "<u16>"   `T.isInfixOf` funcName = Just "rust_arg_u16"
+  | "<i16>"   `T.isInfixOf` funcName = Just "rust_arg_i16"
+  | "<u8>"    `T.isInfixOf` funcName = Just "rust_arg_u8"
+  | "<i8>"    `T.isInfixOf` funcName = Just "rust_arg_i8"
+  | "<usize>" `T.isInfixOf` funcName = Just "rust_arg_u64"
+  | "<isize>" `T.isInfixOf` funcName = Nothing  -- isize on x86-64 = i64
+  | otherwise = Nothing
+
 remapRustIntrinsic :: Text -> Text
 remapRustIntrinsic n = case n of
   "core::str::<impl str>::len"      -> "str_len"

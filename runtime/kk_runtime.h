@@ -83,6 +83,16 @@ int64_t kk_rust_arg_upper_hex(int64_t v);
 int64_t kk_rust_arg_octal(int64_t v);
 int64_t kk_rust_arg_binary(int64_t v);
 
+/* Per-type integer wrappers — bridge emits one of these for each
+ * non-i64 numeric width seen in Argument::new_display::<T>. */
+int64_t kk_rust_arg_u32(int64_t v);
+int64_t kk_rust_arg_i32(int64_t v);
+int64_t kk_rust_arg_u64(int64_t v);
+int64_t kk_rust_arg_u16(int64_t v);
+int64_t kk_rust_arg_i16(int64_t v);
+int64_t kk_rust_arg_u8(int64_t v);
+int64_t kk_rust_arg_i8(int64_t v);
+
 /* Boxed value construction */
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);

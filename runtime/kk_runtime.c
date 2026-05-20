@@ -401,6 +401,13 @@ int64_t kk_dummy_show_caf(int64_t) __attribute__((alias("dummy_show_caf")));
 #define KK_RUST_HEX_HI_TAG  0x4845577  /* `{:X}` upper-hex Argument tag */
 #define KK_RUST_OCT_TAG     0x40C7A7   /* `{:o}` octal Argument tag */
 #define KK_RUST_BIN_TAG     0x4B17A7   /* `{:b}` binary Argument tag */
+#define KK_RUST_U32_TAG     0x42100032 /* per-type numeric arg tags */
+#define KK_RUST_I32_TAG     0x42100132
+#define KK_RUST_U64_TAG     0x42100064
+#define KK_RUST_U16_TAG     0x42100016
+#define KK_RUST_I16_TAG     0x42100116
+#define KK_RUST_U8_TAG      0x42100008
+#define KK_RUST_I8_TAG      0x42100108
 
 int64_t kk_rust_args_pack(int64_t template_str, int64_t args_struct) {
     int64_t cell = kk_alloc_con(KK_RUST_FMT_TAG, 2);
@@ -507,6 +514,13 @@ static void kk_rust_print_one_arg(int64_t v) {
             }
             return;
         }
+        if (tag == KK_RUST_U32_TAG) { printf("%u",   (uint32_t)(inner & 0xFFFFFFFF)); return; }
+        if (tag == KK_RUST_I32_TAG) { printf("%d",   (int32_t)(inner & 0xFFFFFFFF)); return; }
+        if (tag == KK_RUST_U64_TAG) { printf("%llu", (unsigned long long)(uint64_t)inner); return; }
+        if (tag == KK_RUST_U16_TAG) { printf("%u",   (unsigned)(inner & 0xFFFF)); return; }
+        if (tag == KK_RUST_I16_TAG) { printf("%d",   (int)(int16_t)(inner & 0xFFFF)); return; }
+        if (tag == KK_RUST_U8_TAG)  { printf("%u",   (unsigned)(inner & 0xFF)); return; }
+        if (tag == KK_RUST_I8_TAG)  { printf("%d",   (int)(int8_t)(inner & 0xFF)); return; }
         if (tag == KK_RUST_HEX_LO_TAG) { printf("%lx", (long)inner); return; }
         if (tag == KK_RUST_HEX_HI_TAG) { printf("%lX", (long)inner); return; }
         if (tag == KK_RUST_OCT_TAG)    { printf("%lo", (long)inner); return; }
@@ -547,6 +561,17 @@ int64_t kk_rust_arg_upper_hex(int64_t v) { return kk_rust_arg_radix(KK_RUST_HEX_
 int64_t kk_rust_arg_octal(int64_t v)     { return kk_rust_arg_radix(KK_RUST_OCT_TAG, v); }
 int64_t kk_rust_arg_binary(int64_t v)    { return kk_rust_arg_radix(KK_RUST_BIN_TAG, v); }
 
+/* Per-type integer wrappers.  The bridge wraps `new_display::<T>` for
+ * each non-i64 numeric T so the runtime renderer can mask /
+ * sign-extend correctly when printing. */
+int64_t kk_rust_arg_u32(int64_t v) { return kk_rust_arg_radix(KK_RUST_U32_TAG, v); }
+int64_t kk_rust_arg_i32(int64_t v) { return kk_rust_arg_radix(KK_RUST_I32_TAG, v); }
+int64_t kk_rust_arg_u64(int64_t v) { return kk_rust_arg_radix(KK_RUST_U64_TAG, v); }
+int64_t kk_rust_arg_u16(int64_t v) { return kk_rust_arg_radix(KK_RUST_U16_TAG, v); }
+int64_t kk_rust_arg_i16(int64_t v) { return kk_rust_arg_radix(KK_RUST_I16_TAG, v); }
+int64_t kk_rust_arg_u8(int64_t v)  { return kk_rust_arg_radix(KK_RUST_U8_TAG, v); }
+int64_t kk_rust_arg_i8(int64_t v)  { return kk_rust_arg_radix(KK_RUST_I8_TAG, v); }
+
 /* Render an arg to a freshly-malloc'd C string.  Caller frees.
  * Mirrors kk_rust_print_one_arg but goes to a buffer instead of stdout. */
 static char* kk_rust_render_one_arg(int64_t v, size_t* out_len) {
@@ -556,6 +581,42 @@ static char* kk_rust_render_one_arg(int64_t v, size_t* out_len) {
         int64_t tag = kk_tag(v);
         int64_t inner = kk_field(v, 0);
         const char* fmt = NULL;
+        /* Per-type integer wrappers (Display formatter, type-aware). */
+        if (tag == KK_RUST_U32_TAG) {
+            int wrote = asprintf(&result, "%u", (uint32_t)(inner & 0xFFFFFFFF));
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
+        if (tag == KK_RUST_I32_TAG) {
+            int wrote = asprintf(&result, "%d", (int32_t)(inner & 0xFFFFFFFF));
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
+        if (tag == KK_RUST_U64_TAG) {
+            int wrote = asprintf(&result, "%llu", (unsigned long long)(uint64_t)inner);
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
+        if (tag == KK_RUST_U16_TAG) {
+            int wrote = asprintf(&result, "%u", (unsigned)(inner & 0xFFFF));
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
+        if (tag == KK_RUST_I16_TAG) {
+            int wrote = asprintf(&result, "%d", (int)(int16_t)(inner & 0xFFFF));
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
+        if (tag == KK_RUST_U8_TAG) {
+            int wrote = asprintf(&result, "%u", (unsigned)(inner & 0xFF));
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
+        if (tag == KK_RUST_I8_TAG) {
+            int wrote = asprintf(&result, "%d", (int)(int8_t)(inner & 0xFF));
+            if (wrote < 0) { *out_len = 0; return NULL; }
+            *out_len = (size_t)wrote; return result;
+        }
         if (tag == KK_RUST_HEX_LO_TAG)      fmt = "%lx";
         else if (tag == KK_RUST_HEX_HI_TAG) fmt = "%lX";
         else if (tag == KK_RUST_OCT_TAG)    fmt = "%lo";
@@ -648,7 +709,11 @@ static int kk_rust_arg_is_numeric(int64_t v) {
     if (kk_is_heap_ptr(v) && kk_nfields(v) == 1) {
         int64_t tag = kk_tag(v);
         if (tag == KK_RUST_HEX_LO_TAG || tag == KK_RUST_HEX_HI_TAG
-            || tag == KK_RUST_OCT_TAG || tag == KK_RUST_BIN_TAG)
+            || tag == KK_RUST_OCT_TAG || tag == KK_RUST_BIN_TAG
+            || tag == KK_RUST_U32_TAG || tag == KK_RUST_I32_TAG
+            || tag == KK_RUST_U64_TAG || tag == KK_RUST_U16_TAG
+            || tag == KK_RUST_I16_TAG || tag == KK_RUST_U8_TAG
+            || tag == KK_RUST_I8_TAG)
             return 1;
         if (tag == KK_RUST_DEBUG_TAG) {
             int64_t inner = kk_field(v, 0);
@@ -964,6 +1029,13 @@ int64_t rust_arg_octal(int64_t)
   __attribute__((alias("kk_rust_arg_octal")));
 int64_t rust_arg_binary(int64_t)
   __attribute__((alias("kk_rust_arg_binary")));
+int64_t rust_arg_u32(int64_t) __attribute__((alias("kk_rust_arg_u32")));
+int64_t rust_arg_i32(int64_t) __attribute__((alias("kk_rust_arg_i32")));
+int64_t rust_arg_u64(int64_t) __attribute__((alias("kk_rust_arg_u64")));
+int64_t rust_arg_u16(int64_t) __attribute__((alias("kk_rust_arg_u16")));
+int64_t rust_arg_i16(int64_t) __attribute__((alias("kk_rust_arg_i16")));
+int64_t rust_arg_u8(int64_t)  __attribute__((alias("kk_rust_arg_u8")));
+int64_t rust_arg_i8(int64_t)  __attribute__((alias("kk_rust_arg_i8")));
 
 /* List append for Haskell [Char] cons-lists: a ++ b.
  * Walks a (collecting into a buffer), then prepends each element onto

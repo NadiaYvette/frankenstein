@@ -588,6 +588,9 @@ runtimeNames = Set.fromList
   , "rust_arg_debug"
   , "rust_arg_lower_hex", "rust_arg_upper_hex"
   , "rust_arg_octal", "rust_arg_binary"
+  , "rust_arg_u32", "rust_arg_i32", "rust_arg_u64"
+  , "rust_arg_u16", "rust_arg_i16"
+  , "rust_arg_u8", "rust_arg_i8"
   ]
 
 -- | Detect references to symbols that are neither defined nor primitive.

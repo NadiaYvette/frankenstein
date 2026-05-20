@@ -624,6 +624,13 @@ emitProgramText prog =
     , "  func.func private @kk_rust_arg_upper_hex(i64) -> i64"
     , "  func.func private @kk_rust_arg_octal(i64) -> i64"
     , "  func.func private @kk_rust_arg_binary(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u32(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i32(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u64(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u16(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i16(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u8(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i8(i64) -> i64"
     , "  func.func private @rust_args_pack(i64, i64) -> i64"
     , "  func.func private @rust_print_dispatch(i64) -> i64"
     , "  func.func private @rust_field_safe(i64, i64) -> i64"
@@ -632,6 +639,13 @@ emitProgramText prog =
     , "  func.func private @rust_arg_upper_hex(i64) -> i64"
     , "  func.func private @rust_arg_octal(i64) -> i64"
     , "  func.func private @rust_arg_binary(i64) -> i64"
+    , "  func.func private @rust_arg_u32(i64) -> i64"
+    , "  func.func private @rust_arg_i32(i64) -> i64"
+    , "  func.func private @rust_arg_u64(i64) -> i64"
+    , "  func.func private @rust_arg_u16(i64) -> i64"
+    , "  func.func private @rust_arg_i16(i64) -> i64"
+    , "  func.func private @rust_arg_u8(i64) -> i64"
+    , "  func.func private @rust_arg_i8(i64) -> i64"
     , "  // List constructors"
     , "  func.func private @kk_cons(i64, i64) -> i64"
     , "  func.func private @kk_nil() -> i64"
@@ -814,6 +828,13 @@ emitProgramWithEffects prog =
     , "  func.func private @kk_rust_arg_upper_hex(i64) -> i64"
     , "  func.func private @kk_rust_arg_octal(i64) -> i64"
     , "  func.func private @kk_rust_arg_binary(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u32(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i32(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u64(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u16(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i16(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u8(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i8(i64) -> i64"
     , "  func.func private @rust_args_pack(i64, i64) -> i64"
     , "  func.func private @rust_print_dispatch(i64) -> i64"
     , "  func.func private @rust_field_safe(i64, i64) -> i64"
@@ -822,6 +843,13 @@ emitProgramWithEffects prog =
     , "  func.func private @rust_arg_upper_hex(i64) -> i64"
     , "  func.func private @rust_arg_octal(i64) -> i64"
     , "  func.func private @rust_arg_binary(i64) -> i64"
+    , "  func.func private @rust_arg_u32(i64) -> i64"
+    , "  func.func private @rust_arg_i32(i64) -> i64"
+    , "  func.func private @rust_arg_u64(i64) -> i64"
+    , "  func.func private @rust_arg_u16(i64) -> i64"
+    , "  func.func private @rust_arg_i16(i64) -> i64"
+    , "  func.func private @rust_arg_u8(i64) -> i64"
+    , "  func.func private @rust_arg_i8(i64) -> i64"
     , ""
     , "  func.func private @kk_string_from_literal(i64, i64) -> i64"
     , "  func.func private @kk_string_from_cstr(i64) -> i64"
@@ -957,6 +985,13 @@ emitProgramWasm prog =
     , "  func.func private @kk_rust_arg_upper_hex(i64) -> i64"
     , "  func.func private @kk_rust_arg_octal(i64) -> i64"
     , "  func.func private @kk_rust_arg_binary(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u32(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i32(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u64(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u16(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i16(i64) -> i64"
+    , "  func.func private @kk_rust_arg_u8(i64) -> i64"
+    , "  func.func private @kk_rust_arg_i8(i64) -> i64"
     , "  func.func private @rust_args_pack(i64, i64) -> i64"
     , "  func.func private @rust_print_dispatch(i64) -> i64"
     , "  func.func private @rust_field_safe(i64, i64) -> i64"
@@ -965,6 +1000,13 @@ emitProgramWasm prog =
     , "  func.func private @rust_arg_upper_hex(i64) -> i64"
     , "  func.func private @rust_arg_octal(i64) -> i64"
     , "  func.func private @rust_arg_binary(i64) -> i64"
+    , "  func.func private @rust_arg_u32(i64) -> i64"
+    , "  func.func private @rust_arg_i32(i64) -> i64"
+    , "  func.func private @rust_arg_u64(i64) -> i64"
+    , "  func.func private @rust_arg_u16(i64) -> i64"
+    , "  func.func private @rust_arg_i16(i64) -> i64"
+    , "  func.func private @rust_arg_u8(i64) -> i64"
+    , "  func.func private @rust_arg_i8(i64) -> i64"
     , ""
     , "  // Thunk runtime declarations"
     , "  func.func private @kk_thunk_create(i64) -> i64"
@@ -1866,8 +1908,14 @@ emitAppVarWith1 fn arg
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_rust_arg_debug(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  -- Radix wrappers for `{:x}` / `{:X}` / `{:o}` / `{:b}`.
-  | n `elem` ["rust_arg_lower_hex", "rust_arg_upper_hex", "rust_arg_octal", "rust_arg_binary"] = do
+  -- Radix wrappers for `{:x}` / `{:X}` / `{:o}` / `{:b}` and per-type
+  -- numeric wrappers for non-i64 Display formats (u32/i32/u64/u16/i16/u8/i8).
+  | n `elem` [ "rust_arg_lower_hex", "rust_arg_upper_hex"
+             , "rust_arg_octal", "rust_arg_binary"
+             , "rust_arg_u32", "rust_arg_i32", "rust_arg_u64"
+             , "rust_arg_u16", "rust_arg_i16"
+             , "rust_arg_u8", "rust_arg_i8"
+             ] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       let rt = "kk_" <> nameText fn
@@ -3180,6 +3228,9 @@ externalRuntimeFns = Set.fromList
   , "rust_arg_debug"
   , "rust_arg_lower_hex", "rust_arg_upper_hex"
   , "rust_arg_octal", "rust_arg_binary"
+  , "rust_arg_u32", "rust_arg_i32", "rust_arg_u64"
+  , "rust_arg_u16", "rust_arg_i16"
+  , "rust_arg_u8", "rust_arg_i8"
   , "str_len", "str_concat", "str_eq", "str_flatten", "show_int"
   , "read_line", "getLine", "read_file", "write_file"
   , "args_count", "args_get", "args_progname"
@@ -3211,6 +3262,9 @@ externalRuntimeArity = Map.fromList
   , ("rust_arg_debug", 1)
   , ("rust_arg_lower_hex", 1), ("rust_arg_upper_hex", 1)
   , ("rust_arg_octal", 1), ("rust_arg_binary", 1)
+  , ("rust_arg_u32", 1), ("rust_arg_i32", 1), ("rust_arg_u64", 1)
+  , ("rust_arg_u16", 1), ("rust_arg_i16", 1)
+  , ("rust_arg_u8", 1), ("rust_arg_i8", 1)
   , ("str_len", 1), ("str_concat", 2), ("str_eq", 2), ("str_flatten", 1)
   , ("show_int", 1)
   , ("read_line", 0), ("getLine", 0)

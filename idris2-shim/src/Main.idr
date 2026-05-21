@@ -188,6 +188,20 @@ vectToList : Vect n a -> List a
 vectToList []        = []
 vectToList (x :: xs) = x :: vectToList xs
 
+-- | Parse Idris2's foreign-call descriptor list.
+-- A CCS entry has the form "backend:opt1,opt2,opt3" — for the C
+-- target the first opt is the function name (see Compiler.Common.parseCC).
+-- Try "C:" then "RefC:" then "scheme:" prefixes; return the basename only.
+parseCName : List String -> String
+parseCName []          = ""
+parseCName (s :: rest) =
+    if isPrefixOf "C:" s     then takeUntilComma (substr 2 (length s) s)
+    else if isPrefixOf "RefC:" s then takeUntilComma (substr 5 (length s) s)
+    else parseCName rest
+  where
+    takeUntilComma : String -> String
+    takeUntilComma str = pack (takeWhile (/= ',') (unpack str))
+
 -- ---------------------------------------------------------------- Pattern helpers
 
 patWild : String -> String
@@ -394,18 +408,40 @@ renderDef name (MkNmCon _ arity _) =
           , ("visibility", jsonStr "public")
           , ("arity", jsonInt (cast arity))
           ]
-renderDef name (MkNmForeign ccs _ _) =
-    let (m, t) = splitName name
-        ccsStr = fastConcat (intersperse "," ccs)
-        body   = jsonObj [("evar", mkName ccsStr)]
+renderDef name (MkNmForeign ccs fargs _) =
+    let (m, t)  = splitName name
+        cname   = parseCName ccs
+        arity   = length fargs
+        argIdxs = if arity == 0 then [] else [0 .. natToInteger arity - 1]
+        params  = map (\i => "ffi_arg_" ++ show i) argIdxs
+        paramJs = map (\nm => jsonObj [("name", mkName nm)]) params
+        argRefs = map (\nm => jsonObj [("evar", mkName nm)]) params
+        callee  = if cname == "" then "_idris_unresolved_foreign" else cname
+        callExp = jsonObj
+                    [ ("eapp", jsonObj
+                                  [ ("fn", jsonObj [("evar", mkName callee)])
+                                  , ("args", jsonArr argRefs)
+                                  ])
+                    ]
+        body    = if isEmpty params
+                     then callExp
+                     else jsonObj
+                            [ ("elam", jsonObj
+                                          [ ("params", jsonArr paramJs)
+                                          , ("body", callExp)
+                                          ])
+                            ]
     in jsonObj
           [ ("name", mkQName m t)
           , ("type", anyTy)
           , ("expr", body)
-          , ("sort", jsonStr "external")
+          , ("sort", jsonStr "fun")
           , ("visibility", jsonStr "public")
-          , ("arity", jsonInt 0)
+          , ("arity", jsonInt (cast arity))
           ]
+  where
+    natToInteger : Nat -> Integer
+    natToInteger n = cast n
 renderDef name (MkNmError body) =
     let (m, t) = splitName name
     in jsonObj

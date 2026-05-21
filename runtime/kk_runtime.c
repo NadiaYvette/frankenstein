@@ -1764,6 +1764,35 @@ void kk_println_str(int64_t s_i) {
     putchar('\n');
 }
 
+/* ---- Idris2 bridge helpers ---------------------------------------------
+ * Foreign functions referenced by Idris2's Prelude after the shim's
+ * --cg organir lowering.  Names match the C target extracted from
+ * MkNmForeign CCS strings (e.g. "C:idris2_putStr,libidris2_support,
+ * idris_support.h").  All take and return i64 for ABI uniformity.
+ */
+
+/* Idris2 IO primitive: write a string and return the world token (0). */
+int64_t idris2_putStr(int64_t s_i, int64_t world) {
+    (void)world;
+    kk_print_str(s_i);
+    return 0;
+}
+
+/* Idris2 StrHead primitive: return first byte of a string as an int.
+ * Used by Prelude.Show.firstCharIs to test for a leading minus sign. */
+int64_t idris_str_head(int64_t s_i) {
+    kk_string_t* s = (kk_string_t*)s_i;
+    if (s == NULL || s->byte_len == 0) return 0;
+    if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) {
+        return (int64_t)(unsigned char)kk_str_bytes(s)[0];
+    }
+    /* Rope: flatten and read the first byte. */
+    int64_t flat_i = kk_str_flatten(s_i);
+    kk_string_t* flat = (kk_string_t*)flat_i;
+    if (flat == NULL || flat->byte_len == 0) return 0;
+    return (int64_t)(unsigned char)kk_str_bytes(flat)[0];
+}
+
 int64_t kk_str_eq(int64_t a_i, int64_t b_i) {
     kk_string_t* a = (kk_string_t*)a_i;
     kk_string_t* b = (kk_string_t*)b_i;

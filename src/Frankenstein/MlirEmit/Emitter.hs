@@ -853,6 +853,10 @@ emitProgramText prog =
     , "  func.func private @mercury_choose() -> i64"
     , "  func.func private @mercury_collect_choices(i64) -> i64"
     , ""
+    , "  // Idris2 bridge runtime stubs"
+    , "  func.func private @idris2_putStr(i64, i64) -> i64"
+    , "  func.func private @idris_str_head(i64) -> i64"
+    , ""
     , externDeclText
     , kokaBuiltinText
     , "  // Lifted functions"
@@ -1244,6 +1248,10 @@ emitProgramWasm prog =
     , "  // Mercury choice effect runtime"
     , "  func.func private @mercury_choose() -> i64"
     , "  func.func private @mercury_collect_choices(i64) -> i64"
+    , ""
+    , "  // Idris2 bridge runtime stubs"
+    , "  func.func private @idris2_putStr(i64, i64) -> i64"
+    , "  func.func private @idris_str_head(i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -3974,6 +3982,8 @@ externalRuntimeFns = Set.fromList
   -- Mercury choice effect runtime
   , "mercury_choose", "mercury_collect_choices"
   , "mercury_exn_fail", "mercury_fail"
+  -- Idris2 bridge runtime stubs
+  , "idris2_putStr", "idris_str_head"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4014,6 +4024,7 @@ externalRuntimeArity = Map.fromList
   , ("kk_println_con", 3)
   , ("mercury_choose", 0), ("mercury_collect_choices", 1)
   , ("mercury_exn_fail", 0), ("mercury_fail", 0)
+  , ("idris2_putStr", 2), ("idris_str_head", 1)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

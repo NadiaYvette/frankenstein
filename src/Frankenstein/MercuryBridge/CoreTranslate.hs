@@ -27,6 +27,7 @@
 
 module Frankenstein.MercuryBridge.CoreTranslate
   ( translateHlds
+  , translateMultiHlds
   , translatePred
   ) where
 
@@ -97,6 +98,73 @@ translateHlds hlds = do
     { progName = QName (hldsModule hlds) (Name "main" 0)
     , progDefs = failHandler : defs ++ multiWrappers ++ mainAliases
     , progData = dataDecls
+    , progEffects = mercuryEffects
+    }
+
+-- | Translate a list of HLDS modules into a single 'Program'.  The first
+-- element of the list is treated as the entry module (its name becomes
+-- 'progName'; its 'main'/'main_int' triggers the synthesised alias).
+-- All other modules contribute defs + data decls but no main aliases.
+--
+-- The single-module 'mercury_fail' fallback and 'mercury_effects' row are
+-- generated once for the merged program.  Pred bodies retain their original
+-- 'predName' (already qualified upstream where necessary), so a call to
+-- 'rational.numer' in the entry module resolves against the 'rational'
+-- module's def by lookup, not by re-mangling.
+translateMultiHlds :: [MercuryHLDS] -> Either Text Program
+translateMultiHlds [] = Left "translateMultiHlds: empty module list"
+translateMultiHlds (entry : rest) = do
+  -- Translate every module's predicates and data decls.
+  entryDefs <- mapM translatePred (hldsPreds entry)
+  restDefsLists <- mapM (\h -> mapM translatePred (hldsPreds h)) rest
+  let entryData = map (translateMercuryTypeDecl (hldsModule entry)) (hldsTypes entry)
+      restData  = concatMap (\h -> map (translateMercuryTypeDecl (hldsModule h)) (hldsTypes h)) rest
+      restDefs  = concat restDefsLists
+      -- One fallback handler for the merged program.
+      failHandler = Def
+        { defName = QName "" (Name "mercury_fail" 0)
+        , defType = TFun [] EffectRowEmpty intT
+        , defExpr = ELit (LitInt 0)
+        , defSort = DefFun
+        , defVisibility = Public
+        }
+      intT = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+      -- Multi-predicate wrappers per source module (qualified appropriately).
+      entryMulti = concatMap (makeMultiWrapper (hldsModule entry)) (hldsPreds entry)
+      restMulti  = concatMap (\h -> concatMap (makeMultiWrapper (hldsModule h))
+                                              (hldsPreds h)) rest
+      -- main aliases only synthesised from the entry module.
+      mainIntAliases =
+        [ Def
+            { defName = QName "" (Name "main" 0)
+            , defType = TFun [] EffectRowEmpty intT
+            , defExpr = EApp (EVar (Name "main_int" 0)) []
+            , defSort = DefFun
+            , defVisibility = Public
+            }
+        | any (\p -> predName p == "main_int" && predDet p == Det)
+              (hldsPreds entry)
+        ]
+      mainIoAliases =
+        [ Def
+            { defName = QName "" (Name "main" 0)
+            , defType = TFun [] EffectRowEmpty intT
+            , defExpr = EApp (EVar (Name "main_io_impl" 0)) [ELit (LitInt 0)]
+            , defSort = DefFun
+            , defVisibility = Public
+            }
+        | null mainIntAliases
+        , any (\p -> predName p == "main"
+                     && predDet p == Det
+                     && length (predModes p) == 2
+                     && all (\m -> m == ModeDi || m == ModeUo) (predModes p))
+              (hldsPreds entry)
+        ]
+      mainAliases = mainIntAliases ++ mainIoAliases
+  Right $ Program
+    { progName    = QName (hldsModule entry) (Name "main" 0)
+    , progDefs    = failHandler : entryDefs ++ restDefs ++ entryMulti ++ restMulti ++ mainAliases
+    , progData    = entryData ++ restData
     , progEffects = mercuryEffects
     }
 

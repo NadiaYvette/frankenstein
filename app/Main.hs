@@ -317,16 +317,30 @@ compileHaskellMulti simplify inputFile = do
 compileMercury :: FilePath -> IO (Either Text Program)
 compileMercury inputFile = do
   hPutStrLn stderr $ "Compiling Mercury: " <> inputFile
-  result <- dumpHlds inputFile
-  case result of
-    Left err -> do
-      TIO.putStrLn $ "  Mercury bridge error: " <> err
-      TIO.putStrLn $ "  Using demo program..."
-      pure $ Right demoMercuryProgram
-    Right dumpText ->
-      case parseHldsDump dumpText of
-        Left err -> pure $ Left $ "HLDS parse error: " <> err
-        Right hlds -> pure $ translateHlds hlds
+  -- Try multi-module aggregation first: dump HLDS for the entry module and
+  -- every transitively-imported user module (those with a .m file alongside
+  -- the input), parse each, and translate them as one merged Program.
+  -- Stdlib modules (io/list/string/integer/...) are left as external refs
+  -- and resolved at link time via runtime stubs.
+  progResult <- dumpHldsProgram inputFile
+  case progResult of
+    Right dumps@(_:_) ->
+      case mapM (parseHldsDump . snd) dumps of
+        Left err   -> pure $ Left $ "HLDS parse error: " <> err
+        Right hlds -> pure $ translateMultiHlds hlds
+    _ -> do
+      -- Fallback to single-module path (preserves the legacy demo behaviour
+      -- when mmc is unavailable).
+      result <- dumpHlds inputFile
+      case result of
+        Left err -> do
+          TIO.putStrLn $ "  Mercury bridge error: " <> err
+          TIO.putStrLn $ "  Using demo program..."
+          pure $ Right demoMercuryProgram
+        Right dumpText ->
+          case parseHldsDump dumpText of
+            Left err   -> pure $ Left $ "HLDS parse error: " <> err
+            Right hlds -> pure $ translateHlds hlds
 
 compileKoka :: FilePath -> IO (Either Text Program)
 compileKoka inputFile = do

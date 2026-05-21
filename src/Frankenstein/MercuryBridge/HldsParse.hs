@@ -12,16 +12,19 @@ module Frankenstein.MercuryBridge.HldsParse
   , MercuryGoal(..)
   , parseHldsDump
   , dumpHlds
+  , dumpHldsProgram
   ) where
 
+import Control.Monad (filterM)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Process (readCreateProcessWithExitCode, proc, cwd)
 import System.Exit (ExitCode(..))
-import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile, removeDirectoryRecursive)
-import System.FilePath (takeBaseName, takeFileName, (</>))
+import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile, removeDirectoryRecursive, doesFileExist)
+import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import Data.List (isPrefixOf, find)
+import qualified Data.Set as Set
 import Control.Exception (try, catch, IOException)
 
 -- Mercury determinism categories
@@ -108,6 +111,92 @@ dumpHlds inputPath = do
             pure $ Left $ T.pack $ "mmc failed (exit " ++ show code ++ "): " ++ stderr
           ExitSuccess ->
             pure $ Left $ "HLDS dump file not found after mmc in " <> T.pack workDir
+
+-- | Discover transitive user-module imports starting from a Mercury source
+-- file, then dump HLDS for each.  "User module" = a module whose .m file
+-- lives in the same directory as 'inputPath'.  Stdlib (io, list, string,
+-- integer, …) is left out and resolved at link time via runtime stubs.
+--
+-- Returns a list of (module-name, hlds-dump-text), with the entry module
+-- first so 'translateMultiHlds' can pick it for progName / main detection.
+dumpHldsProgram :: FilePath -> IO (Either Text [(Text, Text)])
+dumpHldsProgram inputPath = do
+  absPath <- makeAbsolute inputPath
+  let srcDir   = takeDirectory absPath
+      entryMod = T.pack (takeBaseName absPath)
+  -- BFS: collect transitively-imported user modules (files that exist in srcDir).
+  userMods <- bfsUserImports srcDir entryMod
+  -- Shared workdir so mmc can resolve cross-module imports during type-check.
+  tmpDir <- getTemporaryDirectory
+  let workDir = tmpDir </> "frankenstein-mercury-prog-" ++ T.unpack entryMod
+  removeDirectoryRecursive workDir `catch` (\(_ :: IOException) -> pure ())
+  createDirectoryIfMissing True workDir
+  mapM_ (\m -> copyFile (srcDir </> T.unpack m ++ ".m")
+                        (workDir </> T.unpack m ++ ".m"))
+        userMods
+  -- Dump HLDS for each module in the shared workDir.
+  dumps <- mapM (\m -> do
+                    d <- dumpInWorkDir workDir (T.unpack m ++ ".m")
+                    pure $ fmap (\t -> (m, t)) d)
+                userMods
+  case sequence dumps of
+    Left err -> pure $ Left err
+    Right rs -> pure $ Right rs
+
+-- BFS user-module imports.  Only follows imports whose corresponding .m
+-- file exists in 'srcDir' — stdlib references stop the walk.
+bfsUserImports :: FilePath -> Text -> IO [Text]
+bfsUserImports srcDir start = go [start] (Set.singleton start) [start]
+  where
+    go []     _    acc = pure (reverse acc)
+    go (m:ms) seen acc = do
+      let p = srcDir </> T.unpack m ++ ".m"
+      exists <- doesFileExist p
+      if not exists
+        then go ms seen acc
+        else do
+          imps <- readImports p
+          let new = [i | i <- imps, not (Set.member i seen)]
+          newUser <- filterM (\i -> doesFileExist (srcDir </> T.unpack i ++ ".m")) new
+          let seen' = foldr Set.insert seen newUser
+              acc'  = newUser ++ acc
+          go (ms ++ newUser) seen' acc'
+
+-- Parse ":- import_module foo." lines from a Mercury source file.
+readImports :: FilePath -> IO [Text]
+readImports p = do
+  txt <- TIO.readFile p
+  pure
+    [ T.strip (T.dropEnd 1 mod_)  -- drop trailing "."
+    | l <- T.lines txt
+    , let stripped = T.strip l
+    , Just rest <- [T.stripPrefix ":- import_module " stripped]
+    , let mod_ = rest
+    , not (T.null mod_)
+    , T.last mod_ == '.'
+    ]
+
+-- Run mmc in an existing shared workDir; do not clean (caller owns it).
+dumpInWorkDir :: FilePath -> FilePath -> IO (Either Text Text)
+dumpInWorkDir workDir fileBase = do
+  let moduleName = takeBaseName fileBase
+  result <- try $ readCreateProcessWithExitCode
+    (proc "mmc" [ "--dump-hlds", "50", "--compile-only", fileBase ])
+      { cwd = Just workDir }
+    ""
+  case result :: Either IOException (ExitCode, String, String) of
+    Left exc -> pure $ Left $ T.pack $ "Failed to invoke mmc: " ++ show exc
+    Right (exitCode, _, stderr) -> do
+      files <- listDirectory workDir
+      let dumpFile = find (\f -> (moduleName ++ ".hlds_dump") `isPrefixOf` f) files
+      case dumpFile of
+        Just f -> Right <$> TIO.readFile (workDir </> f)
+        Nothing -> case exitCode of
+          ExitFailure code ->
+            pure $ Left $ T.pack $ "mmc failed on " ++ moduleName
+                                ++ " (exit " ++ show code ++ "): " ++ stderr
+          ExitSuccess ->
+            pure $ Left $ "HLDS dump file not found for " <> T.pack moduleName
 
 -- | Parse a textual HLDS dump into structured form.
 parseHldsDump :: Text -> Either Text MercuryHLDS

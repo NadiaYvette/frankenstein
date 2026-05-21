@@ -3939,7 +3939,14 @@ effectRowNameEmit EffectRowEmpty          = "pure"
 -- Operator characters get Z-encoded (GHC convention) so distinct operators
 -- produce distinct linker symbols.  '.' stays '_' (module separator).
 sanitizeName :: Text -> Text
-sanitizeName = T.concatMap encodeChar
+sanitizeName t =
+  let s = T.concatMap encodeChar t
+  in case T.uncons s of
+       -- MLIR identifiers must start with a letter or '_'; HLDS-derived
+       -- names occasionally begin with a digit (e.g. '0_then_...' from a
+       -- multi-line goal-text leak).  Prepend '_' in that case.
+       Just (c, _) | c >= '0' && c <= '9' -> "_" <> s
+       _                                   -> s
   where
     encodeChar '$' = "zd"
     encodeChar '+' = "zp"
@@ -3960,7 +3967,7 @@ sanitizeName = T.concatMap encodeChar
     encodeChar ';' = "zs"
     encodeChar '?' = "zq"
     encodeChar c
-      | c `elem` ("/.,()[]{}'\"\\ \t" :: [Char]) = "_"
+      | c `elem` ("/.,()[]{}'\"\\` \t\n\r" :: [Char]) = "_"
       | otherwise = T.singleton c
 
 -- | Check if an expression is a lambda (possibly wrapped in EDelay/ETypeLam).

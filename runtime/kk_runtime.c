@@ -2863,10 +2863,11 @@ int64_t kk_list_filter_map(int64_t xs, int64_t f) {
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
         int64_t r = kk_call_closure_1(f, h);
-        /* Maybe is Cons(x) for Just and Nil for Nothing in our
-         * representation (matches Koka's encoding for now).  Skip
-         * Nothing; for Just(v), unwrap to v and append. */
-        if (kk_is_heap_ptr(r) && kk_tag(r) == KK_CONS_TAG) {
+        /* Just(v) cells carry KK_JUST_TAG with the payload at field 0;
+         * Nothing cells carry KK_NOTHING_TAG and no payload.  Both tags
+         * match the djb2-hash assignment Frankenstein puts on the
+         * generated `Just`/`Nothing` constructors. */
+        if (kk_is_heap_ptr(r) && kk_tag(r) == KK_JUST_TAG) {
             acc = kk_cons(kk_field(r, 0), acc);
         }
         xs = kk_field(xs, 1);

@@ -604,6 +604,13 @@ extractSwitchArms (l:ls)
 parseSingleGoal :: Text -> MercuryGoal
 parseSingleGoal txt
   | T.null stripped = GoalUnparsed "(empty)"
+  -- Mercury's @true@ atom is the always-succeeds goal — emit as an
+  -- empty conjunction so the CPS chain threads through with no
+  -- side-effect, rather than falling to GoalUnparsed which surfaces
+  -- as an `unparsed_goal$1` link symbol.  Same for @fail@ at the
+  -- semantic level (mapped to the runtime fail stub).
+  | stripped == "true" = GoalConj []
+  | stripped == "fail" = GoalCall "mercury_fail" []
   -- Unification check runs FIRST so an LHS like "V_5 = integer.(..)" is
   -- correctly identified as an assignment.  Previously parseMercuryBuiltin
   -- ran first and would mis-classify the whole goal as a top-level call to

@@ -1849,6 +1849,30 @@ int64_t idris_double_ceiling(int64_t x) {
 }
 IDRIS_DBL2(pow)
 
+/* Double arithmetic on the i64 bit-pattern ABI.  Idris2's PrimFn Add/Sub/etc.
+ * are typed (Add DoubleType vs Add IntType); the shim emits these names for
+ * the Double case so we don't accidentally lower them to arith.addi etc. */
+int64_t idris_double_add(int64_t a, int64_t b) {
+    return kk_double_to_i64(kk_i64_to_double(a) + kk_i64_to_double(b));
+}
+int64_t idris_double_sub(int64_t a, int64_t b) {
+    return kk_double_to_i64(kk_i64_to_double(a) - kk_i64_to_double(b));
+}
+int64_t idris_double_mul(int64_t a, int64_t b) {
+    return kk_double_to_i64(kk_i64_to_double(a) * kk_i64_to_double(b));
+}
+int64_t idris_double_div(int64_t a, int64_t b) {
+    return kk_double_to_i64(kk_i64_to_double(a) / kk_i64_to_double(b));
+}
+int64_t idris_double_neg(int64_t a) {
+    return kk_double_to_i64(-kk_i64_to_double(a));
+}
+int64_t idris_double_lt (int64_t a, int64_t b) { return kk_i64_to_double(a) <  kk_i64_to_double(b); }
+int64_t idris_double_lte(int64_t a, int64_t b) { return kk_i64_to_double(a) <= kk_i64_to_double(b); }
+int64_t idris_double_eq (int64_t a, int64_t b) { return kk_i64_to_double(a) == kk_i64_to_double(b); }
+int64_t idris_double_gte(int64_t a, int64_t b) { return kk_i64_to_double(a) >= kk_i64_to_double(b); }
+int64_t idris_double_gt (int64_t a, int64_t b) { return kk_i64_to_double(a) >  kk_i64_to_double(b); }
+
 #undef IDRIS_DBL1
 #undef IDRIS_DBL2
 
@@ -1860,9 +1884,41 @@ int64_t cast_Integer_Double(int64_t n) {
 int64_t cast_Double_Int(int64_t d) {
     return (int64_t)kk_i64_to_double(d);
 }
+/* Format a Double like Haskell/Idris2 `show :: Double -> String`:
+ * shortest decimal that round-trips, with a mandatory "." or "e"
+ * (so 1.0 prints as "1.0", not "1").  Handles NaN and Infinity. */
 int64_t cast_Double_String(int64_t d) {
+    double v = kk_i64_to_double(d);
     char tmp[64];
-    int n = snprintf(tmp, sizeof tmp, "%g", kk_i64_to_double(d));
+    int n;
+    if (isnan(v)) {
+        n = snprintf(tmp, sizeof tmp, "NaN");
+    } else if (isinf(v)) {
+        n = snprintf(tmp, sizeof tmp, v < 0 ? "-Infinity" : "Infinity");
+    } else {
+        /* Shortest round-trip: try precisions 1..17 (17 = DBL_DECIMAL_DIG). */
+        n = 0;
+        for (int prec = 1; prec <= 17; prec++) {
+            n = snprintf(tmp, sizeof tmp, "%.*g", prec, v);
+            if (n < 0) { n = 0; break; }
+            double back = 0.0;
+            sscanf(tmp, "%lf", &back);
+            if (back == v) break;
+        }
+        /* Haskell-style: ensure a "." or "e" is present (1.0 not 1). */
+        int has_dot_or_e = 0;
+        for (int i = 0; i < n; i++) {
+            if (tmp[i] == '.' || tmp[i] == 'e' || tmp[i] == 'E') {
+                has_dot_or_e = 1;
+                break;
+            }
+        }
+        if (!has_dot_or_e && n + 2 < (int)sizeof tmp) {
+            tmp[n++] = '.';
+            tmp[n++] = '0';
+            tmp[n]   = '\0';
+        }
+    }
     if (n < 0) n = 0;
     /* Copy onto the heap and hand ownership to the string (owns=1)
      * — the stack buffer can't outlive this call. */

@@ -870,6 +870,16 @@ emitProgramText prog =
     , "  func.func private @idris_double_floor(i64) -> i64"
     , "  func.func private @idris_double_ceiling(i64) -> i64"
     , "  func.func private @idris_double_pow(i64, i64) -> i64"
+    , "  func.func private @idris_double_add(i64, i64) -> i64"
+    , "  func.func private @idris_double_sub(i64, i64) -> i64"
+    , "  func.func private @idris_double_mul(i64, i64) -> i64"
+    , "  func.func private @idris_double_div(i64, i64) -> i64"
+    , "  func.func private @idris_double_neg(i64) -> i64"
+    , "  func.func private @idris_double_lt(i64, i64) -> i64"
+    , "  func.func private @idris_double_lte(i64, i64) -> i64"
+    , "  func.func private @idris_double_eq(i64, i64) -> i64"
+    , "  func.func private @idris_double_gte(i64, i64) -> i64"
+    , "  func.func private @idris_double_gt(i64, i64) -> i64"
     , "  func.func private @cast_Integer_Double(i64) -> i64"
     , "  func.func private @cast_Double_Int(i64) -> i64"
     , "  func.func private @cast_Double_String(i64) -> i64"
@@ -1283,6 +1293,16 @@ emitProgramWasm prog =
     , "  func.func private @idris_double_floor(i64) -> i64"
     , "  func.func private @idris_double_ceiling(i64) -> i64"
     , "  func.func private @idris_double_pow(i64, i64) -> i64"
+    , "  func.func private @idris_double_add(i64, i64) -> i64"
+    , "  func.func private @idris_double_sub(i64, i64) -> i64"
+    , "  func.func private @idris_double_mul(i64, i64) -> i64"
+    , "  func.func private @idris_double_div(i64, i64) -> i64"
+    , "  func.func private @idris_double_neg(i64) -> i64"
+    , "  func.func private @idris_double_lt(i64, i64) -> i64"
+    , "  func.func private @idris_double_lte(i64, i64) -> i64"
+    , "  func.func private @idris_double_eq(i64, i64) -> i64"
+    , "  func.func private @idris_double_gte(i64, i64) -> i64"
+    , "  func.func private @idris_double_gt(i64, i64) -> i64"
     , "  func.func private @cast_Integer_Double(i64) -> i64"
     , "  func.func private @cast_Double_Int(i64) -> i64"
     , "  func.func private @cast_Double_String(i64) -> i64"
@@ -4023,6 +4043,10 @@ externalRuntimeFns = Set.fromList
   , "idris_double_asin", "idris_double_acos", "idris_double_atan"
   , "idris_double_sqrt", "idris_double_exp", "idris_double_log"
   , "idris_double_floor", "idris_double_ceiling", "idris_double_pow"
+  , "idris_double_add", "idris_double_sub", "idris_double_mul"
+  , "idris_double_div", "idris_double_neg"
+  , "idris_double_lt", "idris_double_lte", "idris_double_eq"
+  , "idris_double_gte", "idris_double_gt"
   , "cast_Integer_Double", "cast_Double_Int", "cast_Double_String"
   ]
 
@@ -4070,6 +4094,10 @@ externalRuntimeArity = Map.fromList
   , ("idris_double_asin", 1), ("idris_double_acos", 1), ("idris_double_atan", 1)
   , ("idris_double_sqrt", 1), ("idris_double_exp", 1), ("idris_double_log", 1)
   , ("idris_double_floor", 1), ("idris_double_ceiling", 1), ("idris_double_pow", 2)
+  , ("idris_double_add", 2), ("idris_double_sub", 2), ("idris_double_mul", 2)
+  , ("idris_double_div", 2), ("idris_double_neg", 1)
+  , ("idris_double_lt", 2), ("idris_double_lte", 2), ("idris_double_eq", 2)
+  , ("idris_double_gte", 2), ("idris_double_gt", 2)
   , ("cast_Integer_Double", 1), ("cast_Double_Int", 1), ("cast_Double_String", 1)
   ]
 

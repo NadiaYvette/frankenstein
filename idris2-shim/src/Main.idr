@@ -117,7 +117,21 @@ constLit WorldVal = jsonObj [("int", jsonInt 0)]
 -- string ops route to runtime helpers registered in externalRuntimeFns.
 -- Names with no current mapping pass through under an "idris_" prefix so
 -- they show up as obvious unresolved symbols rather than silent failures.
+-- Double-typed arithmetic and comparisons need to route through runtime
+-- helpers that do floating-point operations on the i64 bit-pattern ABI.
+-- The bare "+", "-", "==" tokens are lowered by MlirEmit to integer
+-- arith ops, which silently produces garbage for Double operands.
 primFnName : {arity : Nat} -> PrimFn arity -> String
+primFnName (Add DoubleType)  = "idris_double_add"
+primFnName (Sub DoubleType)  = "idris_double_sub"
+primFnName (Mul DoubleType)  = "idris_double_mul"
+primFnName (Div DoubleType)  = "idris_double_div"
+primFnName (Neg DoubleType)  = "idris_double_neg"
+primFnName (LT  DoubleType)  = "idris_double_lt"
+primFnName (LTE DoubleType)  = "idris_double_lte"
+primFnName (EQ  DoubleType)  = "idris_double_eq"
+primFnName (GTE DoubleType)  = "idris_double_gte"
+primFnName (GT  DoubleType)  = "idris_double_gt"
 primFnName (Add _)       = "+"
 primFnName (Sub _)       = "-"
 primFnName (Mul _)       = "*"

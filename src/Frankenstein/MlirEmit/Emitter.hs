@@ -1793,24 +1793,24 @@ emitExpr (EReuse ref alloc) = do
 -- The lifted body is a regular func.func. We use func.constant + index_cast to
 -- get a function pointer as i64, avoiding llvm.mlir.addressof incompatibility.
 emitExpr (EDelay e) = do
-  -- EDelay wraps a lazy thunk.  Ideally we'd lambda-lift the body to a
-  -- zero-arg function and defer evaluation via kk_thunk_create/force.
-  -- However, the body often captures variables from the enclosing scope,
-  -- and in the self-hosted compiler, capture classification can be subtly
-  -- wrong (the compiled isCaptured function may disagree with the host).
-  -- A zero-arg lift with missing captures produces invalid MLIR (out-of-
-  -- scope SSA references).
+  -- EDelay wraps a lazy thunk: lambda-lift the body into a top-level
+  -- function (taking a closure arg) and box it in a kk_thunk_create
+  -- cell.  Forcing extracts the fn pointer from the closure and invokes
+  -- fn(closure), so captures from the enclosing scope flow through the
+  -- existing closure ABI.
   --
-  -- Safe strategy: always evaluate eagerly and wrap the result in a
-  -- pre-forced thunk (kk_thunk_create_forced).  kk_thunk_force sees the
-  -- evaluated flag and returns the cached result directly, so downstream
-  -- EForce works correctly.  This loses true laziness, but GHC's demand
-  -- analyzer already removes most thunks, and the remaining ones in the
-  -- compiler pipeline don't rely on laziness for termination.
-  (eOps, eName) <- emitExpr e
+  -- Required for recursive lazy definitions like Idris2's `countFrom`,
+  -- where eager evaluation diverges.  The previous design (eager-eval
+  -- + kk_thunk_create_forced wrap) was kept here for fear of capture-
+  -- analysis bugs in the self-hosted emitter, but the same machinery
+  -- already works correctly for plain ELam — there is no separate code
+  -- path to get wrong.
+  (lambdaOps, closureName) <- emitLambdaLift [] e
   resultName <- freshName "v"
-  pure ( ("// delay (thunk): eagerly evaluated, wrapped as pre-forced" : eOps) ++
-         [ "%" <> resultName <> " = func.call @kk_thunk_create_forced(%" <> eName <> ") : (i64) -> i64" ]
+  pure ( lambdaOps ++
+         [ "// delay (thunk): closure-based lazy, evaluated on force"
+         , "%" <> resultName <> " = func.call @kk_thunk_create(%" <> closureName <> ") : (i64) -> i64"
+         ]
        , resultName)
 
 emitExpr (EForce e) = do

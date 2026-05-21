@@ -199,9 +199,10 @@ int64_t kk_ref_get(int64_t ref);
 int64_t kk_ref_set(int64_t ref, int64_t value);  /* returns 0 */
 
 /* Lazy thunks — single-shot, evaluate-on-force.
- * kk_thunk_create wraps a 0-arg function pointer in a thunk object.
- * kk_thunk_force evaluates the thunk (once) and returns the result. */
-int64_t kk_thunk_create(int64_t fn_ptr);
+ * kk_thunk_create wraps a closure cell (fn pointer at field 0, captures
+ * at fields 1..n) in an unevaluated thunk; kk_thunk_force invokes
+ * fn(closure) the first time, then caches and returns the result. */
+int64_t kk_thunk_create(int64_t closure_ptr);
 int64_t kk_thunk_force(int64_t thunk);
 
 /* Comparison — structural ordering for Map/Set shims.

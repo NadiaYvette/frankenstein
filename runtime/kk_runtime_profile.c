@@ -112,11 +112,11 @@ int64_t mercury_choose(void) { return 0; }
 int64_t mercury_collect_choices(int64_t fn_ptr) { return ((int64_t(*)(void))fn_ptr)(); }
 
 #define KK_THUNK_TAG 0x4C415A59
-int64_t kk_thunk_create(int64_t fn_ptr) {
+int64_t kk_thunk_create(int64_t closure_ptr) {
     int64_t thunk = kk_alloc_con(KK_THUNK_TAG, 2);
     if (thunk == 0) return 0;
     kk_set_field(thunk, 0, 0);
-    kk_set_field(thunk, 1, fn_ptr);
+    kk_set_field(thunk, 1, closure_ptr);
     return thunk;
 }
 int64_t kk_thunk_force(int64_t thunk) {
@@ -124,8 +124,9 @@ int64_t kk_thunk_force(int64_t thunk) {
     if (kk_tag(thunk) != KK_THUNK_TAG) return thunk;
     int64_t ev = kk_field(thunk, 0);
     if (ev) return kk_field(thunk, 1);
-    int64_t fn = kk_field(thunk, 1);
-    int64_t r = ((int64_t(*)(void))fn)();
+    int64_t closure = kk_field(thunk, 1);
+    int64_t fn = kk_field(closure, 0);
+    int64_t r = ((int64_t(*)(int64_t))fn)(closure);
     kk_set_field(thunk, 0, 1);
     kk_set_field(thunk, 1, r);
     return r;

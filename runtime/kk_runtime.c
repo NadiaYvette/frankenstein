@@ -2531,23 +2531,32 @@ int64_t mercury_collect_choices(int64_t fn_ptr) {
     return sum;
 }
 
-/* Thunk support for lazy evaluation (Haskell bridge)
+/* Thunk support for lazy evaluation (Haskell/Idris bridges)
  *
  * Thunk layout (using kk_alloc_con with tag=0xLAZY):
- *   [refcount] [tag=0x4C415A59] [evaluated_flag] [value_or_fn_ptr]
+ *   [refcount] [tag=0x4C415A59] [evaluated_flag] [closure_or_result]
  *
- * evaluated_flag: 0 = unevaluated (value_or_fn_ptr is fn_ptr)
- *                 1 = evaluated   (value_or_fn_ptr is cached result)
+ * evaluated_flag: 0 = unevaluated (field 1 holds a closure cell —
+ *                                  field 0 of the closure is the fn_ptr,
+ *                                  remaining fields are captured values)
+ *                 1 = evaluated   (field 1 holds the cached result)
+ *
+ * The closure-based encoding lets EDelay bodies capture enclosing-scope
+ * variables.  An earlier zero-arg encoding forced eager evaluation, which
+ * diverged on recursive lazy definitions (e.g. Idris2's `countFrom`).
  */
 
 /* KK_THUNK_TAG defined at top of file */
 
-/* Create a thunk wrapping a zero-arg function pointer */
-int64_t kk_thunk_create(int64_t fn_ptr) {
+/* Create a thunk wrapping a closure cell.  The closure must have a
+ * function pointer at field 0; remaining fields are captured variables.
+ * When forced, kk_thunk_force invokes `fn(closure)` to compute the
+ * value, then caches it in field 1 and drops the closure. */
+int64_t kk_thunk_create(int64_t closure_ptr) {
     int64_t thunk = kk_alloc_con(KK_THUNK_TAG, 2);
     if (thunk == 0) return 0;
-    kk_set_field(thunk, 0, 0);        /* evaluated_flag = 0 */
-    kk_set_field(thunk, 1, fn_ptr);   /* the function pointer */
+    kk_set_field(thunk, 0, 0);            /* evaluated_flag = 0 */
+    kk_set_field(thunk, 1, closure_ptr);  /* closure (owns its captures) */
     return thunk;
 }
 
@@ -2585,10 +2594,14 @@ int64_t kk_thunk_force(int64_t thunk) {
         kk_retain(result);                     /* caller will drop this ref */
         return result;
     }
-    /* Call the zero-arg function */
-    int64_t fn_ptr = kk_field(thunk, 1);
-    typedef int64_t (*thunk_fn_t)(void);
-    int64_t result = ((thunk_fn_t)fn_ptr)();
+    /* Unevaluated: field 1 holds a closure cell.  Invoke fn(closure). */
+    int64_t closure = kk_field(thunk, 1);
+    int64_t fn_ptr = kk_field(closure, 0);
+    typedef int64_t (*thunk_fn_t)(int64_t);
+    int64_t result = ((thunk_fn_t)fn_ptr)(closure);
+    /* Closure has done its job (its captures were extracted/retained by
+     * the body's prologue).  Drop it so its captures release one ref. */
+    kk_drop(closure);
     /* Cache the result — retain because the thunk now owns a reference */
     kk_retain(result);
     kk_set_field(thunk, 0, 1);                /* mark as evaluated */

@@ -33,7 +33,7 @@ import Frankenstein.ErlangBridge.Driver (readErlangFile)
 import Frankenstein.ErlangBridge.CoreTranslate (translateErlang)
 import Frankenstein.FSharpBridge.Driver (readFSharpFile)
 import Frankenstein.FSharpBridge.CoreTranslate (translateFSharp)
-import Frankenstein.IdrisBridge.Driver (readIdrisFile)
+import Frankenstein.IdrisBridge.Driver (readIdrisFile, compileIdrisFileViaShim)
 import Frankenstein.IdrisBridge.CoreTranslate (translateIdris)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects, compileToExecutable, compileToWasm, defaultEmitConfig, EmitConfig(..), CompileTarget(..))
 import qualified Frankenstein.MlirEmit.PostProcess as PostProcess
@@ -434,12 +434,22 @@ compileFSharp inputFile = do
 compileIdris :: FilePath -> IO (Either Text Program)
 compileIdris inputFile = do
   hPutStrLn stderr $ "Compiling Idris2: " <> inputFile
-  result <- readIdrisFile inputFile
-  case result of
-    Left err -> pure $ Left $ "Idris2 bridge error: " <> err
-    Right decls ->
-      let modName = T.pack (takeBaseName inputFile)
-      in pure $ translateIdris modName decls
+  -- Preferred: shell out to the frankenstein-idris2 shim, which emits a
+  -- full OrganIR JSON document from Idris2's own elaborated Core.
+  shimResult <- compileIdrisFileViaShim inputFile
+  case shimResult of
+    Right jsonText -> case consumeProgram jsonText of
+      Left err -> pure $ Left $ "Idris2 OrganIR consumer error: " <> T.pack err
+      Right prog -> pure $ Right prog
+    Left shimErr -> do
+      hPutStrLn stderr $ "  Shim path failed: " <> T.unpack shimErr
+      hPutStrLn stderr "  Falling back to legacy in-tree parser (Int-only subset)"
+      result <- readIdrisFile inputFile
+      case result of
+        Left err -> pure $ Left $ "Idris2 bridge error: " <> err
+        Right decls ->
+          let modName = T.pack (takeBaseName inputFile)
+          in pure $ translateIdris modName decls
 
 -- | Count Perceus RC operations in a program's expressions.
 countPerceusOps :: Program -> (Int, Int, Int)

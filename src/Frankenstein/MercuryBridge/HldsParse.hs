@@ -144,7 +144,10 @@ dumpHldsProgram inputPath = do
     Right rs -> pure $ Right rs
 
 -- BFS user-module imports.  Only follows imports whose corresponding .m
--- file exists in 'srcDir' — stdlib references stop the walk.
+-- file exists in 'srcDir' — stdlib references stop the walk.  Modules in
+-- 'opaqueModules' are skipped even when a .m sibling exists (e.g. surd
+-- vendors Mercury's stdlib 'integer.m'; we'd rather substitute runtime
+-- stubs than parse its 2000+ line HLDS).
 bfsUserImports :: FilePath -> Text -> IO [Text]
 bfsUserImports srcDir start = go [start] (Set.singleton start) [start]
   where
@@ -156,11 +159,34 @@ bfsUserImports srcDir start = go [start] (Set.singleton start) [start]
         then go ms seen acc
         else do
           imps <- readImports p
-          let new = [i | i <- imps, not (Set.member i seen)]
+          let new = [i | i <- imps
+                       , not (Set.member i seen)
+                       , not (Set.member i opaqueModules)]
           newUser <- filterM (\i -> doesFileExist (srcDir </> T.unpack i ++ ".m")) new
           let seen' = foldr Set.insert seen newUser
               acc'  = newUser ++ acc
           go (ms ++ newUser) seen' acc'
+
+-- | Mercury stdlib modules we always skip in HLDS aggregation, even when
+-- a same-named .m file exists alongside the input (surd vendors several
+-- of these).  These resolve to Frankenstein runtime stubs at link time —
+-- typically lossy (e.g. arbitrary-precision 'integer' becomes plain i64),
+-- but correct enough for first-pass bring-up.
+opaqueModules :: Set.Set Text
+opaqueModules = Set.fromList
+  [ "integer"   -- vendored in surd-mercury; substitute with i64
+  , "io"        -- runtime print_str / println_str
+  , "list"      -- runtime kk_list_*
+  , "string"    -- runtime str_*
+  , "int"       -- builtin
+  , "char"      -- builtin
+  , "bool"      -- builtin
+  , "maybe"     -- builtin
+  , "require"   -- runtime abort
+  , "exception" -- runtime _raise
+  , "math"      -- libm via runtime
+  , "float"     -- builtin
+  ]
 
 -- Parse ":- import_module foo." lines from a Mercury source file.
 readImports :: FilePath -> IO [Text]
@@ -403,30 +429,43 @@ extractSwitchArms (l:ls)
 parseSingleGoal :: Text -> MercuryGoal
 parseSingleGoal txt
   | T.null stripped = GoalUnparsed "(empty)"
-  -- Mercury builtin: "int.(X op Y)" or "int.(X + Y)" — module-qualified operator
-  | Just builtinCall <- parseMercuryBuiltin stripped = builtinCall
-  -- Unification: Var = expr
+  -- Unification check runs FIRST so an LHS like "V_5 = integer.(..)" is
+  -- correctly identified as an assignment.  Previously parseMercuryBuiltin
+  -- ran first and would mis-classify the whole goal as a top-level call to
+  -- "V_5 = integer.<op>", baking the LHS into the symbol name.
   | " = " `T.isInfixOf` stripped =
       let (lhs, rhs) = T.breakOn " = " stripped
           rhs' = T.strip (T.drop 3 rhs)
           lhs' = T.strip lhs
-      in case parseCtorApp rhs' of
-           -- LHS = module.ctor(args) or LHS = ctor(args) → construct/deconstruct
-           -- with a properly extracted functor name and argument list. Which of
-           -- construct vs deconstruct it is gets decided downstream based on
-           -- the flow of bindings; we emit GoalConstruct here and let the
-           -- translator reinterpret it if the LHS is already bound.
-           Just (ctor, args) -> GoalConstruct lhs' ctor args
-           -- Plain list literal syntax — keep the old best-effort path.
-           Nothing | "[" `T.isInfixOf` rhs' -> GoalConstruct lhs' rhs' []
-           -- Otherwise it's a bare unification / assignment.
-           Nothing -> GoalUnify lhs' rhs'
-  -- Predicate call: module.pred(args)
-  | "(" `T.isInfixOf` stripped =
-      let name = T.takeWhile (/= '(') stripped
-          argsText = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') stripped
+      in case parseMercuryBuiltin rhs' of
+           -- RHS is "module.(X op Y)" form — bind LHS to the binop result.
+           Just (GoalCall op opArgs) -> GoalConstruct lhs' op opArgs
+           _ -> case parseCtorApp rhs' of
+              -- LHS = module.ctor(args) or LHS = ctor(args) → construct/deconstruct
+              -- with a properly extracted functor name and argument list. Which of
+              -- construct vs deconstruct it is gets decided downstream based on
+              -- the flow of bindings; we emit GoalConstruct here and let the
+              -- translator reinterpret it if the LHS is already bound.
+              Just (ctor, args) -> GoalConstruct lhs' ctor args
+              -- Plain list literal syntax — keep the old best-effort path.
+              Nothing | "[" `T.isInfixOf` rhs' -> GoalConstruct lhs' rhs' []
+              -- Otherwise it's a bare unification / assignment.
+              Nothing -> GoalUnify lhs' rhs'
+  -- Mercury builtin without an LHS bind (rare — typically tests inside a
+  -- conjunction): "int.(X > Y)" yields a direct GoalCall.
+  | Just builtinCall <- parseMercuryBuiltin stripped = builtinCall
+  -- Predicate call: module.pred(args).  Require the name (the prefix
+  -- before '(') to be a clean module-qualified or bare identifier — no
+  -- spaces, no '=', no other goal-text leakage.  This filters out the
+  -- multi-line if/then/else continuations that previously fused with
+  -- subsequent text and produced symbols like
+  -- "__if_rational_is_zero_Diff__then_Cmp_ze_…".
+  | "(" `T.isInfixOf` stripped
+  , let name = T.strip (T.takeWhile (/= '(') stripped)
+  , isCleanCallName name =
+      let argsText = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') stripped
           args = map T.strip $ T.splitOn "," argsText
-      in GoalCall (T.strip name) args
+      in GoalCall name args
   | otherwise = GoalUnparsed stripped
   where
     -- Drop trailing Mercury statement terminator '.' so atoms like "7."
@@ -439,6 +478,15 @@ parseSingleGoal txt
                in case T.unsnoc s of
                     Just (rest, '.') -> rest
                     _                -> s
+    -- A clean call-name is a (possibly module-qualified) identifier:
+    -- letters/digits/underscores/dots, no whitespace, no '=', etc.
+    -- Empty / starts-with-digit also rejected.
+    isCleanCallName n =
+      not (T.null n)
+      && not (T.any (\c -> c == ' ' || c == '=' || c == '\n' || c == '\t'
+                        || c == '`' || c == ';' || c == '|') n)
+      && let h = T.head n
+         in (h >= 'a' && h <= 'z') || (h >= 'A' && h <= 'Z') || h == '_'
 
 -- | Parse a constructor application of the form @ctor(arg1, arg2, ...)@ or
 -- @module.ctor(arg1, arg2, ...)@, returning the bare constructor name and

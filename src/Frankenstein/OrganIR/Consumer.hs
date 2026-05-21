@@ -32,6 +32,7 @@ module Frankenstein.OrganIR.Consumer
   , consumeProgram
   ) where
 
+import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -52,12 +53,44 @@ consumeModule m = do
     datas   <- mapM consumeDataType (O.modDataTypes m)
     effects <- mapM consumeEffectDecl (O.modEffectDecls m)
     let progName = C.QName (O.modName m) (C.Name "module" 0)
+        -- Bundle all sort=con definitions into a single synthetic
+        -- DataDecl so the linker's constructor table can resolve
+        -- ECon/PatCon references.  Frontends that supply real
+        -- DataType records (e.g. GHC, Koka) provide them via
+        -- modDataTypes; the Idris2 shim has no easy access to type
+        -- constructors and relies on this synthesis path.
+        allData = datas ++ maybeToList (synthSConDataDecl (O.modDefs m))
     Right C.Program
       { C.progName    = progName
       , C.progDefs    = defs
-      , C.progData    = datas
+      , C.progData    = allData
       , C.progEffects = effects
       }
+
+-- | Build a DataDecl bundling every sort=con definition; returns Nothing
+-- if there are none.  Fields are filled with anyType placeholders since
+-- OrganIR sort=con defs don't carry per-field type info.
+synthSConDataDecl :: [O.Definition] -> Maybe C.DataDecl
+synthSConDataDecl ds =
+    let cons = [d | d <- ds, O.defSort d == O.SCon]
+    in case cons of
+        [] -> Nothing
+        _  -> Just C.DataDecl
+                { C.dataName   = C.QName "" (C.Name "_synthetic_cons" 0)
+                , C.dataParams = []
+                , C.dataCons   = map mkSyntheticCon cons
+                , C.dataVis    = C.Public
+                }
+  where
+    mkSyntheticCon d =
+        let arity = O.defArity d
+            fields = [ (C.Name ("_" <> T.pack (show i)) 0, anyType)
+                     | i <- [0 .. arity - 1] ]
+        in C.ConDecl
+             { C.conName   = consumeQName (O.defName d)
+             , C.conFields = fields
+             , C.conVis    = C.Public
+             }
 
 -- | Convenience: parse JSON text and consume in one step.
 -- Re-exported so callers don't need to depend on organ-ir directly.

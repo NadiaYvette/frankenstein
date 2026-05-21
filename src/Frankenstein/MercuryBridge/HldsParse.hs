@@ -21,7 +21,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Process (readCreateProcessWithExitCode, proc, cwd)
 import System.Exit (ExitCode(..))
-import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile, removeDirectoryRecursive, doesFileExist)
+import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile, removeDirectoryRecursive, doesFileExist, doesDirectoryExist)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import Data.List (isPrefixOf, find)
 import qualified Data.Set as Set
@@ -134,9 +134,22 @@ dumpHldsProgram inputPath = do
   mapM_ (\m -> copyFile (srcDir </> T.unpack m ++ ".m")
                         (workDir </> T.unpack m ++ ".m"))
         userMods
+  -- mmc needs pre-built `.int` interfaces for cross-module type-check.
+  -- A simple compile-from-source `mmc --compile-only` chain works for
+  -- 1–2 imports (mmc auto-compiles direct siblings), but breaks on
+  -- deeper transitive chains like surd's euler_integrate → poly →
+  -- rational.  surd's `mmc --make demo_*` already populated
+  -- `<srcDir>/Mercury/ints/` with .int files — point mmc at them via
+  -- `-I` so the dump pass finds them without having to regenerate.
+  let candidateDirs = [ srcDir </> "Mercury" </> "ints"
+                      , srcDir </> "Mercury" </> "int2s"
+                      , srcDir </> "Mercury" </> "int3s"
+                      ]
+  extraSearch <- filterM doesDirectoryExist candidateDirs
   -- Dump HLDS for each module in the shared workDir.
   dumps <- mapM (\m -> do
-                    d <- dumpInWorkDir workDir (T.unpack m ++ ".m")
+                    d <- dumpInWorkDirWith workDir extraSearch
+                           (T.unpack m ++ ".m")
                     pure $ fmap (\t -> (m, t)) d)
                 userMods
   case sequence dumps of
@@ -204,10 +217,17 @@ readImports p = do
 
 -- Run mmc in an existing shared workDir; do not clean (caller owns it).
 dumpInWorkDir :: FilePath -> FilePath -> IO (Either Text Text)
-dumpInWorkDir workDir fileBase = do
+dumpInWorkDir workDir fileBase = dumpInWorkDirWith workDir [] fileBase
+
+-- | Variant that also feeds extra `-I <dir>` search paths to mmc.
+-- Used when a multi-module program needs pre-built `.int` files that
+-- live alongside the entry source (e.g. surd's `Mercury/ints/`).
+dumpInWorkDirWith :: FilePath -> [FilePath] -> FilePath -> IO (Either Text Text)
+dumpInWorkDirWith workDir extraSearchDirs fileBase = do
   let moduleName = takeBaseName fileBase
+      iFlags = concatMap (\d -> ["-I", d]) extraSearchDirs
   result <- try $ readCreateProcessWithExitCode
-    (proc "mmc" [ "--dump-hlds", "50", "--compile-only", fileBase ])
+    (proc "mmc" (iFlags ++ [ "--dump-hlds", "50", "--compile-only", fileBase ]))
       { cwd = Just workDir }
     ""
   case result :: Either IOException (ExitCode, String, String) of

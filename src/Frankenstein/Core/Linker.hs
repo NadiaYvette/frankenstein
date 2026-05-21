@@ -334,17 +334,22 @@ resolveName homeMod _selfName table nm =
       case Map.lookup unqual table of
         Nothing ->
           (nm, [], [])
-        Just [(_, mangled)] ->
-          (nm { nameText = mangled }, [], [])
+        Just [(_, mangled)] -> (nm { nameText = mangled }, [], [])
         Just candidates ->
           case filter (\(m, _) -> m == preferMod) candidates of
             [(_,mangled)] -> (nm { nameText = mangled }, [], [])
-            [] ->
-              let mangledNames = nubTexts (map snd candidates)
-              in case mangledNames of
-                [m] -> (nm { nameText = m }, [], [])
-                _   -> (nm, [],
-                        [AmbiguousReference unqual (map fst candidates)])
+            []
+              -- Caller specified an explicit module prefix that doesn't
+              -- match any symtab candidate — leave the name unresolved
+              -- so the emitter can hit the runtime-stub set instead of
+              -- routing to a wrong-module same-bare-name def.
+              | Just _ <- lookupMod -> (nm, [], [])
+              | otherwise ->
+                  let mangledNames = nubTexts (map snd candidates)
+                  in case mangledNames of
+                    [m] -> (nm { nameText = m }, [], [])
+                    _   -> (nm, [],
+                            [AmbiguousReference unqual (map fst candidates)])
             ((_,mangled):_) ->
               (nm { nameText = mangled },
                   ["Warning: multiple definitions of '" <> unqual

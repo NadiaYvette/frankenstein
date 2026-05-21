@@ -2651,6 +2651,154 @@ int64_t integer_to_string(int64_t x) {
  * kk_structural_eq which already handles the i64/string/arena cases. */
 int64_t unify(int64_t a, int64_t b) { return kk_structural_eq(a, b); }
 
+/* Mercury integer.// — sanitised name "integer___" (one underscore per
+ * each of '.', '/', '/' in the source name).  Plain integer division;
+ * returns 0 on zero divisor rather than trapping. */
+int64_t integer___(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+
+/* Mercury integer.rem — integer remainder. */
+int64_t integer_rem(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
+
+/* Mercury integer.mod — for our i64 model identical to rem. */
+int64_t integer_mod(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
+
+/* Mercury unary integer negation.  The bridge emits the source form
+ * `integer.(- X)` as a 1-arg call to "integer.-", but the runtime's
+ * `integer_zm` is binary subtraction.  Route to a dedicated unary stub
+ * (named `integer_neg`) so the call is saturated. */
+int64_t integer_neg(int64_t a) { return -a; }
+
+/* Mercury require.error/1 — fatal error with a message.  Prints the
+ * message (a kk_string_t pointer) to stderr with a trailing newline,
+ * then exits with status 1.  Used by surd's rational_norm when the
+ * denominator is zero. */
+int64_t require_error(int64_t msg_i) {
+    kk_print_str(msg_i);
+    fputc('\n', stdout);
+    fflush(stdout);
+    exit(1);
+    return 0;  /* unreachable */
+}
+
+/* Mercury require.func_error/3 — fatal error with type info,
+ * function-name string, and message.  Surd's rational_norm calls this
+ * via the 3-arg form `require.func_error(TypeCtorInfo, FnName, Msg)`;
+ * we ignore the type info and print the function name + message. */
+int64_t require_func_error(int64_t tci, int64_t fn_i, int64_t msg_i) {
+    (void)tci;
+    fputs("error: ", stdout);
+    if (fn_i != 0) kk_print_str(fn_i);
+    fputs(": ", stdout);
+    if (msg_i != 0) kk_print_str(msg_i);
+    fputc('\n', stdout);
+    fflush(stdout);
+    exit(1);
+    return 0;  /* unreachable */
+}
+
+/* Mercury integer.integer/1 — wraps an int as an integer.  In the
+ * i64-based model the wrap is identity. */
+int64_t integer_integer(int64_t x) { return x; }
+
+/* Atom "rational" — appears as a 0-arg arg to type_ctor_info inside
+ * rational_norm's division-by-zero error path that the smoke test
+ * never reaches.  Stub returns 0 so the link resolves. */
+int64_t rational(void) { return 0; }
+
+/* Mercury io.format/4 — after the bridge's output-arg-drop, the call
+ * shape is io_format(Fmt, Args, IO).  Fmt is a kk_string_t pointer.
+ * Args is the head of a list built from list_cons cells with
+ * poly_type-wrapped values (each element is a 1-field ctor for
+ * s/i/f/c wrapping its value).  Walks Fmt char by char, substituting
+ * each %X spec with the next list element.  Other chars print
+ * verbatim — Mercury's HLDS already decoded escape sequences at
+ * parse time. */
+int64_t io_format(int64_t fmt_i, int64_t args_list, int64_t io_state) {
+    if (fmt_i == 0) return io_state;
+    kk_string_t* s = (kk_string_t*)fmt_i;
+    int64_t n = s->byte_len;
+    if (n <= 0) return io_state;
+    char* buf = (char*)malloc((size_t)n);
+    if (!buf) return io_state;
+    char* p = buf;
+    /* Flatten rope into the buffer; leaves already give direct bytes. */
+    {
+        kk_string_t* st[64];
+        int top = 0;
+        st[top++] = s;
+        while (top > 0) {
+            kk_string_t* cur = st[--top];
+            if (cur->kind == KK_STR_LEAF) {
+                const char* bytes = cur->u.bytes;
+                for (int64_t i = 0; i < cur->byte_len; i++) *p++ = bytes[i];
+            } else if (cur->kind == KK_STR_SLICE) {
+                /* For SLICE, u.cat.r is reused to hold the bytes pointer. */
+                const char* bytes = (const char*)cur->u.cat.r;
+                for (int64_t i = 0; i < cur->byte_len; i++) *p++ = bytes[i];
+            } else {
+                /* CONCAT — push right first so left is processed first. */
+                if (top + 2 > 64) break;
+                st[top++] = cur->u.cat.r;
+                st[top++] = cur->u.cat.l;
+            }
+        }
+    }
+
+    int64_t cur_args = args_list;
+    for (int64_t i = 0; i < n; i++) {
+        char c = buf[i];
+        if (c == '%' && i + 1 < n) {
+            char spec = buf[i + 1];
+            if (spec == '%') {
+                putchar('%');
+                i++;
+                continue;
+            }
+            /* Pop next element from the list (cons cell, 2 fields). */
+            if (cur_args != 0 && kk_is_heap_ptr(cur_args)
+                && kk_nfields(cur_args) == 2) {
+                int64_t head = kk_field(cur_args, 0);
+                int64_t tail = kk_field(cur_args, 1);
+                /* Poly_type wrapper — 1 field holding the inner value. */
+                int64_t val =
+                    (kk_is_heap_ptr(head) && kk_nfields(head) >= 1)
+                    ? kk_field(head, 0) : head;
+                switch (spec) {
+                  case 's':
+                    if (val != 0) kk_print_str(val);
+                    break;
+                  case 'd':
+                  case 'i':
+                    printf("%lld", (long long)val);
+                    break;
+                  case 'f': {
+                    double d;
+                    memcpy(&d, &val, 8);
+                    printf("%f", d);
+                    break;
+                  }
+                  case 'c':
+                    putchar((int)val);
+                    break;
+                  default:
+                    putchar('%');
+                    putchar(spec);
+                    break;
+                }
+                cur_args = tail;
+                i++;  /* skip spec char */
+            } else {
+                putchar(c);
+            }
+        } else {
+            putchar(c);
+        }
+    }
+    fflush(stdout);
+    free(buf);
+    return io_state;
+}
+
 int64_t mercury_collect_choices(int64_t fn_ptr) {
     typedef int64_t (*body_fn_t)(void);
     body_fn_t body = (body_fn_t)fn_ptr;

@@ -43,7 +43,13 @@ import Text.Read (readMaybe)
 -- | Translate a full Mercury HLDS module to Frankenstein Core
 translateHlds :: MercuryHLDS -> Either Text Program
 translateHlds hlds = do
-  defs <- mapM translatePred (hldsPreds hlds)
+  let moduleCtors =
+        [ (hldsModule hlds <> "." <> cname, cname)
+        | t <- hldsTypes hlds, (cname, _) <- typeDeclCtors t ]
+      userCtorNames = Set.fromList ([q | (q, _) <- moduleCtors]
+                                 ++ [b | (_, b) <- moduleCtors])
+      knownCtors = Set.union userCtorNames stdlibCtorNames
+  defs <- mapM (translatePred knownCtors (hldsModule hlds)) (hldsPreds hlds)
   let dataDecls = map (translateMercuryTypeDecl (hldsModule hlds)) (hldsTypes hlds)
       -- Default handler for exn.fail: returns 0
       -- Named "mercury_fail" with empty module to match the evidence pass's
@@ -114,9 +120,27 @@ translateHlds hlds = do
 translateMultiHlds :: [MercuryHLDS] -> Either Text Program
 translateMultiHlds [] = Left "translateMultiHlds: empty module list"
 translateMultiHlds (entry : rest) = do
+  -- Build a global ctor-name set from every module's data decls plus
+  -- ctor names that appear in deconstruct contexts in pred bodies.
+  -- The determinism-stage HLDS dump often omits `:- type` declarations,
+  -- so the body scan is essential: a ctor used in `Var = mod.ctor(args)`
+  -- with Var an input arg is unambiguously a real data constructor.
+  -- Includes both bare ('r') and qualified ('rational.r') forms so
+  -- parseCtorApp's preserved qualifier matches.
+  let moduleCtors h =
+        [ (hldsModule h <> "." <> cname, cname)
+        | t <- hldsTypes h, (cname, _) <- typeDeclCtors t ]
+      userCtorPairs = moduleCtors entry ++ concatMap moduleCtors rest
+      userCtorNames = Set.fromList ([q | (q, _) <- userCtorPairs]
+                                 ++ [b | (_, b) <- userCtorPairs])
+      bodyCtorPairs = concatMap collectCtorsFromPred (hldsPreds entry)
+                   ++ concatMap (\h -> concatMap collectCtorsFromPred (hldsPreds h)) rest
+      bodyCtorNames = Set.fromList ([q | (q, _) <- bodyCtorPairs]
+                                 ++ [b | (_, b) <- bodyCtorPairs])
+      knownCtors = Set.unions [userCtorNames, bodyCtorNames, stdlibCtorNames]
   -- Translate every module's predicates and data decls.
-  entryDefs <- mapM translatePred (hldsPreds entry)
-  restDefsLists <- mapM (\h -> mapM translatePred (hldsPreds h)) rest
+  entryDefs <- mapM (translatePred knownCtors (hldsModule entry)) (hldsPreds entry)
+  restDefsLists <- mapM (\h -> mapM (translatePred knownCtors (hldsModule h)) (hldsPreds h)) rest
   let entryData = map (translateMercuryTypeDecl (hldsModule entry)) (hldsTypes entry)
       restData  = concatMap (\h -> map (translateMercuryTypeDecl (hldsModule h)) (hldsTypes h)) rest
       restDefs  = concat restDefsLists
@@ -227,8 +251,8 @@ translateMercuryTypeDecl modName td = DataDecl
   }
 
 -- | Translate a single Mercury predicate to a Frankenstein definition
-translatePred :: MercuryPred -> Either Text Def
-translatePred pred' = do
+translatePred :: Set Text -> Text -> MercuryPred -> Either Text Def
+translatePred knownCtors srcModule pred' = do
   let -- The user's @main(io::di, io::uo)@ predicate is renamed to
       -- @mercury_main_io@ so the synthesised no-arg @main@ alias can
       -- delegate to it without a name collision.
@@ -246,7 +270,13 @@ translatePred pred' = do
         , all (\m -> m == ModeDi || m == ModeUo) (predModes pred')
         = "main_io_impl"
         | otherwise = predName pred' <> "__" <> T.pack (show inputArity)
-      name = QName "mercury" (Name effectiveName 0)
+      -- Use the actual source module name rather than a synthetic
+      -- "mercury" tag.  The linker resolves cross-module calls like
+      -- `rational.cmp` against the bare name `cmp__N` in the symbol
+      -- table, preferring the candidate whose home module matches
+      -- the dot-split prefix — that only works if defs carry their
+      -- real source module.
+      name = QName srcModule (Name effectiveName 0)
       -- Separate input and output modes
       pmodes = predModes pred'
       indexedModes = zip [0..length pmodes - 1] pmodes
@@ -297,8 +327,8 @@ translatePred pred' = do
       -- ELet shadow the default by lexical scope.
       bodyExpr goal = case outputName of
         Just n  -> ELet [[Bind (Name n 0) anyTy (ELit (LitInt 0)) DefVal]]
-                         (translateGoalK initialEnv goal terminator)
-        Nothing -> translateGoalK initialEnv goal terminator
+                         (translateGoalK knownCtors initialEnv goal terminator)
+        Nothing -> translateGoalK knownCtors initialEnv goal terminator
       rawGoalBody = case predGoal pred' of
         Just goal -> bodyExpr goal
         Nothing   -> ELit (LitString "no body")
@@ -310,7 +340,7 @@ translatePred pred' = do
           -- the test result gets discarded. Use translateGoalAsTest which
           -- yields the test result directly as the scrutinee.
           let testExpr = case (outputName, predGoal pred') of
-                (Nothing, Just goal) -> translateGoalAsTest initialEnv goal
+                (Nothing, Just goal) -> translateGoalAsTest knownCtors initialEnv goal
                 _                    -> rawGoalBody
           in ECase testExpr
                [ Branch (PatLit (LitInt 1)) Nothing (ELit (LitInt 1))
@@ -359,18 +389,24 @@ detToEffectRow CCNondet  = EffectRowExtend (QName "mercury" (Name "exn" 0))
 -- predicates with no output variable, where the goal IS the test.
 -- For conjunctions, evaluates each goal and returns the last result.
 -- For a single comparison, returns the comparison result.
-translateGoalAsTest :: Set Text -> MercuryGoal -> Expr
-translateGoalAsTest env (GoalCall predName' args)
+translateGoalAsTest :: Set Text -> Set Text -> MercuryGoal -> Expr
+translateGoalAsTest knownCtors env (GoalCall predName' args)
   | Just op <- T.stripPrefix "int." predName'
   , [lhs, rhs] <- args =
       EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
   | otherwise =
-      let taggedName = predName' <> "__" <> T.pack (show (length args))
+      let isStdlibPrefixed n = any (`T.isPrefixOf` n)
+            ["io.", "int.", "integer.", "string.", "list.", "char."
+            , "bool.", "require.", "exception.", "math.", "float."
+            , "builtin.", "private_builtin."]
+          taggedName
+            | isStdlibPrefixed predName' = predName'
+            | otherwise = predName' <> "__" <> T.pack (show (length args))
       in EApp (EVar (Name taggedName 0))
            (map (\a -> EVar (Name a 0)) args)
-translateGoalAsTest env (GoalConj goals) = case goals of
+translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
   []  -> ELit (LitInt 1)
-  [g] -> translateGoalAsTest env g
+  [g] -> translateGoalAsTest knownCtors env g
   _   -> -- For multi-goal conjunctions, bind intermediate goals and
          -- return the last. Use CPS for all but the last goal.
          let initGoals = init goals
@@ -378,25 +414,25 @@ translateGoalAsTest env (GoalConj goals) = case goals of
              envsFor   = scanl extendBindingsFor env goals
              initPairs = zip initGoals envsFor
              lastEnv   = envsFor !! (length goals - 1)
-             innerExpr = translateGoalAsTest lastEnv lastGoal
-         in foldr (\(g, e) acc -> translateGoalK e g acc) innerExpr initPairs
-translateGoalAsTest env (GoalIfThenElse cond then' else') =
-  ECase (translateGoalAsTest env cond)
-    [ Branch (PatLit (LitInt 1)) Nothing (translateGoalAsTest env then')
-    , Branch (PatWild boolTy)    Nothing (translateGoalAsTest env else')
+             innerExpr = translateGoalAsTest knownCtors lastEnv lastGoal
+         in foldr (\(g, e) acc -> translateGoalK knownCtors e g acc) innerExpr initPairs
+translateGoalAsTest knownCtors env (GoalIfThenElse cond then' else') =
+  ECase (translateGoalAsTest knownCtors env cond)
+    [ Branch (PatLit (LitInt 1)) Nothing (translateGoalAsTest knownCtors env then')
+    , Branch (PatWild boolTy)    Nothing (translateGoalAsTest knownCtors env else')
     ]
   where boolTy = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
-translateGoalAsTest env goal =
+translateGoalAsTest knownCtors env goal =
   -- Fallback: use CPS with the result as terminator — this handles
   -- unification and other goal types correctly.
-  translateGoalK env goal (ELit (LitInt 1))
+  translateGoalK knownCtors env goal (ELit (LitInt 1))
 
 -- | Translate a Mercury goal to a Frankenstein expression (legacy
 -- zero-knowledge entry point). Prefer 'translateGoalK' which threads
 -- a binding environment and continuation so that variables flow
 -- correctly across conjuncts.
 translateGoal :: MercuryGoal -> Expr
-translateGoal g = translateGoalK Set.empty g (ELit (LitInt 0))
+translateGoal g = translateGoalK Set.empty Set.empty g (ELit (LitInt 0))
 
 -- | CPS-style goal translation.
 --
@@ -404,11 +440,11 @@ translateGoal g = translateGoalK Set.empty g (ELit (LitInt 0))
 -- bound on entry (@env@) and a continuation expression @k@ that represents
 -- the "rest of the computation" after @g@ succeeds. Bindings introduced by
 -- @g@ (construct, deconstruct, unify-with-var, switch arm) scope over @k@.
-translateGoalK :: Set Text -> MercuryGoal -> Expr -> Expr
+translateGoalK :: Set Text -> Set Text -> MercuryGoal -> Expr -> Expr
 
 -- Unification. Several cases, depending on which side is a literal and
 -- which side is a fresh variable that needs to be bound.
-translateGoalK env (GoalUnify x y) k =
+translateGoalK _kctors env (GoalUnify x y) k =
   let lhsLit = readMaybe (T.unpack x) :: Maybe Integer
       rhsLit = readMaybe (T.unpack y) :: Maybe Integer
       lhsStr = parseMercuryStringLit x
@@ -442,7 +478,7 @@ translateGoalK env (GoalUnify x y) k =
                         [EVar (Name x 0), EVar (Name y 0)])
                   DefVal]] k
 
-translateGoalK _env (GoalCall predName' args) k =
+translateGoalK _kctors _env (GoalCall predName' args) k =
   -- Identify the output variable using a "last unbound arg" heuristic.
   -- Mercury HLDS lists every argument of a predicate at the call site,
   -- inputs and outputs alike.  For det predicates, the output is bound
@@ -451,10 +487,11 @@ translateGoalK _env (GoalCall predName' args) k =
   -- produces a free reference that the emitter resolves to a top-level
   -- 0-arg call (`@STATE_VARIABLE_IO_8$0()`), surfacing later as an
   -- unresolved symbol at link time.
-  let (callInputs, outputBinding) = case args of
+  let env = _env
+      (callInputs, outputBinding) = case args of
         [] -> ([], Nothing)
         _  -> let outName = last args
-              in if Set.member outName _env
+              in if Set.member outName env
                  then (args, Nothing)
                  else (init args, Just outName)
       -- Same arity-suffix convention as translatePred uses for def
@@ -482,6 +519,15 @@ translateGoalK _env (GoalCall predName' args) k =
             case args of
               (s:_) -> EApp (EVar (Name rtName 0)) [EVar (Name s 0)]
               []    -> EApp (EVar (Name rtName 0)) []
+        -- Unary integer negation: the bridge's parseMercuryBuiltin
+        -- emits `integer.(- X)` as `integer.-` with 1 arg.  The
+        -- runtime's @integer_zm@ is binary subtraction; route to a
+        -- dedicated unary stub instead so the call is saturated.
+        | predName' == "integer.-", [a] <- callInputs =
+            EApp (EVar (Name "integer_neg" 0)) [EVar (Name a 0)]
+        -- Unary integer plus: identity in the i64 model.
+        | predName' == "integer.+", [a] <- callInputs =
+            EVar (Name a 0)
         | otherwise =
             EApp (EVar (Name taggedName 0))
                  (map (\a -> EVar (Name a 0)) callInputs)
@@ -500,76 +546,98 @@ translateGoalK _env (GoalCall predName' args) k =
        Nothing      -> ELet [[Bind (Name "_" 0) intTy callExpr DefVal]] k
        Just outName -> ELet [[Bind (Name outName 0) intTy callExpr DefVal]] k
 
-translateGoalK env (GoalConj goals) k =
+translateGoalK kctors env (GoalConj goals) k =
   -- foldr: first goal wraps the rest (left-to-right execution order).
-  let go (g, envNow) acc = translateGoalK envNow g acc
+  let go (g, envNow) acc = translateGoalK kctors envNow g acc
       envsFor = scanl extendBindingsFor env goals
       pairs = zip goals envsFor
   in foldr go k pairs
 
-translateGoalK env (GoalDisj goals) k = case goals of
+translateGoalK kctors env (GoalDisj goals) k = case goals of
   []     -> EPerform (QName "mercury" (Name "fail" 0)) []
-  [g]    -> translateGoalK env g k
+  [g]    -> translateGoalK kctors env g k
   (g:gs) -> ECase (EPerform (QName "mercury" (Name "choose" 0)) [])
-              [ Branch (PatLit (LitInt 1)) Nothing (translateGoalK env g k)
+              [ Branch (PatLit (LitInt 1)) Nothing (translateGoalK kctors env g k)
               , Branch (PatWild boolTy)    Nothing
-                       (translateGoalK env (GoalDisj gs) k)
+                       (translateGoalK kctors env (GoalDisj gs) k)
               ]
 
-translateGoalK env (GoalNot goal) k =
+translateGoalK kctors env (GoalNot goal) k =
   -- Unchanged semantics: wrap negation as a call to a runtime helper.
   ELet [[Bind (Name "_" 0) intTy
            (EApp (EVar (Name "mercury_not" 0))
-                 [ELam [] (translateGoalK env goal (ELit (LitInt 0)))])
+                 [ELam [] (translateGoalK kctors env goal (ELit (LitInt 0)))])
            DefVal]]
        k
 
-translateGoalK env (GoalIfThenElse cond then' else') k =
-  ECase (translateGoalK env cond (ELit (LitInt 1)))
-    [ Branch (PatLit (LitInt 1)) Nothing (translateGoalK env then' k)
-    , Branch (PatWild boolTy)    Nothing (translateGoalK env else' k)
+translateGoalK kctors env (GoalIfThenElse cond then' else') k =
+  -- The cond must yield the boolean test result as the scrutinee.
+  -- translateGoalK threads the terminator (the value to leave in the
+  -- continuation), which would discard the actual test result and
+  -- always feed `1` back, hard-coding the then-branch.  Use the
+  -- test-form translator instead.
+  ECase (translateGoalAsTest kctors env cond)
+    [ Branch (PatLit (LitInt 1)) Nothing (translateGoalK kctors env then' k)
+    , Branch (PatWild boolTy)    Nothing (translateGoalK kctors env else' k)
     ]
 
-translateGoalK env (GoalSwitch var cases) k =
+translateGoalK kctors env (GoalSwitch var cases) k =
   ECase (EVar (Name var 0))
     [ Branch (PatCon (QName "" (Name tag 0)) []) Nothing
-             (translateGoalK env body k)
+             (translateGoalK kctors env body k)
     | (tag, body) <- cases
     ]
 
--- GoalConstruct: "LHS = ctor(args)". If LHS is already bound we treat it
--- as a deconstruct (pattern match); otherwise it's a construct (allocate).
-translateGoalK env (GoalConstruct var ctor args) k
+-- GoalConstruct: "LHS = ctor(args)".
+-- - If LHS is already bound: deconstruct (pattern match against the ctor).
+--   The ctor name may be module-qualified ("rational.r") from parseCtorApp;
+--   strip the prefix for the pattern's QName.
+-- - If LHS is fresh AND ctor is in knownCtors: construct (allocate).
+-- - If LHS is fresh AND ctor is NOT in knownCtors: it's actually a user
+--   function or stdlib runtime stub disguised as a ctor by parseCtorApp.
+--   Route to GoalCall semantics so the linker can find the def.
+translateGoalK kctors env (GoalConstruct var ctor args) k
   | Set.member var env =
-      -- Deconstruct: match scrutinee against the ctor, bind fresh arg vars.
-      ECase (EVar (Name var 0))
-        [ Branch (PatCon (QName "" (Name ctor 0))
+      -- Deconstruct: match scrutinee against the ctor.  Use the bare
+      -- ctor name (post-strip) so the pattern matches the data-decl's
+      -- ECon, which is also emitted bare.
+      let bareCtor = case T.breakOnEnd "." ctor of
+            ("", n) -> n
+            (_,  n) -> n
+      in ECase (EVar (Name var 0))
+        [ Branch (PatCon (QName "" (Name bareCtor 0))
                    [PatVar (Name a 0) anyTy | a <- args])
                  Nothing k
         ]
-  | otherwise =
-      -- Construct: allocate the ctor and let-bind LHS.
-      -- Recognise int / string literal args so they emit as ELit
-      -- (not bogus EVar refs that surface as 0-arg link symbols like
-      -- `_0$0` from `type_ctor_info(rational, rational, 0)`).
+  | Set.member ctor kctors || Set.member bareCtor kctors =
+      -- Real ctor allocation.  ECon name is bare (the data-decl form).
       ELet [[Bind (Name var 0) anyTy
-               (EApp (ECon (QName "" (Name ctor 0)))
+               (EApp (ECon (QName "" (Name bareCtor 0)))
                      (map argExpr args))
                DefVal]] k
+  | otherwise =
+      -- Not a ctor — must be a function call disguised by parseCtorApp.
+      -- Re-emit through the GoalCall path with the LHS appended as the
+      -- output arg.
+      translateGoalK kctors env (GoalCall ctor (args ++ [var])) k
+  where
+    bareCtor = case T.breakOnEnd "." ctor of
+      ("", n) -> n
+      (_,  n) -> n
 
-translateGoalK _env (GoalDeconstruct var ctor args) k =
+translateGoalK _kctors _env (GoalDeconstruct var ctor args) k =
   ECase (EVar (Name var 0))
     [ Branch (PatCon (QName "" (Name ctor 0))
                [PatVar (Name a 0) anyTy | a <- args])
              Nothing k
     ]
 
-translateGoalK _env (GoalForeign body) k =
+translateGoalK _kctors _env (GoalForeign body) k =
   ELet [[Bind (Name "_" 0) intTy
            (EApp (EVar (Name "foreign" 0)) [ELit (LitString body)])
            DefVal]] k
 
-translateGoalK _env (GoalUnparsed text) k =
+translateGoalK _kctors _env (GoalUnparsed text) k =
   ELet [[Bind (Name "_" 0) intTy
            (EApp (EVar (Name "unparsed_goal" 0)) [ELit (LitString text)])
            DefVal]] k
@@ -598,6 +666,55 @@ extendBindingsFor env g = case g of
   where
     isJust (Just _) = True
     isJust Nothing  = False
+
+-- | Find ctor names used in deconstruct contexts within a pred's
+-- body.  A deconstruct is a GoalConstruct where the LHS variable is
+-- an input arg of the pred (already bound on entry).  Such usages
+-- can only be data constructors (not function calls).  Returns
+-- (qualified, bare) pairs so the matcher catches either spelling.
+collectCtorsFromPred :: MercuryPred -> [(Text, Text)]
+collectCtorsFromPred pred' =
+  let -- Input args are everything bound on entry: clause-head names
+      -- whose mode is in or di.
+      indexed   = zip [0::Int ..] (predModes pred')
+      inputIxs  = [i | (i, m) <- indexed, m == ModeIn || m == ModeDi]
+      args      = predArgNames pred'
+      inputArgs = Set.fromList [args !! i | i <- inputIxs, i < length args]
+      go env g = case g of
+        GoalConstruct v ctor _
+          | Set.member v env -> [splitCtor ctor]
+          | otherwise        -> []
+        GoalConj gs ->
+          let envs = scanl extendBindingsFor env gs
+          in concat (zipWith go envs gs)
+        GoalDisj gs            -> concatMap (go env) gs
+        GoalIfThenElse c t e   -> go env c ++ go env t ++ go env e
+        GoalNot g'             -> go env g'
+        GoalSwitch _ cases     -> concatMap (\(_, b) -> go env b) cases
+        _                      -> []
+      splitCtor c = case T.breakOnEnd "." c of
+        ("", n) -> (c, n)         -- bare ctor (no module)
+        (_,  n) -> (c, n)         -- qualified — keep full + bare name
+  in case predGoal pred' of
+       Just goal -> go inputArgs goal
+       Nothing   -> []
+
+-- | Mercury stdlib ctors the bridge must treat as real data
+-- constructors rather than function calls, even though parseCtorApp
+-- can't tell from the syntax alone.  Includes both bare and
+-- module-qualified forms so the disambiguation in
+-- @translateGoalK GoalConstruct@ catches either spelling.
+stdlibCtorNames :: Set Text
+stdlibCtorNames = Set.fromList
+  [ "s", "i", "f", "c"
+  , "string.s", "string.i", "string.f", "string.c"
+  , "type_ctor_info", "private_builtin.type_info"
+  , "list_nil", "list_cons"            -- emitted by parseListLiteral
+  , "list.[]"
+  -- builtin comparison_result tags (parseQualifiedOp emits these)
+  , "builtin.=", "builtin.<", "builtin.>"
+  , "=", "<", ">"
+  ]
 
 -- | Lift a Mercury HLDS atom into the right Core expression: int
 -- literal → ELit (LitInt); double-quoted string → ELit (LitString);

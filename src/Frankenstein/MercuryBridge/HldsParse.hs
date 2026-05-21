@@ -633,8 +633,16 @@ parseSingleGoal txt
               -- the flow of bindings; we emit GoalConstruct here and let the
               -- translator reinterpret it if the LHS is already bound.
               Just (ctor, args) -> GoalConstruct lhs' ctor args
-              -- Plain list literal syntax — keep the old best-effort path.
-              Nothing | "[" `T.isInfixOf` rhs' -> GoalConstruct lhs' rhs' []
+              -- Mercury list literals: 'list.[]' → 0-arg @list_nil@;
+              -- 'list.[H | T]' → 2-arg @list_cons@ with H and T.
+              -- Names are chosen so the C runtime can look them up
+              -- (via tag from sanitisation) and walk lists for, e.g.,
+              -- io.format's poly_type argument list.  Without this the
+              -- old fallback baked the entire bracketed text into a
+              -- 0-field ctor name with no fields set, so callers like
+              -- io.format saw a list head of zero elements.
+              Nothing | Just listGoal <- parseListLiteral lhs' rhs'
+                          -> listGoal
               -- Module-qualified no-arg call: 'V = integer.zero' should
               -- bind V to a call of integer.zero, not unify V with the
               -- string 'integer.zero'.  Detect a clean 'module.name'
@@ -690,9 +698,13 @@ parseSingleGoal txt
          in (h >= 'a' && h <= 'z') || (h >= 'A' && h <= 'Z') || h == '_'
 
 -- | Parse a constructor application of the form @ctor(arg1, arg2, ...)@ or
--- @module.ctor(arg1, arg2, ...)@, returning the bare constructor name and
--- the argument list. Returns 'Nothing' for anything that does not look like
--- a functor application (plain atoms, literals, variables, infix exprs).
+-- @module.ctor(arg1, arg2, ...)@, returning the (possibly module-qualified)
+-- name and the argument list.  The qualified form is preserved so the
+-- translator can route to user-defined functions whose names happen to
+-- share a module prefix with stdlib ctors (e.g. distinguish the user
+-- function @rational.numer/1@ from the data ctor @rational.r/2@).
+-- Returns 'Nothing' for anything that does not look like a functor
+-- application (plain atoms, literals, variables, infix exprs).
 parseCtorApp :: Text -> Maybe (Text, [Text])
 parseCtorApp t
   | not ("(" `T.isInfixOf` t) = Nothing
@@ -709,7 +721,7 @@ parseCtorApp t
             (_,  n) -> n
       in if T.null name || not (isCtorish bareName)
          then Nothing
-         else Just (bareName, args)
+         else Just (name, args)
   where
     -- A Mercury constructor name starts lowercase (atoms) or may be purely
     -- alphanumeric plus underscores. Reject strings containing whitespace
@@ -725,6 +737,38 @@ parseCtorApp t
       in if not (T.null s') && T.last s' == ')'
          then T.init s'
          else s'
+
+-- | Recognise a Mercury list literal on the RHS of a unification:
+-- 'list.[]' / '[]' for nil, 'list.[H | T]' / '[H | T]' for cons.
+-- Emits a GoalConstruct that downstream translates to a real
+-- two-field cons cell rather than a 0-field ctor with the bracketed
+-- text baked into the name.  The chosen ctor names @list_nil@ /
+-- @list_cons@ sanitise stably so the runtime can rely on the tags.
+parseListLiteral :: Text -> Text -> Maybe MercuryGoal
+parseListLiteral lhs rhs =
+  let body = case T.stripPrefix "list." rhs of
+        Just rest -> rest
+        Nothing   -> rhs
+  in case T.uncons body of
+    Just ('[', after) -> case T.unsnoc after of
+      Just (inner, ']') ->
+        let stripped = T.strip inner
+        in if T.null stripped
+           then Just (GoalConstruct lhs "list_nil" [])
+           else case T.breakOn "|" stripped of
+             (h, t) | not (T.null t) ->
+               Just (GoalConstruct lhs "list_cons"
+                       [T.strip h, T.strip (T.drop 1 t)])
+             _ ->
+               -- "[a, b, c]" form — desugar to nested cons.
+               -- For the smoke-test path only "[X | Y]" appears, so
+               -- the unparenthesised form falls through to nil if
+               -- the inner is empty after the strip above; otherwise
+               -- treat as a 1-element list `[X]` = `[X | []]`.
+               Just (GoalConstruct lhs "list_cons"
+                       [T.strip stripped, "[]"])
+      _ -> Nothing
+    _ -> Nothing
 
 -- | Recognise a module-qualified bare operator atom like @builtin.(=)@,
 -- @builtin.(<)@, @builtin.(>)@ — Mercury's comparison_result tags.

@@ -914,7 +914,16 @@ emitProgramText prog =
     , "  func.func private @integer_signum(i64) -> i64"
     , "  func.func private @integer_float(i64) -> i64"
     , "  func.func private @integer_to_string(i64) -> i64"
+    , "  func.func private @integer___(i64, i64) -> i64"
+    , "  func.func private @integer_rem(i64, i64) -> i64"
+    , "  func.func private @integer_mod(i64, i64) -> i64"
+    , "  func.func private @integer_neg(i64) -> i64"
     , "  func.func private @unify(i64, i64) -> i64"
+    , "  func.func private @io_format(i64, i64, i64) -> i64"
+    , "  func.func private @require_error(i64) -> i64"
+    , "  func.func private @require_func_error(i64, i64, i64) -> i64"
+    , "  func.func private @integer_integer(i64) -> i64"
+    , "  func.func private @rational() -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1360,7 +1369,16 @@ emitProgramWasm prog =
     , "  func.func private @integer_signum(i64) -> i64"
     , "  func.func private @integer_float(i64) -> i64"
     , "  func.func private @integer_to_string(i64) -> i64"
+    , "  func.func private @integer___(i64, i64) -> i64"
+    , "  func.func private @integer_rem(i64, i64) -> i64"
+    , "  func.func private @integer_mod(i64, i64) -> i64"
+    , "  func.func private @integer_neg(i64) -> i64"
     , "  func.func private @unify(i64, i64) -> i64"
+    , "  func.func private @io_format(i64, i64, i64) -> i64"
+    , "  func.func private @require_error(i64) -> i64"
+    , "  func.func private @require_func_error(i64, i64, i64) -> i64"
+    , "  func.func private @integer_integer(i64) -> i64"
+    , "  func.func private @rational() -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4117,7 +4135,18 @@ externalRuntimeFns = Set.fromList
   , "integer_zl", "integer_zg", "integer_zezl", "integer_zgze"
   , "integer_zp", "integer_zm", "integer_zt", "integer_zs"
   , "integer_abs", "integer_signum", "integer_float", "integer_to_string"
+  , "integer___"   -- integer.// (integer division — name sanitises
+                   -- as dot + two slashes → three underscores)
+  , "integer_rem"  -- integer.rem
+  , "integer_mod"  -- integer.mod
+  , "integer_neg"  -- unary integer negation (saturated counterpart to
+                   -- the binary integer_zm)
   , "unify"
+  , "io_format"     -- io.format(fmt, args, io) — pretty-printer
+  , "require_error"      -- require.error/1 — fatal with message
+  , "require_func_error" -- require.func_error/3 — same with type-info
+  , "integer_integer"    -- integer.integer/1 — wrap (identity in i64 model)
+  , "rational"      -- atom name passed to type_ctor_info (error path)
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4175,7 +4204,10 @@ externalRuntimeArity = Map.fromList
   , ("integer_zp", 2), ("integer_zm", 2), ("integer_zt", 2), ("integer_zs", 2)
   , ("integer_abs", 1), ("integer_signum", 1), ("integer_float", 1)
   , ("integer_to_string", 1)
+  , ("integer___", 2), ("integer_rem", 2), ("integer_mod", 2), ("integer_neg", 1)
   , ("unify", 2)
+  , ("io_format", 3), ("require_error", 1), ("rational", 0)
+  , ("require_func_error", 3), ("integer_integer", 1)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

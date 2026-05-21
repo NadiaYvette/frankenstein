@@ -232,11 +232,16 @@ patWild body =
       , ("body", body)
       ]
 
+-- The first argument is a pre-rendered QName JSON (use 'idrisQName' so
+-- pattern and construction sites agree on the {module, name} split —
+-- 'Frankenstein.Core.ConTags.conKey' looks up tags by 'qnameName.text'
+-- alone, so any split-vs-flat mismatch produces inconsistent tags and
+-- pattern matches that never fire.
 patCon : String -> List String -> String -> String
-patCon name binders body =
+patCon qnameJson binders body =
     let bs = map (\b => jsonObj [("name", mkName b)]) binders
         patObj = jsonObj $
-                   ("name", mkQName "" name)
+                   ("name", qnameJson)
                    :: (if isEmpty bs then [] else [("args", jsonArr bs)])
     in jsonObj
           [ ("pattern", jsonObj [("pat_con", patObj)])
@@ -356,9 +361,9 @@ mutual
 
   renderConAlt : NamedConAlt -> String
   renderConAlt (MkNConAlt name _ _ args body) =
-      let patName = showFullName name
+      let qnameJs = idrisQName name
           binders = map (\a => snd (splitName a)) args
-      in patCon patName binders (renderExpr body)
+      in patCon qnameJs binders (renderExpr body)
 
   renderConstAlt : NamedConstAlt -> String
   renderConstAlt (MkNConstAlt c body) =

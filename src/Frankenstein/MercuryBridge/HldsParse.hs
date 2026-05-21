@@ -336,11 +336,19 @@ extractNameArity header =
 
 parseModeDecl :: Text -> ([MercuryMode], MercuryDet)
 parseModeDecl line =
-  -- ":- mode name(in, in, out) is det."
+  -- Predicate form:  ":- mode name(in, in, out) is det."
+  -- Function form:   ":- mode name(in) = out is det."
+  -- The function form has an extra return-mode after the closing paren
+  -- and before " is ".  Pick it up by inspecting the gap.
   let afterParen = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') line
-      modes = map parseMode $ T.splitOn "," afterParen
-      -- Extract determinism after "is"
-      afterIs = T.strip $ T.drop 4 $ snd $ T.breakOn " is " line  -- drop " is "
+      paramModes = map parseMode $ T.splitOn "," afterParen
+      afterCloseParen = T.drop 1 $ T.dropWhile (/= ')') line
+      (gapBeforeIs, _) = T.breakOn " is " afterCloseParen
+      retModes = case T.stripPrefix "=" (T.strip gapBeforeIs) of
+        Just rest -> [parseMode (T.strip rest)]
+        Nothing   -> []
+      modes = paramModes ++ retModes
+      afterIs = T.strip $ T.drop 4 $ snd $ T.breakOn " is " line
       det = parseDet $ T.takeWhile (/= '.') afterIs
   in (modes, det)
 
@@ -382,16 +390,46 @@ extractArgNames ls =
           -- "R1 < R2".  Detect this and split on the infix operator.
           infixOps = [" < ", " > ", " =< ", " >= ", " == ", " + ", " - "
                      , " * ", " / "]
-      in case commaArgs of
-           [single] | any (`T.isInfixOf` single) infixOps ->
-             let tryOps []         = [single]
-                 tryOps (op:rest)
-                   | op `T.isInfixOf` single =
-                       let (l, r) = T.breakOn op single
-                       in [T.strip l, T.strip (T.drop (T.length op) r)]
-                   | otherwise = tryOps rest
-             in tryOps infixOps
-           _ -> commaArgs
+          -- Prefix-operator clause heads (unary +/-/~ on a single arg)
+          -- arrive as a single comma-arg that begins with the op then a
+          -- space: "+ Rat", "- HeadVar__1".  Strip the operator so the
+          -- arg name matches references in the goal body.  Without this
+          -- the param surfaces in MLIR as the sanitised "zp_Rat" /
+          -- "zm_HeadVar__1" and the body's "Rat" / "HeadVar__1" refs
+          -- escape as unresolved 0-arg calls.
+          stripPrefixOp s =
+            let s' = T.stripStart s
+            in case T.uncons s' of
+                 Just (c, rest)
+                   | (c == '+' || c == '-' || c == '~')
+                   , Just (' ', _) <- T.uncons rest
+                   -> T.strip rest
+                 _ -> s
+          paramArgs = case commaArgs of
+            [single] | any (`T.isInfixOf` single) infixOps ->
+              let tryOps []         = [stripPrefixOp single]
+                  tryOps (op:rest)
+                    | op `T.isInfixOf` single =
+                        let (l, r) = T.breakOn op single
+                        in [T.strip l, T.strip (T.drop (T.length op) r)]
+                    | otherwise = tryOps rest
+              in tryOps infixOps
+            [single] -> [stripPrefixOp single]
+            _ -> commaArgs
+          -- Function-form clause heads:  "pred(args) = OutVar :-"
+          -- Capture the OutVar so the translator can bind the output of
+          -- the body to it.  Without this, function-mode predicates lose
+          -- their return-value slot and the body emits the deconstructed
+          -- variable as a free reference at link time.
+          afterCloseParen = T.strip $ T.drop 1 $ T.dropWhile (/= ')') clauseHead
+          outArg = case T.stripPrefix "=" afterCloseParen of
+            Just rest ->
+              let rest' = T.strip rest
+                  beforeColon = case T.breakOn ":-" rest' of
+                    (b, _) -> T.strip b
+              in [beforeColon | not (T.null beforeColon)]
+            Nothing -> []
+      in paramArgs ++ outArg
     [] -> []
   where
     isClauseHead l =
@@ -556,8 +594,12 @@ parseSingleGoal txt
           rhs' = T.strip (T.drop 3 rhs)
           lhs' = T.strip lhs
       in case parseMercuryBuiltin rhs' of
-           -- RHS is "module.(X op Y)" form — bind LHS to the binop result.
-           Just (GoalCall op opArgs) -> GoalConstruct lhs' op opArgs
+           -- RHS is "module.(X op Y)" or "module.(op X)" form — emit as
+           -- a function call with LHS appended as the synthesised output
+           -- arg.  GoalConstruct would route through ECon and allocate a
+           -- bogus ctor; GoalCall routes through EApp to a runtime stub
+           -- (e.g. @integer_zm) which is what these ops are.
+           Just (GoalCall op opArgs) -> GoalCall op (opArgs ++ [lhs'])
            _ -> case parseCtorApp rhs' of
               -- LHS = module.ctor(args) or LHS = ctor(args) → construct/deconstruct
               -- with a properly extracted functor name and argument list. Which of
@@ -654,11 +696,18 @@ parseCtorApp t
 -- These are module-qualified infix operations in the HLDS dump.
 parseMercuryBuiltin :: Text -> Maybe MercuryGoal
 parseMercuryBuiltin txt
-  -- Pattern: "module.(expr)" where expr contains an infix operator
+  -- Pattern: "module.(lhs op rhs)" — binary infix.
   | Just (modPart, inner) <- breakOnDotParen txt
   , not (T.null inner)
   , Just (lhs, op, rhs) <- parseInfixExpr inner
   = Just $ GoalCall (modPart <> "." <> op) [lhs, rhs]
+  -- Pattern: "module.(op arg)" — unary prefix (-, +, ~ on a single var).
+  -- Distinct from infix by absence of a second operand to the left of
+  -- the operator.
+  | Just (modPart, inner) <- breakOnDotParen txt
+  , not (T.null inner)
+  , Just (op, arg) <- parsePrefixExpr inner
+  = Just $ GoalCall (modPart <> "." <> op) [arg]
   | otherwise = Nothing
   where
     -- Break "int.(X > Y)" or "int.(X > Y)." into ("int", "X > Y")
@@ -670,9 +719,13 @@ parseMercuryBuiltin txt
                   content = T.takeWhile (/= ')') inner
               in Just (before, content)
 
-    -- Parse "X > Y" into (X, ">", Y)
+    -- Parse "X > Y" into (X, ">", Y).  Longer operators must come
+    -- before their prefixes so "//" is matched ahead of "/", ">=" ahead
+    -- of ">", etc.; otherwise the prefix wins and the remainder gets
+    -- mis-split.
     parseInfixExpr e =
-      let ops = [" > ", " < ", " >= ", " =< ", " + ", " - ", " * ", " / ", " mod ", " == "]
+      let ops = [ " // ", " >= ", " =< ", " == ", " mod ", " rem "
+                , " > ", " < ", " + ", " - ", " * ", " / " ]
           tryOp [] = Nothing
           tryOp (op:rest') =
             case T.breakOn op e of
@@ -680,6 +733,21 @@ parseMercuryBuiltin txt
                 Just (T.strip lhs, T.strip op, T.strip (T.drop (T.length op) rhs'))
               _ -> tryOp rest'
       in tryOp ops
+
+    -- Parse "- Var" / "+ Var" / "~ Var" into (op, arg).  Reject any
+    -- expression with internal whitespace beyond the prefix — that
+    -- would be a binary form that parseInfixExpr should have caught.
+    parsePrefixExpr e =
+      let s = T.strip e
+      in case T.uncons s of
+           Just (c, rest)
+             | (c == '-' || c == '+' || c == '~')
+             , Just (' ', _) <- T.uncons rest
+             , let arg = T.strip rest
+             , not (T.null arg)
+             , T.all (\ch -> ch /= ' ' && ch /= '\t') arg
+             -> Just (T.singleton c, arg)
+           _ -> Nothing
 
 -------------------------------------------------------------------------------
 -- Type declaration extraction

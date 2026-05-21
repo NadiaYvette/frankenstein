@@ -425,7 +425,21 @@ translateGoalK env (GoalUnify x y) k =
                   DefVal]] k
 
 translateGoalK _env (GoalCall predName' args) k =
-  let callExpr
+  -- Identify the output variable using a "last unbound arg" heuristic.
+  -- Mercury HLDS lists every argument of a predicate at the call site,
+  -- inputs and outputs alike.  For det predicates, the output is bound
+  -- on return — so the unbound last arg names the receive slot, not an
+  -- input value.  Passing it to the callee as if it were an input
+  -- produces a free reference that the emitter resolves to a top-level
+  -- 0-arg call (`@STATE_VARIABLE_IO_8$0()`), surfacing later as an
+  -- unresolved symbol at link time.
+  let (callInputs, outputBinding) = case args of
+        [] -> ([], Nothing)
+        _  -> let outName = last args
+              in if Set.member outName _env
+                 then (args, Nothing)
+                 else (init args, Just outName)
+      callExpr
         | Just op <- stripIntOp predName'
         , [lhs, rhs] <- args =
             EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
@@ -439,7 +453,7 @@ translateGoalK _env (GoalCall predName' args) k =
               []    -> EApp (EVar (Name rtName 0)) []
         | otherwise =
             EApp (EVar (Name predName' 0))
-                 (map (\a -> EVar (Name a 0)) args)
+                 (map (\a -> EVar (Name a 0)) callInputs)
       stripIntOp n = T.stripPrefix "int." n
       -- Mercury io.* predicates that have a direct runtime equivalent.
       -- Returns the Frankenstein runtime name when the call shape matches.
@@ -451,17 +465,9 @@ translateGoalK _env (GoalCall predName' args) k =
         ("io.print_line",   3) -> Just "println_str"
         ("io.nl",           2) -> Just "putStrLn"  -- prints just newline (need empty string + putStrLn)
         _                      -> Nothing
-      -- If the call has a plausible output argument (last arg), bind it.
-      -- This is a heuristic: Mercury HLDS dumps list output vars in the
-      -- argument list, and for det predicates the last position is
-      -- typically the returned value. Callers that use the result in a
-      -- later goal will already have the variable name bound via this.
-  in case args of
-       [] -> ELet [[Bind (Name "_" 0) intTy callExpr DefVal]] k
-       _  -> let outName = last args
-             in if Set.member outName _env
-                then ELet [[Bind (Name "_" 0) intTy callExpr DefVal]] k
-                else ELet [[Bind (Name outName 0) intTy callExpr DefVal]] k
+  in case outputBinding of
+       Nothing      -> ELet [[Bind (Name "_" 0) intTy callExpr DefVal]] k
+       Just outName -> ELet [[Bind (Name outName 0) intTy callExpr DefVal]] k
 
 translateGoalK env (GoalConj goals) k =
   -- foldr: first goal wraps the rest (left-to-right execution order).

@@ -587,6 +587,7 @@ emitProgramText prog =
             | Just body <- Map.lookup (nameText fn) m = go (d - 1) body
           go d (EApp f args) = go d f || any (go d) args
           go d (EDelay e)    = go d e
+          go d (EForce e)    = go d e
           go d (ELet bgs body) =
             go d body || or [ go d (bindExpr b) | bg <- bgs, b <- bg ]
           go d (ECase _ bs) = any (\(Branch _ _ b) -> go d b) bs
@@ -604,9 +605,17 @@ emitProgramText prog =
           -- That predicate threads through io.write_string etc., so
           -- the wrapper must not print the alias's Int return value.
           , "main_io_impl", "mercury_main_io_impl"
+          -- Idris2 bridge: `putStrLn`/`putStr` in user code desugar to
+          -- `Prelude.IO/prim__putStr`; the Linker mangles `/` → `_`,
+          -- so by the time the wrapper detection runs we see the
+          -- underscore form.  Also include our runtime stub for paths
+          -- that bypass the prelude wrapper.
+          , "Prelude.IO_prim__putStr"
+          , "idris2_putStr"
           ]
       exprCallsPrint (EApp f args)       = exprCallsPrint f || any exprCallsPrint args
       exprCallsPrint (EDelay e)          = exprCallsPrint e
+      exprCallsPrint (EForce e)          = exprCallsPrint e
       -- A `let _ = print_str("...") in ()` form (Rust's println! after
       -- our bridge remap) was previously missed because we only checked
       -- the body of the let, not the binder RHSs.  Check both.

@@ -554,14 +554,33 @@ isComment t = let s = T.strip t
                  -- treat the opening paren+comment as a comment line.
                  ("(" `T.isPrefixOf` s && "%" `T.isInfixOf` s)
 
--- Split a list of lines on a delimiter that appears as a standalone line
+-- Split a list of lines on a delimiter that appears as a standalone
+-- line, but only at the construct's top syntactic level.  Mercury HLDS
+-- nests conjunctions inside if/then/else and disjunction blocks; a
+-- depth-agnostic split shatters the outer conjunction into pieces
+-- belonging to inner constructs.  We track paren depth across lines
+-- and treat the minimum depth at which a marker appears as "this
+-- construct's top level"; markers at exactly that depth are
+-- conjunction/disjunction separators, deeper ones stay inside their
+-- nested goal where they belong.
 splitOnMarker :: Text -> [Text] -> [[Text]]
-splitOnMarker _ [] = []
 splitOnMarker marker ls =
-  let (chunk, rest) = span (\l -> T.strip l /= marker) ls
-  in case rest of
-    [] -> [chunk]
-    (_:more) -> chunk : splitOnMarker marker more
+  let parenDelta t =
+        let opens  = T.length (T.filter (== '(') t)
+            closes = T.length (T.filter (== ')') t)
+        in opens - closes
+      depths = scanl (+) 0 (map parenDelta ls)
+      depthBefore = init depths
+      markerDepths = [d | (l, d) <- zip ls depthBefore, T.strip l == marker]
+      topDepth = case markerDepths of
+        []  -> 0
+        ds  -> minimum ds
+      go acc [] = [reverse acc]
+      go acc ((l, d):rest)
+        | T.strip l == marker && d == topDepth =
+            reverse acc : go [] rest
+        | otherwise = go (l:acc) rest
+  in go [] (zip ls depthBefore)
 
 parseSwitch :: [Text] -> MercuryGoal
 parseSwitch ls =

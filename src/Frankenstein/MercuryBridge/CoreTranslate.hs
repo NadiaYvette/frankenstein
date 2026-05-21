@@ -540,9 +540,12 @@ translateGoalK env (GoalConstruct var ctor args) k
         ]
   | otherwise =
       -- Construct: allocate the ctor and let-bind LHS.
+      -- Recognise int / string literal args so they emit as ELit
+      -- (not bogus EVar refs that surface as 0-arg link symbols like
+      -- `_0$0` from `type_ctor_info(rational, rational, 0)`).
       ELet [[Bind (Name var 0) anyTy
                (EApp (ECon (QName "" (Name ctor 0)))
-                     [EVar (Name a 0) | a <- args])
+                     (map argExpr args))
                DefVal]] k
 
 translateGoalK _env (GoalDeconstruct var ctor args) k =
@@ -586,6 +589,18 @@ extendBindingsFor env g = case g of
   where
     isJust (Just _) = True
     isJust Nothing  = False
+
+-- | Lift a Mercury HLDS atom into the right Core expression: int
+-- literal → ELit (LitInt); double-quoted string → ELit (LitString);
+-- anything else falls back to an EVar reference (which will resolve
+-- against the binding env or escape as a free name downstream).
+argExpr :: Text -> Expr
+argExpr a =
+  case readMaybe (T.unpack a) :: Maybe Integer of
+    Just n  -> ELit (LitInt n)
+    Nothing -> case parseMercuryStringLit a of
+      Just s  -> ELit (LitString s)
+      Nothing -> EVar (Name a 0)
 
 -- | Common type shortcuts used by the translator.
 intTy :: Type

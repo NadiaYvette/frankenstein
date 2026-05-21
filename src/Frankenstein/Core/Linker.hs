@@ -297,11 +297,24 @@ resolveName homeMod _selfName table nm =
       -- "trig-result" as a module, drop it, and resolve to the wrong
       -- "pretty" (the rad-expr one).
       directHit = Map.lookup fullName table
-      -- GHC bridge encodes imported refs as "Module/name"
+      -- GHC bridge encodes imported refs as "Module/name".  Mercury
+      -- bridge writes call sites as "Module.name" (e.g. user code's
+      -- "rational.cmp", or a same-file call printed by mmc as
+      -- "demo_rational_smoke.show_rat").  Detect the slash form first;
+      -- if not present, fall back to the rightmost-dot split so the
+      -- bridge's qualified names resolve through bare-name symtab
+      -- entries.
       (lookupMod, unqual) = case T.breakOn "/" fullName of
         (modPart, rest)
           | not (T.null rest) -> (Just modPart, T.drop 1 rest)
-          | otherwise         -> (Nothing, fullName)
+          | otherwise ->
+              case T.breakOnEnd "." fullName of
+                (modPart, n)
+                  | not (T.null modPart)
+                  , not (T.null n)
+                  -- modPart ends with the dot — strip it
+                  -> (Just (T.dropEnd 1 modPart), n)
+                _ -> (Nothing, fullName)
       -- Prefer the explicit module from "Module/name" if present,
       -- otherwise fall back to the definition's home module.
       preferMod = case lookupMod of

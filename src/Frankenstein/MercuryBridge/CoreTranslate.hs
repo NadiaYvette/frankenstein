@@ -232,12 +232,20 @@ translatePred pred' = do
   let -- The user's @main(io::di, io::uo)@ predicate is renamed to
       -- @mercury_main_io@ so the synthesised no-arg @main@ alias can
       -- delegate to it without a name collision.
+      -- Number of input arguments (mode in/di) — the arity the function
+      -- presents at the call site after output-arg-drop.  Used to
+      -- disambiguate overloads like @rational.+/1@ (unary) vs
+      -- @rational.+/2@ (binary) which would otherwise collapse to the
+      -- same MLIR symbol.  Sanitisation preserves underscores so the
+      -- @__<n>@ suffix survives through to the linker.
+      inputArity = length [m | m <- predModes pred'
+                             , m == ModeIn || m == ModeDi]
       effectiveName
         | predName pred' == "main"
         , length (predModes pred') == 2
         , all (\m -> m == ModeDi || m == ModeUo) (predModes pred')
         = "main_io_impl"
-        | otherwise = predName pred'
+        | otherwise = predName pred' <> "__" <> T.pack (show inputArity)
       name = QName "mercury" (Name effectiveName 0)
       -- Separate input and output modes
       pmodes = predModes pred'
@@ -348,7 +356,8 @@ translateGoalAsTest env (GoalCall predName' args)
   , [lhs, rhs] <- args =
       EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
   | otherwise =
-      EApp (EVar (Name predName' 0))
+      let taggedName = predName' <> "__" <> T.pack (show (length args))
+      in EApp (EVar (Name taggedName 0))
            (map (\a -> EVar (Name a 0)) args)
 translateGoalAsTest env (GoalConj goals) = case goals of
   []  -> ELit (LitInt 1)
@@ -439,6 +448,19 @@ translateGoalK _env (GoalCall predName' args) k =
               in if Set.member outName _env
                  then (args, Nothing)
                  else (init args, Just outName)
+      -- Same arity-suffix convention as translatePred uses for def
+      -- names: append "__<n>" where n is the number of inputs the
+      -- callee receives.  Lets the linker disambiguate overloads
+      -- like @rational.+/1@ vs @rational.+/2@.  Skip for known
+      -- stdlib-prefixed callees whose targets are runtime stubs with
+      -- fixed names (no overload disambiguation needed there).
+      isStdlibPrefixed n = any (`T.isPrefixOf` n)
+        ["io.", "int.", "integer.", "string.", "list.", "char."
+        , "bool.", "require.", "exception.", "math.", "float."
+        , "builtin.", "private_builtin."]
+      taggedName
+        | isStdlibPrefixed predName' = predName'
+        | otherwise = predName' <> "__" <> T.pack (show (length callInputs))
       callExpr
         | Just op <- stripIntOp predName'
         , [lhs, rhs] <- args =
@@ -452,7 +474,7 @@ translateGoalK _env (GoalCall predName' args) k =
               (s:_) -> EApp (EVar (Name rtName 0)) [EVar (Name s 0)]
               []    -> EApp (EVar (Name rtName 0)) []
         | otherwise =
-            EApp (EVar (Name predName' 0))
+            EApp (EVar (Name taggedName 0))
                  (map (\a -> EVar (Name a 0)) callInputs)
       stripIntOp n = T.stripPrefix "int." n
       -- Mercury io.* predicates that have a direct runtime equivalent.

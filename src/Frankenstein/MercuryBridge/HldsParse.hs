@@ -635,6 +635,14 @@ parseSingleGoal txt
               Nothing | "." `T.isInfixOf` rhs'
                       , isCleanCallName rhs'
                           -> GoalConstruct lhs' rhs' []
+              -- Module-qualified bare operator: 'Cmp = builtin.(=)',
+              -- 'Cmp = builtin.(<)' etc.  These are 0-arg tag values
+              -- (members of a comparison_result enum).  Treat them as
+              -- 0-arg ctor constructions so LHS gets a let-binding
+              -- rather than falling into the unify-stub catchall that
+              -- leaks both sides as free references.
+              Nothing | Just tag <- parseQualifiedOp rhs'
+                          -> GoalConstruct lhs' tag []
               -- Otherwise it's a bare unification / assignment.
               Nothing -> GoalUnify lhs' rhs'
   -- Mercury builtin without an LHS bind (rare — typically tests inside a
@@ -710,6 +718,24 @@ parseCtorApp t
       in if not (T.null s') && T.last s' == ')'
          then T.init s'
          else s'
+
+-- | Recognise a module-qualified bare operator atom like @builtin.(=)@,
+-- @builtin.(<)@, @builtin.(>)@ — Mercury's comparison_result tags.
+-- Returns the canonical "module.op" form (without the parens) so the
+-- caller can emit a 0-arg ctor.  Reject anything with whitespace
+-- inside the parens (those are real expressions, handled elsewhere).
+parseQualifiedOp :: Text -> Maybe Text
+parseQualifiedOp t =
+  case T.breakOn ".(" t of
+    (modPart, rest)
+      | not (T.null modPart)
+      , Just rest1 <- T.stripPrefix ".(" rest
+      , Just (op, after) <- T.uncons rest1
+      , Just (')', tail') <- fmap (\(c, _) -> (c, T.tail after)) (T.uncons after)
+      , T.null (T.strip tail')
+      , op /= '(' && op /= ')' && op /= ' '
+      -> Just (modPart <> "." <> T.singleton op)
+    _ -> Nothing
 
 -- | Parse Mercury builtin operations like "int.(X > Y)", "int.(X + Y)"
 -- These are module-qualified infix operations in the HLDS dump.

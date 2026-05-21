@@ -289,9 +289,18 @@ translatePred pred' = do
       initialEnv  = Set.fromList (map (\n -> n) inputArgNames)
 
       -- Translate the goal body via CPS so variables flow correctly
-      -- between successive conjuncts.
+      -- between successive conjuncts.  Wrap with a default binding of
+      -- the output var so error-path branches (e.g. require.error in
+      -- one ITE arm of rational_norm) still satisfy the terminator's
+      -- EVar reference instead of leaking a free-name to the link
+      -- stage.  Working branches that actually bind the output via
+      -- ELet shadow the default by lexical scope.
+      bodyExpr goal = case outputName of
+        Just n  -> ELet [[Bind (Name n 0) anyTy (ELit (LitInt 0)) DefVal]]
+                         (translateGoalK initialEnv goal terminator)
+        Nothing -> translateGoalK initialEnv goal terminator
       rawGoalBody = case predGoal pred' of
-        Just goal -> translateGoalK initialEnv goal terminator
+        Just goal -> bodyExpr goal
         Nothing   -> ELit (LitString "no body")
 
       -- For semidet predicates: wrap in "if test then 1 else perform exn.fail"

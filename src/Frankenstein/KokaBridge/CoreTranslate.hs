@@ -856,6 +856,26 @@ lengthRuntime ty = case firstParamTypeHead ty of
   Just "string" -> "str_char_len"
   _             -> "str_char_len"
 
+-- | Like `lengthRuntime` but also consults the function's module name
+-- when the type head can't pin down list-vs-string.  Koka's
+-- `list/length` lives in `std/core/list`; `string/count` in
+-- `std/core/string`.
+lengthRuntimeFor :: KC.TName -> String
+lengthRuntimeFor tname =
+  let ty = KC.tnameType tname
+      m  = KN.nameModule (KC.getName tname)
+      typeHead = firstParamTypeHead ty
+      moduleHint
+        | "list" `T.isInfixOf` T.pack m   = Just "list"
+        | "string" `T.isInfixOf` T.pack m = Just "string"
+        | otherwise                        = Nothing
+  in case (typeHead, moduleHint) of
+       (Just "list", _)          -> "kk_list_length"
+       (Just "string", _)        -> "str_char_len"
+       (_, Just "list")          -> "kk_list_length"
+       (_, Just "string")        -> "str_char_len"
+       _                          -> "str_char_len"
+
 -- | Check if a Koka name corresponds to a known stdlib builtin we
 -- want to intercept and translate to a direct runtime call.  Koka's
 -- name resolution picks a typed override (`string/println`,
@@ -918,8 +938,8 @@ translateBuiltinApp tname args = do
       -- For `++`: pick str_concat or kk_list_concat from the type.
       ppName       = F.Name (T.pack (plusPlusRuntime (KC.tnameType tname))) 0
       -- For `length`/`count`: pick str_char_len or kk_list_length from
-      -- the function's first-arg type.
-      lenName      = F.Name (T.pack (lengthRuntime (KC.tnameType tname))) 0
+      -- the function's first-arg type OR module hint.
+      lenName      = F.Name (T.pack (lengthRuntimeFor tname)) 0
   case (stem, local, qual, args) of
     -- `string/println(s)` — Koka's println for strings: pass the
     -- string directly to the println_str runtime.

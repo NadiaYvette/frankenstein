@@ -2343,11 +2343,25 @@ emitAppVarWith1 fn arg
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_len(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
-  | n `elem` ["str_char_len", "char_len", "char_count", "length"] = do
+  -- String-specific char-length names go to kk_str_char_len.  Do NOT
+  -- include the bare `length` here: it's overloaded between string and
+  -- list, and the bridge can't always pin down which at a nested call
+  -- site (Koka may emit a curried Application like
+  -- `KC.App (KC.App length-spec args) [xs]`, hitting our generic
+  -- fallback before the bridge's type-aware dispatch fires).  Bare
+  -- `length` defaults to list (the surd code uses it almost exclusively
+  -- on lists; string callers say `chars/count`).
+  | n `elem` ["str_char_len", "char_len", "char_count"] = do
       (argOps, argName) <- emitExpr arg
       resultName <- freshName "v"
       pure (argOps ++
         [ "%" <> resultName <> " = func.call @kk_str_char_len(%" <> argName <> ") : (i64) -> i64"
+        ], resultName)
+  | n == "length" = do
+      (argOps, argName) <- emitExpr arg
+      resultName <- freshName "v"
+      pure (argOps ++
+        [ "%" <> resultName <> " = func.call @kk_list_length(%" <> argName <> ") : (i64) -> i64"
         ], resultName)
   -- List length — bridge picks this for list-typed `length`/`count`.
   | n == "kk_list_length" = do

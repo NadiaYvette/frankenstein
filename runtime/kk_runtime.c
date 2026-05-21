@@ -2171,6 +2171,12 @@ static char** kk_g_argv = NULL;
 void kk_args_init(int argc, char** argv) {
     kk_g_argc = argc;
     kk_g_argv = argv;
+    /* Match Idris2's chez backend: line-buffered stdout regardless of
+     * whether stdout is a tty.  Otherwise putStr output sits in glibc's
+     * 4KiB block buffer until program exit, so progressive test-runner
+     * output (PASS / FAIL lines) only appears once everything completes
+     * — defeating the purpose of incremental reporting. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
 }
 
 int64_t kk_args_count(void) {

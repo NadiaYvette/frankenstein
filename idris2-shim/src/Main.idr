@@ -112,8 +112,77 @@ constLit (Db d)   = jsonObj [("float", jsonDouble d)]
 constLit (PrT _)  = jsonObj [("int", jsonInt 0)]
 constLit WorldVal = jsonObj [("int", jsonInt 0)]
 
+-- | Map an Idris2 PrimFn to a name the Frankenstein emitter already lowers.
+-- Short tokens like "+", "-", "==" are inlined to arith.* by MlirEmit;
+-- string ops route to runtime helpers registered in externalRuntimeFns.
+-- Names with no current mapping pass through under an "idris_" prefix so
+-- they show up as obvious unresolved symbols rather than silent failures.
 primFnName : {arity : Nat} -> PrimFn arity -> String
-primFnName f = show f
+primFnName (Add _)       = "+"
+primFnName (Sub _)       = "-"
+primFnName (Mul _)       = "*"
+primFnName (Div _)       = "/"
+primFnName (Mod _)       = "mod"
+primFnName (Neg _)       = "negate"
+primFnName (ShiftL _)    = "idris_shl"
+primFnName (ShiftR _)    = "idris_shr"
+primFnName (BAnd _)      = "andI#"
+primFnName (BOr _)       = "orI#"
+primFnName (BXOr _)      = "xorI#"
+primFnName (LT _)        = "<"
+primFnName (LTE _)       = "<="
+primFnName (EQ _)        = "=="
+primFnName (GTE _)       = ">="
+primFnName (GT _)        = ">"
+primFnName StrLength     = "str_len"
+primFnName StrHead       = "idris_str_head"
+primFnName StrTail       = "idris_str_tail"
+primFnName StrIndex      = "idris_str_index"
+primFnName StrCons       = "idris_str_cons"
+primFnName StrAppend     = "str_concat"
+primFnName StrReverse    = "idris_str_reverse"
+primFnName StrSubstr     = "idris_str_substr"
+primFnName DoubleExp     = "idris_double_exp"
+primFnName DoubleLog     = "idris_double_log"
+primFnName DoublePow     = "idris_double_pow"
+primFnName DoubleSin     = "idris_double_sin"
+primFnName DoubleCos     = "idris_double_cos"
+primFnName DoubleTan     = "idris_double_tan"
+primFnName DoubleASin    = "idris_double_asin"
+primFnName DoubleACos    = "idris_double_acos"
+primFnName DoubleATan    = "idris_double_atan"
+primFnName DoubleSqrt    = "idris_double_sqrt"
+primFnName DoubleFloor   = "idris_double_floor"
+primFnName DoubleCeiling = "idris_double_ceiling"
+primFnName (Cast x y)    = "cast-" ++ show x ++ "-" ++ show y
+primFnName BelieveMe     = "idris_believe_me"
+primFnName Crash         = "idris_crash"
+
+-- | True if a Cast preserves the i64 bit-representation we use for every
+-- integral / Char type — i.e. it's a no-op once values reach MLIR.
+isIdentityCast : PrimType -> PrimType -> Bool
+isIdentityCast StringType _      = False
+isIdentityCast _ StringType      = False
+isIdentityCast DoubleType _      = False
+isIdentityCast _ DoubleType      = False
+isIdentityCast WorldType _       = False
+isIdentityCast _ WorldType       = False
+isIdentityCast _ _               = True
+
+-- | Map non-identity casts to a runtime helper name where one exists.
+castFnName : PrimType -> PrimType -> String
+castFnName IntegerType StringType  = "show_int"
+castFnName IntType     StringType  = "show_int"
+castFnName Int8Type    StringType  = "show_int"
+castFnName Int16Type   StringType  = "show_int"
+castFnName Int32Type   StringType  = "show_int"
+castFnName Int64Type   StringType  = "show_int"
+castFnName Bits8Type   StringType  = "show_int"
+castFnName Bits16Type  StringType  = "show_int"
+castFnName Bits32Type  StringType  = "show_int"
+castFnName Bits64Type  StringType  = "show_int"
+castFnName CharType    StringType  = "show_int"
+castFnName x           y           = "cast-" ++ show x ++ "-" ++ show y
 
 vectToList : Vect n a -> List a
 vectToList []        = []
@@ -186,6 +255,17 @@ mutual
                     ("name", idrisQName name)
                     :: (if isEmpty argJs then [] else [("args", jsonArr argJs)])
       in jsonObj [("econ", obj)]
+  renderExpr (NmOp _ (Cast from to) [x]) =
+      if isIdentityCast from to
+          then renderExpr x
+          else jsonObj
+                  [ ("eapp", jsonObj
+                                [ ("fn", jsonObj [("evar", mkName (castFnName from to))])
+                                , ("args", jsonArr [renderExpr x])
+                                ])
+                  ]
+  renderExpr (NmOp _ BelieveMe [_, _, x]) =
+      renderExpr x
   renderExpr (NmOp _ op args) =
       jsonObj
         [ ("eapp", jsonObj
@@ -253,15 +333,29 @@ mutual
 
 renderDef : Name -> NamedDef -> String
 renderDef name (MkNmFun args body) =
-    let (m, t) = splitName name
-        paramJs = map (\a => jsonObj [("name", mkName (snd (splitName a)))]) args
+    let (m, t)  = splitName name
+        isMain  = m == "Main" && t == "main"
         bodyJs  = renderExpr body
-        wrapped = if isEmpty args
-                     then bodyJs
+        -- Idris2's `main : IO ()` compiles to arity-1 taking a %World
+        -- token; Frankenstein's MLIR wrapper expects nullary `main`.
+        -- Strip the world arg and bind it to 0 (the runtime's null world).
+        paramNames : List String
+        paramNames =
+            if isMain
+               then []
+               else map (\a => snd (splitName a)) args
+        finalBody : String
+        finalBody =
+            if isMain
+               then wrapMainBody args bodyJs
+               else bodyJs
+        paramJs = map (\nm => jsonObj [("name", mkName nm)]) paramNames
+        wrapped = if isEmpty paramJs
+                     then finalBody
                      else jsonObj
                             [ ("elam", jsonObj
                                           [ ("params", jsonArr paramJs)
-                                          , ("body", bodyJs)
+                                          , ("body", finalBody)
                                           ])
                             ]
     in jsonObj
@@ -270,8 +364,25 @@ renderDef name (MkNmFun args body) =
           , ("expr", wrapped)
           , ("sort", jsonStr "fun")
           , ("visibility", jsonStr "public")
-          , ("arity", jsonInt (cast (length args)))
+          , ("arity", jsonInt (cast (length paramNames)))
           ]
+  where
+    -- Bind each Idris2 main arg (world tokens) to literal 0 around the body.
+    wrapMainBody : List Name -> String -> String
+    wrapMainBody []        body = body
+    wrapMainBody (a :: as) body =
+        let argText = snd (splitName a)
+            inner   = wrapMainBody as body
+            bind    = jsonObj
+                        [ ("name", mkName argText)
+                        , ("expr", jsonObj [("elit", jsonObj [("int", jsonInt 0)])])
+                        ]
+        in jsonObj
+              [ ("elet", jsonObj
+                            [ ("binds", jsonArr [bind])
+                            , ("body", inner)
+                            ])
+              ]
 renderDef name (MkNmCon _ arity _) =
     let (m, t) = splitName name
         body   = jsonObj [("econ", jsonObj [("name", mkQName m t)])]

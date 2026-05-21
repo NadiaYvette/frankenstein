@@ -2605,6 +2605,13 @@ int64_t mercury_choose(void) {
     return mercury_choice_decisions[mercury_choice_pos++];
 }
 
+/* Mercury failure helpers — referenced by the bridge when semidet
+ * predicates fail or exn handlers default.  The synthetic def the
+ * bridge emits is module-qualified (e.g. demo_X_mercury_fail), but
+ * unqualified call sites can land on this runtime stub instead. */
+int64_t mercury_fail(void) { return 0; }
+int64_t mercury_exn_fail(void) { return 0; }
+
 int64_t mercury_collect_choices(int64_t fn_ptr) {
     typedef int64_t (*body_fn_t)(void);
     body_fn_t body = (body_fn_t)fn_ptr;

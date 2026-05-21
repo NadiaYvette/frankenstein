@@ -471,11 +471,13 @@ translateGoalK _kctors env (GoalUnify x y) k =
          ELet [[Bind (Name x 0) intTy (EVar (Name y 0)) DefVal]] k
        (Nothing, Nothing, Nothing, Nothing) | bindRhs && not bindLhs ->
          ELet [[Bind (Name y 0) intTy (EVar (Name x 0)) DefVal]] k
-       -- Fallback: emit a stub unify call.
+       -- Fallback: emit a stub unify call.  Use argExpr so literal
+       -- ints / chars / strings don't leak as bogus free EVar refs
+       -- (e.g. `0` sanitised to `_0$0`).
        _ ->
          ELet [[Bind (Name "_" 0) intTy
                   (EApp (EVar (Name "unify" 0))
-                        [EVar (Name x 0), EVar (Name y 0)])
+                        [argExpr x, argExpr y])
                   DefVal]] k
 
 translateGoalK _kctors _env (GoalCall predName' args) k =
@@ -742,6 +744,8 @@ stdlibCtorNames = Set.fromList
                                        -- (capitalised so the bridge hits
                                        -- kkConsTag/kkNilTag fast path)
   , "list.[]"
+  , "tuple"                            -- emitted by parseTupleLiteral
+                                       -- for Mercury's @{A, B, C}@ form
   -- builtin comparison_result tags (parseQualifiedOp emits these)
   , "builtin.=", "builtin.<", "builtin.>"
   , "=", "<", ">"
@@ -769,30 +773,37 @@ argExpr a =
         Just cp -> ELit (LitInt cp)
         Nothing -> EVar (Name a 0)
 
--- | Recognise Mercury's @'c'@ char literal form and return the
--- codepoint as an Integer.  Used by 'argExpr' so a char arg like
--- @'a'@ doesn't leak as a free EVar reference (sanitised to
--- @_a__$0@ at link time).
+-- | Recognise Mercury's @'c'@ char literal form (also accepts the
+-- parenthesised @('c')@ form HLDS prints) and return the codepoint
+-- as an Integer.  Used by 'argExpr' so a char arg like @'a'@
+-- doesn't leak as a free EVar reference (sanitised to @_a__$0@ at
+-- link time).
 parseMercuryCharLit :: Text -> Maybe Integer
-parseMercuryCharLit t = case T.uncons t of
-  Just ('\'', rest) -> case T.unsnoc rest of
-    Just (inner, '\'') -> case T.uncons inner of
-      Just (c, rest')
-        | T.null rest' -> Just (toInteger (fromEnum c))
-      -- Mercury escapes like '\n', '\t', '\\', '\''
-      _ | T.length inner == 2
-        , Just ('\\', after) <- T.uncons inner
-        , Just (esc, _) <- T.uncons after
-        -> case esc of
-             'n' -> Just 10
-             't' -> Just 9
-             'r' -> Just 13
-             '\\' -> Just 92
-             '\'' -> Just 39
-             _   -> Just (toInteger (fromEnum esc))
+parseMercuryCharLit raw =
+  let t = let s = T.strip raw
+          in case T.uncons s of
+               Just ('(', inner) -> case T.unsnoc inner of
+                 Just (i, ')') -> T.strip i
+                 _ -> s
+               _ -> s
+  in case T.uncons t of
+    Just ('\'', rest) -> case T.unsnoc rest of
+      Just (inner, '\'') -> case T.uncons inner of
+        Just (c, rest')
+          | T.null rest' -> Just (toInteger (fromEnum c))
+        _ | T.length inner == 2
+          , Just ('\\', after) <- T.uncons inner
+          , Just (esc, _) <- T.uncons after
+          -> case esc of
+               'n' -> Just 10
+               't' -> Just 9
+               'r' -> Just 13
+               '\\' -> Just 92
+               '\'' -> Just 39
+               _   -> Just (toInteger (fromEnum esc))
+        _ -> Nothing
       _ -> Nothing
     _ -> Nothing
-  _ -> Nothing
 
 -- | Common type shortcuts used by the translator.
 intTy :: Type

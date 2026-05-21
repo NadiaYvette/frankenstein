@@ -843,6 +843,12 @@ parseSingleGoal txt
               -- io.format saw a list head of zero elements.
               Nothing | Just listGoal <- parseListLiteral lhs' rhs'
                           -> listGoal
+              -- Mercury anonymous-tuple literals: 'V = {A, B, C}'.
+              -- Construct a ctor named @tuple@ with N fields; pattern
+              -- matches in deconstruct contexts (when LHS is already
+              -- bound) reuse the same ctor name so the tags align.
+              Nothing | Just tupleGoal <- parseTupleLiteral lhs' rhs'
+                          -> tupleGoal
               -- Module-qualified no-arg call: 'V = integer.zero' should
               -- bind V to a call of integer.zero, not unify V with the
               -- string 'integer.zero'.  Detect a clean 'module.name'
@@ -981,6 +987,22 @@ parseListLiteral lhs rhs =
                        [T.strip stripped, "[]"])
       _ -> Nothing
     _ -> Nothing
+
+-- | Recognise a Mercury anonymous-tuple literal: @{A, B, C}@.
+-- Returns a 'GoalConstruct' with ctor name @tuple@ and the inner
+-- field names as args.  Same name used for both construct (LHS
+-- fresh) and deconstruct (LHS bound) paths in 'translateGoalK
+-- GoalConstruct' so tags align.  Reuses the comma-split helper
+-- 'splitCtorArgs' (paren-depth-aware) for nested ctor args.
+parseTupleLiteral :: Text -> Text -> Maybe MercuryGoal
+parseTupleLiteral lhs rhs = case T.uncons (T.stripStart rhs) of
+  Just ('{', after) -> case T.unsnoc (T.stripEnd after) of
+    Just (inner, '}') ->
+      let stripped = T.strip inner
+          args = filter (not . T.null) (map T.strip (splitCtorArgs stripped))
+      in Just (GoalConstruct lhs "tuple" args)
+    _ -> Nothing
+  _ -> Nothing
 
 -- | Recognise a module-qualified bare operator atom like @builtin.(=)@,
 -- @builtin.(<)@, @builtin.(>)@ — Mercury's comparison_result tags.

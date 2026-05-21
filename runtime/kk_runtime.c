@@ -211,12 +211,26 @@ int64_t kk_field(int64_t ptr, int64_t idx) {
 int64_t kk_structural_eq(int64_t a, int64_t b) {
     /* Fast path: same value (covers unboxed ints, same pointer) */
     if (a == b) return 1;
-    /* If either is not a heap pointer, they're unboxed — already compared above */
+    /* kk_is_heap_ptr is a syntactic check only (alignment + threshold);
+     * an Int value like 65544 (0x10008) passes it.  Require BOTH values
+     * to actually be in our arena before dereferencing — otherwise we'd
+     * read random memory as a tag.  Values that don't pass this stricter
+     * check are unboxed primitives; since the fast-path `a == b` above
+     * already rejected equal unboxed values, they must differ here. */
     if (!kk_is_heap_ptr(a) || !kk_is_heap_ptr(b)) return 0;
+    int a_owned = kk_arena_maybe_owns((const void*)(intptr_t)a);
+    int b_owned = kk_arena_maybe_owns((const void*)(intptr_t)b);
+    if (!a_owned || !b_owned) {
+        /* String literals live outside the arena; allow that case. */
+        if (a_owned != b_owned) return 0;
+        if (kk_is_string(a) && kk_is_string(b))
+            return kk_str_compare(a, b) == 0 ? 1 : 0;
+        return 0;
+    }
     /* String comparison: use kk_str_compare (content-based) */
     if (kk_is_string(a) && kk_is_string(b))
         return kk_str_compare(a, b) == 0 ? 1 : 0;
-    /* Both are heap pointers: compare tags */
+    /* Both are heap pointers in the arena: compare tags */
     int64_t tag_a = kk_tag(a);
     int64_t tag_b = kk_tag(b);
     if (tag_a != tag_b) return 0;
@@ -266,8 +280,19 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
  * helper to keep the public API a single one-shot printer.
  */
 static void kk_print_con_inner(int64_t v) {
-    if (!kk_is_heap_ptr(v)) {
+    /* kk_is_heap_ptr is a syntactic check (alignment + threshold).  Many
+     * unboxed Int values (e.g. 0x10008 = 65544) pass that check yet are
+     * not valid heap addresses.  Require arena ownership before
+     * dereferencing — string literals are allowed via kk_is_string. */
+    if (!kk_is_heap_ptr(v)
+        || (!kk_arena_maybe_owns((const void*)(intptr_t)v) && !kk_is_string(v))) {
         printf("%lld", (long long)v);
+        return;
+    }
+    if (kk_is_string(v)) {
+        printf("\"");
+        kk_print_str(v);
+        printf("\"");
         return;
     }
     int64_t tag = kk_tag(v);

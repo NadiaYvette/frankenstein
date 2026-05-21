@@ -57,7 +57,7 @@ defaultEmitConfig = EmitConfig
   , ecMlirTranslatePath = "mlir-translate"
   , ecClangPath         = "clang"
   , ecKokaRuntimePath   = Nothing
-  , ecOptLevel          = 0
+  , ecOptLevel          = 2
   , ecOutputPath        = "a.out"
   , ecTarget            = TargetNative
   }

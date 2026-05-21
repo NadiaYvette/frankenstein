@@ -631,6 +631,18 @@ parseSingleGoal txt
   -- semantic level (mapped to the runtime fail stub).
   | stripped == "true" = GoalConj []
   | stripped == "fail" = GoalCall "mercury_fail" []
+  -- Inline lambda RHS: 'V = (pred(...) is <det> :- body)' or
+  -- 'V = (func(...) = ... is det :- body)'.  Full higher-order
+  -- support isn't implemented yet, so emit a placeholder that binds
+  -- the LHS to a stub @lambda_placeholder@ closure value.  Without
+  -- this catch the entire lambda body falls into the unify catchall
+  -- and sanitises into a gigantic fused symbol.
+  | " = " `T.isInfixOf` stripped
+  , let (lhs, rhs) = T.breakOn " = " stripped
+        rhs' = T.strip (T.drop 3 rhs)
+        lhs' = T.strip lhs
+  , isLambdaRhs rhs'
+  = GoalConstruct lhs' "lambda_placeholder" []
   -- Unification check runs FIRST so an LHS like "V_5 = integer.(..)" is
   -- correctly identified as an assignment.  Previously parseMercuryBuiltin
   -- ran first and would mis-classify the whole goal as a top-level call to
@@ -757,6 +769,18 @@ parseCtorApp t
       in if not (T.null s') && T.last s' == ')'
          then T.init s'
          else s'
+
+-- | Recognise a Mercury HLDS inline lambda RHS.  The bridge has no
+-- higher-order support yet; emitting a placeholder ctor prevents the
+-- lambda's body lines from fusing into the unification fallback's
+-- huge sanitised symbol name at link time.
+isLambdaRhs :: Text -> Bool
+isLambdaRhs t =
+  let s = T.stripStart t
+  in "(pred(" `T.isPrefixOf` s
+  || "(func(" `T.isPrefixOf` s
+  || "(pred ("  `T.isPrefixOf` s
+  || "(func ("  `T.isPrefixOf` s
 
 -- | Recognise a Mercury list literal on the RHS of a unification:
 -- 'list.[]' / '[]' for nil, 'list.[H | T]' / '[H | T]' for cons.

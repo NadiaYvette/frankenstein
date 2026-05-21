@@ -714,6 +714,13 @@ stdlibCtorNames = Set.fromList
   -- builtin comparison_result tags (parseQualifiedOp emits these)
   , "builtin.=", "builtin.<", "builtin.>"
   , "=", "<", ">"
+  -- Bridge-synthesised placeholder for unimplemented higher-order
+  -- features (lambdas, HO calls).  Treated as a 0-arg ctor so the
+  -- LHS gets a let-binding instead of fusing into an unify-stub
+  -- meganame.
+  , "lambda_placeholder"
+  -- Common Mercury stdlib 0-arg atoms (enumeration ctors).
+  , "bool.yes", "bool.no", "yes", "no"
   ]
 
 -- | Lift a Mercury HLDS atom into the right Core expression: int

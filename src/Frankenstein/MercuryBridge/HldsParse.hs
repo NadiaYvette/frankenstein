@@ -59,6 +59,10 @@ data MercuryGoal
   | GoalSwitch Text [(Text, MercuryGoal)]          -- switch on variable
   | GoalConstruct Text Text [Text]                 -- Var = functor(Args)
   | GoalDeconstruct Text Text [Text]               -- functor(Args) = Var
+  | GoalLambda Text [Text] (Maybe Text) MercuryGoal
+    -- ^ LHS = (pred|func(params) :- body).  Binds LHS to a closure
+    -- value.  Last field is the optional output-variable name for
+    -- the func form (which yields the value bound to that var).
   | GoalForeign Text
   | GoalUnparsed Text
   deriving (Show)
@@ -323,7 +327,17 @@ parsePredBlock headerLine bodyLines =
 
       -- Parse the goal body (everything after the ":-" in the clause)
       goalText = extractGoalText bodyLines
-      goal = parseGoalText goalText
+      rawGoal  = parseGoalText goalText
+      -- Rename every lambda LHS in this pred's goal to a per-pred
+      -- unique name (prefix with the pred name and arity).  Without
+      -- this, two preds that both bind a local lambda to e.g. `V_8`
+      -- collide on the emitter's promote-to-top-level path
+      -- (qualifyBindName hashes the source name + nameUnique, both 0
+      -- for every bridge-built Name).  Renaming the lambda LHS AND
+      -- every later reference to it inside the same pred body keeps
+      -- the local scoping correct.
+      uniqSuffix = "__" <> name <> "_" <> T.pack (show arity)
+      goal = renameLambdaLhses uniqSuffix rawGoal
 
   in MercuryPred
     { predName = name
@@ -334,6 +348,44 @@ parsePredBlock headerLine bodyLines =
     , predGoal = Just goal
     , predArgNames = argNames
     }
+
+-- | Rewrite every @GoalLambda@ LHS in the given goal AST so its name
+-- has a per-pred-unique suffix appended.  Also rewrites references to
+-- that name in subsequent goals within the same conjunction so
+-- bindings and uses stay coherent.  The suffix is built from the
+-- pred's @name@ + @arity@ in 'parsePredBlock', so distinct preds
+-- produce distinct lifted-lambda symbols downstream.
+renameLambdaLhses :: Text -> MercuryGoal -> MercuryGoal
+renameLambdaLhses suffix = goTop Set.empty
+  where
+    rn renamed v = if Set.member v renamed then v <> suffix else v
+    goTop renamed g = case g of
+      GoalLambda lhs ps mOut body ->
+        let renamed' = Set.insert lhs renamed
+            lhs' = lhs <> suffix
+            body' = goTop renamed body  -- params shadow inside body
+        in GoalLambda lhs' ps mOut body'
+      GoalConj gs -> GoalConj (snd (foldl step (renamed, []) gs))
+      GoalDisj gs -> GoalDisj (map (goTop renamed) gs)
+      GoalNot inner -> GoalNot (goTop renamed inner)
+      GoalIfThenElse c t e ->
+        GoalIfThenElse (goTop renamed c) (goTop renamed t) (goTop renamed e)
+      GoalSwitch v cases ->
+        GoalSwitch (rn renamed v)
+                   [(c, goTop renamed b) | (c, b) <- cases]
+      GoalUnify x y -> GoalUnify (rn renamed x) (rn renamed y)
+      GoalCall p args -> GoalCall p (map (rn renamed) args)
+      GoalConstruct v ctor args ->
+        GoalConstruct (rn renamed v) ctor (map (rn renamed) args)
+      GoalDeconstruct v ctor args ->
+        GoalDeconstruct (rn renamed v) ctor (map (rn renamed) args)
+      other -> other
+    step (renamed, acc) g =
+      let g' = goTop renamed g
+          renamed' = case g of
+            GoalLambda lhs _ _ _ -> Set.insert lhs renamed
+            _ -> renamed
+      in (renamed', acc ++ [g'])
 
 extractNameArity :: Text -> (Text, Int)
 extractNameArity header =
@@ -488,7 +540,12 @@ parseGoalLines ls =
       conjParts = splitOnMarker "," stripped
       disjParts = splitOnMarker ";" stripped
   in case ls of
-    _ | Just (condLs, thenLs, elseLs) <- splitIfThenElse stripped ->
+    -- Recognise an inline lambda binding BEFORE the conjunction check
+    -- — the lambda body contains its own `% conjunction` marker and
+    -- `,` separators that would otherwise shatter it apart.
+    _ | Just (lhs, params, mOut, bodyLs) <- splitLambda stripped ->
+          GoalLambda lhs params mOut (parseGoalLines bodyLs)
+      | Just (condLs, thenLs, elseLs) <- splitIfThenElse stripped ->
           GoalIfThenElse (parseGoalLines condLs)
                          (parseGoalLines thenLs)
                          (parseGoalLines elseLs)
@@ -501,6 +558,117 @@ parseGoalLines ls =
       | length disjParts > 1 ->
           GoalDisj (map parseGoalLines disjParts)
       | otherwise -> parseSingleGoal (T.unlines (filter (not . isComment) stripped))
+
+-- | Recognise an inline lambda binding in HLDS-printed form:
+--   <LHS> = (pred(LambdaHeadVar__1::in, ...) is <det> :-
+--     <body...>
+--   )
+-- or the func variant:
+--   <LHS> = (func(LambdaHeadVar__1::in, ...) = (LambdaHeadVar__N::out) is det :-
+--     <body...>
+--   )
+-- Returns the LHS var, the list of input-mode parameter names, the
+-- optional output-mode parameter name (Just for func form), and the
+-- raw body lines (inside the lambda's outer parens, with the closing
+-- `)` trimmed).
+splitLambda :: [Text] -> Maybe (Text, [Text], Maybe Text, [Text])
+splitLambda strippedLs = case strippedLs of
+  []       -> Nothing
+  (l0 : _) ->
+    case T.breakOn " = (pred(" l0 of
+      (lhs, rest) | not (T.null rest) ->
+        Just $ extractLambda (T.strip lhs) False (T.drop (T.length " = ") rest)
+                             (tail strippedLs)
+      _ -> case T.breakOn " = (func(" l0 of
+        (lhs, rest) | not (T.null rest) ->
+          Just $ extractLambda (T.strip lhs) True (T.drop (T.length " = ") rest)
+                               (tail strippedLs)
+        _ -> Nothing
+  where
+    -- @restOfHead@ is the text from the opening '(' onward on the
+    -- first line; @bodyLs@ is everything that came after.
+    -- We trace paren depth from 1 (we are immediately inside the
+    -- lambda's outer paren) until it hits 0 — that closing ')' bounds
+    -- the lambda body.
+    extractLambda lhs isFunc restOfHead bodyLs =
+      let -- restOfHead starts with "(pred(args)..." or "(func(args)=(out)...".
+          -- Strip the outer "(", then the keyword ("pred" or "func"), then
+          -- consume up to the inner "(": that opens the param list.
+          inside = T.drop 1 (T.dropWhile (/= '(')
+                              (T.drop 1 restOfHead))
+          (paramText, afterParamsOnL0) = case T.breakOn ")" inside of
+              (params, after) -> (params, after)
+          (inputs, mOut) = parseLambdaParams paramText isFunc afterParamsOnL0
+          parenDelta t =
+            let opens  = T.length (T.filter (== '(') t)
+                closes = T.length (T.filter (== ')') t)
+            in opens - closes
+          -- The head line ALREADY opens the lambda's outer '(', so its
+          -- parenDelta is the actual depth at the start of bodyLs.
+          -- Walk terminates at the matching ')' (depth drops to 0).
+          headDepth = parenDelta restOfHead
+          walk _ acc []     = (reverse acc, [])
+          walk d acc (b:bs)
+            | d' <= 0   = (reverse acc, bs)
+            | otherwise = walk d' (b:acc) bs
+            where d' = d + parenDelta b
+          (rawBody, _trailing) = walk headDepth [] bodyLs
+          -- Mercury HLDS lambda bodies are reliably wrapped in
+          --   some [] ( % compiler
+          --     [( % conjunction]
+          --       <real body>
+          --     [)]
+          --   )
+          -- The bracketed conjunction wrapper is only present when the
+          -- body is multi-goal.  Strip both wrappers so parseGoalLines
+          -- gets a clean body — otherwise the `,` separating the inner
+          -- conjunction and the wrapper's `)`s confuse the splitter.
+          stripped = stripLambdaWrappers rawBody
+      in (lhs, inputs, mOut, stripped)
+
+    -- | Strip the standard `some [] ( % compiler ... )` and inner
+    -- `( % conjunction ... )` wrappers Mercury places around every
+    -- lambda body.  Operates on lines (already stripped of whitespace).
+    stripLambdaWrappers :: [Text] -> [Text]
+    stripLambdaWrappers ls0 =
+      let dropOpener prefix ls = case ls of
+            (l:rest)
+              | T.isPrefixOf prefix (T.strip l) -> Just rest
+            _ -> Nothing
+          dropTrailingCloseParen ls = case reverse ls of
+            (l:rest)
+              | T.strip l == ")" || T.strip l == ")." -> Just (reverse rest)
+            _ -> Nothing
+          -- Sequence: try strip "some []" then conjunction wrappers,
+          -- each requiring a matching trailing ')'.
+          step ls = case dropOpener "some [] (" ls of
+            Just inner -> case dropTrailingCloseParen inner of
+              Just inner'  -> step (stripLambdaWrappers inner')
+              Nothing      -> ls
+            Nothing -> case dropOpener "( % conjunction" ls of
+              Just inner -> case dropTrailingCloseParen inner of
+                Just inner' -> stripLambdaWrappers inner'
+                Nothing     -> ls
+              Nothing -> ls
+      in step ls0
+
+    -- | Parse "LambdaHeadVar__1::in, LambdaHeadVar__2::in, ..." into
+    -- the list of input variable names.  For the func form, the
+    -- header continues "= (LambdaHeadVar__M::out)" — captured here
+    -- from the 'afterParens' text following the input-param list.
+    parseLambdaParams :: Text -> Bool -> Text -> ([Text], Maybe Text)
+    parseLambdaParams paramText isFunc afterParens =
+      let chunks = map T.strip (T.splitOn "," paramText)
+          extractName ch = T.strip (T.takeWhile (\c -> c /= ':' && c /= ' ') ch)
+          inputs = filter (not . T.null) (map extractName chunks)
+          mOut =
+            if not isFunc then Nothing
+            else case T.breakOn "(" (T.dropWhile (/= '=') afterParens) of
+                   (_, rest) | not (T.null rest) ->
+                     let inside = T.takeWhile (/= ')') (T.drop 1 rest)
+                     in Just (extractName inside)
+                   _ -> Nothing
+      in (inputs, mOut)
 
 -- | Recognise Mercury HLDS if-then-else block structure.  HLDS prints:
 --   ( if

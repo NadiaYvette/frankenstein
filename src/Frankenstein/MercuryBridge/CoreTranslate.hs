@@ -625,6 +625,32 @@ translateGoalK kctors env (GoalConstruct var ctor args) k
       ("", n) -> n
       (_,  n) -> n
 
+-- GoalLambda: bind LHS to a closure value.  The body translates as if
+-- it were a det/semidet pred's body with the input params already in
+-- env and (for the func form) the output var receiving the body's
+-- last-bound value.  Returns the LHS bound to an ELam — the emitter's
+-- lambda-lift pass already heap-allocates this as a closure with the
+-- captured outer-scope variables in fields 1..n.
+translateGoalK kctors env (GoalLambda lhs params mOut body) k =
+  let -- Inputs are bound on entry to the lambda body.
+      bodyInitialEnv = Set.union env (Set.fromList params)
+      bodyTerminator = case mOut of
+        Just o  -> EVar (Name o 0)
+        Nothing -> ELit (LitInt 1)
+      -- For func-form lambdas, wrap the body in an outer ELet
+      -- defaulting the output to 0 so error-path branches still
+      -- satisfy the terminator's reference (same trick as
+      -- translatePred uses for whole-pred bodies).
+      bodyExpr = case mOut of
+        Just o  ->
+          ELet [[Bind (Name o 0) anyTy (ELit (LitInt 0)) DefVal]]
+               (translateGoalK kctors bodyInitialEnv body bodyTerminator)
+        Nothing ->
+          translateGoalK kctors bodyInitialEnv body bodyTerminator
+      lamParams = [(Name p 0, anyTy) | p <- params]
+      lamExpr   = ELam lamParams bodyExpr
+  in ELet [[Bind (Name lhs 0) anyTy lamExpr DefVal]] k
+
 translateGoalK _kctors _env (GoalDeconstruct var ctor args) k =
   ECase (EVar (Name var 0))
     [ Branch (PatCon (QName "" (Name ctor 0))
@@ -662,6 +688,7 @@ extendBindingsFor env g = case g of
   GoalSwitch var _ -> Set.insert var env
   GoalCall _ args  -> foldr Set.insert env args
   GoalConj gs      -> foldl extendBindingsFor env gs
+  GoalLambda var _ _ _ -> Set.insert var env
   _                -> env
   where
     isJust (Just _) = True
@@ -691,6 +718,8 @@ collectCtorsFromPred pred' =
         GoalIfThenElse c t e   -> go env c ++ go env t ++ go env e
         GoalNot g'             -> go env g'
         GoalSwitch _ cases     -> concatMap (\(_, b) -> go env b) cases
+        GoalLambda _ params _ b ->
+          go (Set.union env (Set.fromList params)) b
         _                      -> []
       splitCtor c = case T.breakOnEnd "." c of
         ("", n) -> (c, n)         -- bare ctor (no module)

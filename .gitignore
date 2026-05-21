@@ -50,3 +50,7 @@ bench/Fib
 
 # === Web demo build artifacts ===
 web/*.wasm
+
+# Idris2 shim build artifacts + local depends symlinks
+idris2-shim/build/
+idris2-shim/depends/

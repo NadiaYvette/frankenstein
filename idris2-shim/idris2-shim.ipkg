@@ -1,0 +1,9 @@
+package idris2shim
+version = 0.1.0
+
+depends = idris2
+
+executable = "frankenstein-idris2"
+main = Main
+sourcedir = "src"
+modules = Main

@@ -691,6 +691,20 @@ extendBindingsFor env g = case g of
   GoalCall _ args  -> foldr Set.insert env args
   GoalConj gs      -> foldl extendBindingsFor env gs
   GoalLambda var _ _ _ -> Set.insert var env
+  -- For ITE / switch / disjunction, intersect the bindings from every
+  -- branch: a variable is bound after the construct only if every
+  -- branch binds it.  This propagates AStr-style ITE-internal
+  -- bindings to subsequent conjuncts so they don't leak as free
+  -- EVar references at the emit stage.
+  GoalIfThenElse _ t e ->
+    let thenE = extendBindingsFor env t
+        elseE = extendBindingsFor env e
+    in Set.intersection thenE elseE
+  GoalDisj gs -> case gs of
+    []   -> env
+    (g0:rest') ->
+      foldl (\acc g -> Set.intersection acc (extendBindingsFor env g))
+            (extendBindingsFor env g0) rest'
   _                -> env
   where
     isJust (Just _) = True

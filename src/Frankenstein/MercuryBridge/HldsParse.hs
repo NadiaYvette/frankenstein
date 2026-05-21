@@ -24,6 +24,7 @@ import System.Exit (ExitCode(..))
 import System.Directory (listDirectory, getTemporaryDirectory, createDirectoryIfMissing, makeAbsolute, copyFile, removeDirectoryRecursive, doesFileExist, doesDirectoryExist)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import Data.List (isPrefixOf, find)
+import Data.Maybe (listToMaybe)
 import qualified Data.Set as Set
 import Control.Exception (try, catch, IOException)
 
@@ -539,6 +540,39 @@ parseGoalLines ls =
       -- Look for structural markers
       conjParts = splitOnMarker "," stripped
       disjParts = splitOnMarker ";" stripped
+      -- Determine the OUTERMOST construct by looking at the first
+      -- structural marker (conjunction / switch) in the line stream.
+      -- A switch body can contain `% conjunction` markers inside its
+      -- arms; matching by "any line" would treat the whole body as a
+      -- conjunction.  Conversely, a conjunction can wrap a switch as
+      -- one of its goals.  The leading marker wins.
+      firstMarker = listToMaybe
+        [ () | l <- stripped
+             , "% conjunction" `T.isInfixOf` l
+            || "% cannot_fail switch on" `T.isInfixOf` l
+            || "% switch on" `T.isInfixOf` l
+        ]
+      firstIsConj = case firstMarker of
+        Just () ->
+          let firstLine = head
+                [ l | l <- stripped
+                    , "% conjunction" `T.isInfixOf` l
+                   || "% cannot_fail switch on" `T.isInfixOf` l
+                   || "% switch on" `T.isInfixOf` l
+                ]
+          in "% conjunction" `T.isInfixOf` firstLine
+        Nothing -> False
+      firstIsSwitch = case firstMarker of
+        Just () ->
+          let firstLine = head
+                [ l | l <- stripped
+                    , "% conjunction" `T.isInfixOf` l
+                   || "% cannot_fail switch on" `T.isInfixOf` l
+                   || "% switch on" `T.isInfixOf` l
+                ]
+          in "% cannot_fail switch on" `T.isInfixOf` firstLine
+          || "% switch on" `T.isInfixOf` firstLine
+        Nothing -> False
   in case ls of
     -- Recognise an inline lambda binding BEFORE the conjunction check
     -- — the lambda body contains its own `% conjunction` marker and
@@ -549,9 +583,12 @@ parseGoalLines ls =
           GoalIfThenElse (parseGoalLines condLs)
                          (parseGoalLines thenLs)
                          (parseGoalLines elseLs)
-      | any ("% cannot_fail switch on" `T.isInfixOf`) stripped ||
-        any ("% switch on" `T.isInfixOf`) stripped ->
-          parseSwitch stripped
+      -- Outer form is a conjunction wrapping (possibly) a nested
+      -- switch/disjunction goal.  Split first so the inner construct
+      -- isn't consumed in place of the outer.
+      | firstIsConj, length conjParts > 1 ->
+          GoalConj (map parseGoalLines conjParts)
+      | firstIsSwitch -> parseSwitch stripped
       | any ("% conjunction" `T.isInfixOf`) stripped &&
         length conjParts > 1 ->
           GoalConj (map parseGoalLines conjParts)
@@ -780,14 +817,43 @@ parseSwitch ls =
   in GoalSwitch varName arms
 
 extractSwitchArms :: [Text] -> [(Text, MercuryGoal)]
-extractSwitchArms [] = []
-extractSwitchArms (l:ls)
-  | "has functor" `T.isInfixOf` l =
-      let functor = T.strip $ snd $ T.breakOnEnd "functor " l
-          (armLines, rest) = span (\x -> not ("has functor" `T.isInfixOf` x)) ls
-          goal = parseGoalLines armLines
-      in (functor, goal) : extractSwitchArms rest
-  | otherwise = extractSwitchArms ls
+extractSwitchArms ls =
+  -- Only treat `has functor` markers at the OUTER switch's paren depth
+  -- as arm boundaries.  Mercury HLDS often nests switches inside one
+  -- another (a switch-on-HeadVar__1 whose [|]/2 arm contains another
+  -- switch-on-HeadVar__2 with its own `has functor` markers); a
+  -- depth-agnostic split would slice the outer arms apart at every
+  -- inner functor marker and lose the inner switch's structure
+  -- entirely.
+  let parenDelta t =
+        let opens  = T.length (T.filter (== '(') t)
+            closes = T.length (T.filter (== ')') t)
+        in opens - closes
+      depths = scanl (+) 0 (map parenDelta ls)
+      depthBefore = init depths
+      functorIxs =
+        [ i | (i, (l, _d)) <- zip [0::Int ..] (zip ls depthBefore)
+            , "has functor" `T.isInfixOf` l ]
+      outerDepth = case functorIxs of
+        []    -> 0
+        (i:_) -> depthBefore !! i
+      isArmBoundary (l, d) =
+        "has functor" `T.isInfixOf` l && d == outerDepth
+      walk acc curArm [] =
+        reverse (case curArm of
+          Just (f, ls') -> (f, parseGoalLines (reverse ls')) : acc
+          Nothing       -> acc)
+      walk acc curArm ((l, d):rest)
+        | isArmBoundary (l, d) =
+            let functor = T.strip $ snd $ T.breakOnEnd "functor " l
+                acc' = case curArm of
+                  Just (f, ls') -> (f, parseGoalLines (reverse ls')) : acc
+                  Nothing       -> acc
+            in walk acc' (Just (functor, [])) rest
+        | otherwise =
+            let curArm' = fmap (\(f, ls') -> (f, l : ls')) curArm
+            in walk acc curArm' rest
+  in walk [] Nothing (zip ls depthBefore)
 
 parseSingleGoal :: Text -> MercuryGoal
 parseSingleGoal txt

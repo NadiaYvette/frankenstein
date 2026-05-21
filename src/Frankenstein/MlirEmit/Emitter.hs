@@ -889,6 +889,9 @@ emitProgramText prog =
     , "  func.func private @idris_double_eq(i64, i64) -> i64"
     , "  func.func private @idris_double_gte(i64, i64) -> i64"
     , "  func.func private @idris_double_gt(i64, i64) -> i64"
+    , "  func.func private @idris2_newIORef(i64, i64, i64) -> i64"
+    , "  func.func private @idris2_readIORef(i64, i64, i64) -> i64"
+    , "  func.func private @idris2_writeIORef(i64, i64, i64, i64) -> i64"
     , "  func.func private @cast_Integer_Double(i64) -> i64"
     , "  func.func private @cast_Double_Int(i64) -> i64"
     , "  func.func private @cast_Double_String(i64) -> i64"
@@ -1312,6 +1315,9 @@ emitProgramWasm prog =
     , "  func.func private @idris_double_eq(i64, i64) -> i64"
     , "  func.func private @idris_double_gte(i64, i64) -> i64"
     , "  func.func private @idris_double_gt(i64, i64) -> i64"
+    , "  func.func private @idris2_newIORef(i64, i64, i64) -> i64"
+    , "  func.func private @idris2_readIORef(i64, i64, i64) -> i64"
+    , "  func.func private @idris2_writeIORef(i64, i64, i64, i64) -> i64"
     , "  func.func private @cast_Integer_Double(i64) -> i64"
     , "  func.func private @cast_Double_Int(i64) -> i64"
     , "  func.func private @cast_Double_String(i64) -> i64"
@@ -4056,6 +4062,7 @@ externalRuntimeFns = Set.fromList
   , "idris_double_div", "idris_double_neg"
   , "idris_double_lt", "idris_double_lte", "idris_double_eq"
   , "idris_double_gte", "idris_double_gt"
+  , "idris2_newIORef", "idris2_readIORef", "idris2_writeIORef"
   , "cast_Integer_Double", "cast_Double_Int", "cast_Double_String"
   ]
 
@@ -4107,6 +4114,7 @@ externalRuntimeArity = Map.fromList
   , ("idris_double_div", 2), ("idris_double_neg", 1)
   , ("idris_double_lt", 2), ("idris_double_lte", 2), ("idris_double_eq", 2)
   , ("idris_double_gte", 2), ("idris_double_gt", 2)
+  , ("idris2_newIORef", 3), ("idris2_readIORef", 3), ("idris2_writeIORef", 4)
   , ("cast_Integer_Double", 1), ("cast_Double_Int", 1), ("cast_Double_String", 1)
   ]
 

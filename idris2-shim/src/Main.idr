@@ -223,6 +223,20 @@ vectToList : Vect n a -> List a
 vectToList []        = []
 vectToList (x :: xs) = x :: vectToList xs
 
+-- | Map an Idris2 %extern primitive (NmExtPrim's Name) to a runtime
+-- stub name.  %extern decls have no body — the backend is expected to
+-- provide them — so the shim must rewrite the use-site reference to
+-- something the Frankenstein runtime will link against.  Unknown
+-- prims fall through under their original showFullName so they show
+-- up as obvious unresolved symbols.
+externPrimName : Name -> String
+externPrimName n =
+    case showFullName n of
+        "Data.IORef/prim__newIORef"     => "idris2_newIORef"
+        "Data.IORef/prim__readIORef"    => "idris2_readIORef"
+        "Data.IORef/prim__writeIORef"   => "idris2_writeIORef"
+        other                            => other
+
 -- | Parse Idris2's foreign-call descriptor list.
 -- A CCS entry has the form "backend:opt1,opt2,opt3" — for the C
 -- target the first opt is the function name (see Compiler.Common.parseCC).
@@ -330,7 +344,7 @@ mutual
   renderExpr (NmExtPrim _ p args) =
       jsonObj
         [ ("eapp", jsonObj
-                      [ ("fn", jsonObj [("evar", mkName (showFullName p))])
+                      [ ("fn", jsonObj [("evar", mkName (externPrimName p))])
                       , ("args", jsonArr (map renderExpr args))
                       ])
         ]

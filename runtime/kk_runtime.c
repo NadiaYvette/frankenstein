@@ -2224,6 +2224,31 @@ int64_t kk_ref_set(int64_t ref, int64_t value) {
     return 0;
 }
 
+/* Idris2 %extern IORef primitives.  Signatures match the NmExtPrim
+ * call sites the shim generates: (erased type-arg, value/ref/..., world).
+ * The type arg is a stand-in literal we ignore; the world arg is the
+ * IO state token, also opaque.  Refcount management mirrors prim__putStr —
+ * the caller owns its references, we don't retain/drop anything here. */
+int64_t idris2_newIORef(int64_t _ty, int64_t initial, int64_t _world) {
+    (void)_ty; (void)_world;
+    return kk_ref_new(initial);
+}
+int64_t idris2_readIORef(int64_t _ty, int64_t ref, int64_t _world) {
+    (void)_ty; (void)_world;
+    int64_t v = kk_ref_get(ref);
+    kk_retain(v);  /* caller will drop this ref */
+    return v;
+}
+int64_t idris2_writeIORef(int64_t _ty, int64_t ref, int64_t value, int64_t _world) {
+    (void)_ty; (void)_world;
+    /* Drop the previous value so writes don't leak. */
+    int64_t old = kk_ref_get(ref);
+    kk_drop(old);
+    kk_retain(value);  /* the cell now owns a reference */
+    kk_set_field(ref, 0, value);
+    return 0;
+}
+
 /* Write field[idx] of a boxed value */
 void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     if (!kk_is_heap_ptr(ptr)) return;

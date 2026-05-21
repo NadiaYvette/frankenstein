@@ -374,7 +374,24 @@ extractArgNames ls =
   case filter isClauseHead ls of
     (clauseHead:_) ->
       let afterParen = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') clauseHead
-      in map T.strip $ T.splitOn "," afterParen
+          commaArgs = map T.strip $ T.splitOn "," afterParen
+          -- Mercury HLDS prints module-qualified infix operators with
+          -- their args in the operator-form clause head:
+          --   rational.(R1 < R2) :- ...
+          -- That's a 2-arg predicate; comma-splitting yields one arg
+          -- "R1 < R2".  Detect this and split on the infix operator.
+          infixOps = [" < ", " > ", " =< ", " >= ", " == ", " + ", " - "
+                     , " * ", " / "]
+      in case commaArgs of
+           [single] | any (`T.isInfixOf` single) infixOps ->
+             let tryOps []         = [single]
+                 tryOps (op:rest)
+                   | op `T.isInfixOf` single =
+                       let (l, r) = T.breakOn op single
+                       in [T.strip l, T.strip (T.drop (T.length op) r)]
+                   | otherwise = tryOps rest
+             in tryOps infixOps
+           _ -> commaArgs
     [] -> []
   where
     isClauseHead l =
@@ -413,7 +430,11 @@ parseGoalLines ls =
       conjParts = splitOnMarker "," stripped
       disjParts = splitOnMarker ";" stripped
   in case ls of
-    _ | any ("% cannot_fail switch on" `T.isInfixOf`) stripped ||
+    _ | Just (condLs, thenLs, elseLs) <- splitIfThenElse stripped ->
+          GoalIfThenElse (parseGoalLines condLs)
+                         (parseGoalLines thenLs)
+                         (parseGoalLines elseLs)
+      | any ("% cannot_fail switch on" `T.isInfixOf`) stripped ||
         any ("% switch on" `T.isInfixOf`) stripped ->
           parseSwitch stripped
       | any ("% conjunction" `T.isInfixOf`) stripped &&
@@ -422,6 +443,70 @@ parseGoalLines ls =
       | length disjParts > 1 ->
           GoalDisj (map parseGoalLines disjParts)
       | otherwise -> parseSingleGoal (T.unlines (filter (not . isComment) stripped))
+
+-- | Recognise Mercury HLDS if-then-else block structure.  HLDS prints:
+--   ( if
+--     <cond>
+--   then
+--     <then>
+--   else
+--     <else>
+--   )
+-- where 'if'/'then'/'else'/closing-')' may appear as their own lines or
+-- embedded in surrounding parens.  Returns (cond-lines, then-lines,
+-- else-lines) by scanning for 'if' / 'then' / 'else' markers at
+-- top-of-block paren depth; returns Nothing if no clear ITE is present.
+--
+-- Nested ITEs work because 'parseGoalLines' is called recursively on each
+-- segment and re-runs the splitter.
+splitIfThenElse :: [Text] -> Maybe ([Text], [Text], [Text])
+splitIfThenElse rawLs =
+  let strippedLs = map T.strip rawLs
+      -- The HLDS form starts with "( if" — either as a single line or
+      -- with "(" on one line and "if" on the next.  Detect either shape.
+      hasIfHeader = case strippedLs of
+        ("( if" : _)  -> True
+        ("(" : "if" : _) -> True
+        _             -> False
+  in if not hasIfHeader then Nothing
+     else
+       -- Find indices of 'then' and 'else' at depth-0 within the ITE block,
+       -- and the matching closing ')'.
+       let pairs = zip [0 :: Int ..] strippedLs
+           -- Helper: trace nesting starting at start index, counting
+           -- '(' and ')' on each line (HLDS keeps these in their own
+           -- lines or embedded — count syntactic open/close).
+           parenDelta t =
+             let opens  = T.length (T.filter (== '(') t)
+                 closes = T.length (T.filter (== ')') t)
+             in opens - closes
+           -- Walk lines after the 'if' (line 0 or 1), tracking depth.
+           -- depth starts at 1 (we are inside the opening '(').
+           startIdx = if take 1 strippedLs == ["( if"] then 1 else 2
+           walk _   []                acc = reverse acc
+           walk dep ((i,t):rest)      acc
+             | dep == 1 && t == "then" =
+                 walk dep rest ((i,"THEN"):acc)
+             | dep == 1 && t == "else" =
+                 walk dep rest ((i,"ELSE"):acc)
+             | dep == 0 = reverse acc  -- past the closing ')'
+             | otherwise =
+                 let dep' = dep + parenDelta t
+                 in walk dep' rest acc
+           markers = walk 1 (drop startIdx pairs) []
+           thenIdx = lookup "THEN" [(v,k) | (k,v) <- markers]
+           elseIdx = lookup "ELSE" [(v,k) | (k,v) <- markers]
+       in case (thenIdx, elseIdx) of
+            (Just tIdx, Just eIdx) | tIdx < eIdx ->
+              let condLs = drop startIdx (take tIdx strippedLs)
+                  thenLs = drop (tIdx + 1) (take eIdx strippedLs)
+                  -- Else block extends to the last meaningful line; trim
+                  -- trailing ')' which closes the enclosing ITE paren.
+                  rest   = drop (eIdx + 1) strippedLs
+                  trim t = T.dropWhileEnd (`elem` (" )." :: String)) (T.strip t)
+                  elseLs = reverse (dropWhile (\l -> T.null (trim l)) (reverse rest))
+              in Just (condLs, thenLs, elseLs)
+            _ -> Nothing
 
 isComment :: Text -> Bool
 isComment t = let s = T.strip t

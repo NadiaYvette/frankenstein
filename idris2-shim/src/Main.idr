@@ -182,7 +182,28 @@ castFnName Bits16Type  StringType  = "show_int"
 castFnName Bits32Type  StringType  = "show_int"
 castFnName Bits64Type  StringType  = "show_int"
 castFnName CharType    StringType  = "show_int"
-castFnName x           y           = "cast-" ++ show x ++ "-" ++ show y
+castFnName IntegerType DoubleType  = "cast_Integer_Double"
+castFnName IntType     DoubleType  = "cast_Integer_Double"
+castFnName Int8Type    DoubleType  = "cast_Integer_Double"
+castFnName Int16Type   DoubleType  = "cast_Integer_Double"
+castFnName Int32Type   DoubleType  = "cast_Integer_Double"
+castFnName Int64Type   DoubleType  = "cast_Integer_Double"
+castFnName Bits8Type   DoubleType  = "cast_Integer_Double"
+castFnName Bits16Type  DoubleType  = "cast_Integer_Double"
+castFnName Bits32Type  DoubleType  = "cast_Integer_Double"
+castFnName Bits64Type  DoubleType  = "cast_Integer_Double"
+castFnName DoubleType  IntType     = "cast_Double_Int"
+castFnName DoubleType  IntegerType = "cast_Double_Int"
+castFnName DoubleType  Int8Type    = "cast_Double_Int"
+castFnName DoubleType  Int16Type   = "cast_Double_Int"
+castFnName DoubleType  Int32Type   = "cast_Double_Int"
+castFnName DoubleType  Int64Type   = "cast_Double_Int"
+castFnName DoubleType  Bits8Type   = "cast_Double_Int"
+castFnName DoubleType  Bits16Type  = "cast_Double_Int"
+castFnName DoubleType  Bits32Type  = "cast_Double_Int"
+castFnName DoubleType  Bits64Type  = "cast_Double_Int"
+castFnName DoubleType  StringType  = "cast_Double_String"
+castFnName x           y           = "cast_" ++ show x ++ "_" ++ show y
 
 vectToList : Vect n a -> List a
 vectToList []        = []
@@ -348,7 +369,11 @@ mutual
 renderDef : Name -> NamedDef -> String
 renderDef name (MkNmFun args body) =
     let (m, t)  = splitName name
-        isMain  = m == "Main" && t == "main"
+        -- Strip the %World arg for whichever module declares `main`.
+        -- Idris2's `executable` directive can name any module (Main,
+        -- Test, surd's Demo.TrigTable etc.) as the entry point; the
+        -- def name is always "<that-module>.main".  Match on basename.
+        isMain  = t == "main"
         bodyJs  = renderExpr body
         -- Idris2's `main : IO ()` compiles to arity-1 taking a %World
         -- token; Frankenstein's MLIR wrapper expects nullary `main`.

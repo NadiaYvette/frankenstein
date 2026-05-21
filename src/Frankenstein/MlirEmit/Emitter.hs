@@ -856,6 +856,23 @@ emitProgramText prog =
     , "  // Idris2 bridge runtime stubs"
     , "  func.func private @idris2_putStr(i64, i64) -> i64"
     , "  func.func private @idris_str_head(i64) -> i64"
+    , "  func.func private @idris_crash(i64, i64) -> i64"
+    , "  func.func private @_raise(i64) -> i64"
+    , "  func.func private @idris_double_sin(i64) -> i64"
+    , "  func.func private @idris_double_cos(i64) -> i64"
+    , "  func.func private @idris_double_tan(i64) -> i64"
+    , "  func.func private @idris_double_asin(i64) -> i64"
+    , "  func.func private @idris_double_acos(i64) -> i64"
+    , "  func.func private @idris_double_atan(i64) -> i64"
+    , "  func.func private @idris_double_sqrt(i64) -> i64"
+    , "  func.func private @idris_double_exp(i64) -> i64"
+    , "  func.func private @idris_double_log(i64) -> i64"
+    , "  func.func private @idris_double_floor(i64) -> i64"
+    , "  func.func private @idris_double_ceiling(i64) -> i64"
+    , "  func.func private @idris_double_pow(i64, i64) -> i64"
+    , "  func.func private @cast_Integer_Double(i64) -> i64"
+    , "  func.func private @cast_Double_Int(i64) -> i64"
+    , "  func.func private @cast_Double_String(i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1252,6 +1269,23 @@ emitProgramWasm prog =
     , "  // Idris2 bridge runtime stubs"
     , "  func.func private @idris2_putStr(i64, i64) -> i64"
     , "  func.func private @idris_str_head(i64) -> i64"
+    , "  func.func private @idris_crash(i64, i64) -> i64"
+    , "  func.func private @_raise(i64) -> i64"
+    , "  func.func private @idris_double_sin(i64) -> i64"
+    , "  func.func private @idris_double_cos(i64) -> i64"
+    , "  func.func private @idris_double_tan(i64) -> i64"
+    , "  func.func private @idris_double_asin(i64) -> i64"
+    , "  func.func private @idris_double_acos(i64) -> i64"
+    , "  func.func private @idris_double_atan(i64) -> i64"
+    , "  func.func private @idris_double_sqrt(i64) -> i64"
+    , "  func.func private @idris_double_exp(i64) -> i64"
+    , "  func.func private @idris_double_log(i64) -> i64"
+    , "  func.func private @idris_double_floor(i64) -> i64"
+    , "  func.func private @idris_double_ceiling(i64) -> i64"
+    , "  func.func private @idris_double_pow(i64, i64) -> i64"
+    , "  func.func private @cast_Integer_Double(i64) -> i64"
+    , "  func.func private @cast_Double_Int(i64) -> i64"
+    , "  func.func private @cast_Double_String(i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -3984,6 +4018,12 @@ externalRuntimeFns = Set.fromList
   , "mercury_exn_fail", "mercury_fail"
   -- Idris2 bridge runtime stubs
   , "idris2_putStr", "idris_str_head"
+  , "idris_crash", "_raise"
+  , "idris_double_sin", "idris_double_cos", "idris_double_tan"
+  , "idris_double_asin", "idris_double_acos", "idris_double_atan"
+  , "idris_double_sqrt", "idris_double_exp", "idris_double_log"
+  , "idris_double_floor", "idris_double_ceiling", "idris_double_pow"
+  , "cast_Integer_Double", "cast_Double_Int", "cast_Double_String"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4025,6 +4065,12 @@ externalRuntimeArity = Map.fromList
   , ("mercury_choose", 0), ("mercury_collect_choices", 1)
   , ("mercury_exn_fail", 0), ("mercury_fail", 0)
   , ("idris2_putStr", 2), ("idris_str_head", 1)
+  , ("idris_crash", 2), ("_raise", 1)
+  , ("idris_double_sin", 1), ("idris_double_cos", 1), ("idris_double_tan", 1)
+  , ("idris_double_asin", 1), ("idris_double_acos", 1), ("idris_double_atan", 1)
+  , ("idris_double_sqrt", 1), ("idris_double_exp", 1), ("idris_double_log", 1)
+  , ("idris_double_floor", 1), ("idris_double_ceiling", 1), ("idris_double_pow", 2)
+  , ("cast_Integer_Double", 1), ("cast_Double_Int", 1), ("cast_Double_String", 1)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

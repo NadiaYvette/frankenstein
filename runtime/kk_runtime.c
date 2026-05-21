@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include <execinfo.h>
 #include "kk_runtime.h"
 #include "kk_cycle.h"
@@ -1791,6 +1792,87 @@ int64_t idris_str_head(int64_t s_i) {
     kk_string_t* flat = (kk_string_t*)flat_i;
     if (flat == NULL || flat->byte_len == 0) return 0;
     return (int64_t)(unsigned char)kk_str_bytes(flat)[0];
+}
+
+/* Idris2 Crash primitive: print the message and abort. */
+int64_t idris_crash(int64_t msg_i, int64_t _ignored) {
+    (void)_ignored;
+    fprintf(stderr, "idris_crash: ");
+    kk_string_t* s = (kk_string_t*)msg_i;
+    if (s != NULL && s->byte_len > 0) {
+        int64_t flat = kk_str_flatten(msg_i);
+        kk_string_t* fs = (kk_string_t*)flat;
+        fwrite(kk_str_bytes(fs), 1, (size_t)fs->byte_len, stderr);
+    }
+    fputc('\n', stderr);
+    abort();
+    return 0;
+}
+
+/* OrganIR ERaise lowering (NmCrash): unhandled exception. */
+int64_t _raise(int64_t e) {
+    (void)e;
+    fprintf(stderr, "frankenstein: unhandled raise\n");
+    abort();
+    return 0;
+}
+
+/* Double <-> i64 bit-cast helpers. */
+static inline double kk_i64_to_double(int64_t x) {
+    double d; memcpy(&d, &x, sizeof d); return d;
+}
+static inline int64_t kk_double_to_i64(double d) {
+    int64_t x; memcpy(&x, &d, sizeof x); return x;
+}
+
+#define IDRIS_DBL1(NAME) \
+    int64_t idris_double_##NAME(int64_t x) { \
+        return kk_double_to_i64(NAME(kk_i64_to_double(x))); \
+    }
+#define IDRIS_DBL2(NAME) \
+    int64_t idris_double_##NAME(int64_t a, int64_t b) { \
+        return kk_double_to_i64(NAME(kk_i64_to_double(a), kk_i64_to_double(b))); \
+    }
+
+IDRIS_DBL1(sin)
+IDRIS_DBL1(cos)
+IDRIS_DBL1(tan)
+IDRIS_DBL1(asin)
+IDRIS_DBL1(acos)
+IDRIS_DBL1(atan)
+IDRIS_DBL1(sqrt)
+IDRIS_DBL1(exp)
+IDRIS_DBL1(log)
+IDRIS_DBL1(floor)
+int64_t idris_double_ceiling(int64_t x) {
+    return kk_double_to_i64(ceil(kk_i64_to_double(x)));
+}
+IDRIS_DBL2(pow)
+
+#undef IDRIS_DBL1
+#undef IDRIS_DBL2
+
+/* Idris2 numeric casts that touch Double need explicit bit-cast plumbing
+ * (Frankenstein passes everything as i64, so Doubles are bit-patterns). */
+int64_t cast_Integer_Double(int64_t n) {
+    return kk_double_to_i64((double)n);
+}
+int64_t cast_Double_Int(int64_t d) {
+    return (int64_t)kk_i64_to_double(d);
+}
+int64_t cast_Double_String(int64_t d) {
+    char tmp[64];
+    int n = snprintf(tmp, sizeof tmp, "%g", kk_i64_to_double(d));
+    if (n < 0) n = 0;
+    /* Copy onto the heap and hand ownership to the string (owns=1)
+     * — the stack buffer can't outlive this call. */
+    char* heap = (char*)malloc((size_t)n + 1);
+    if (!heap) return kk_string_empty();
+    memcpy(heap, tmp, (size_t)n);
+    heap[n] = '\0';
+    int64_t r = (int64_t)kk_str_alloc_leaf(heap, (int64_t)n, 1);
+    kk_register_string(r);
+    return r;
 }
 
 int64_t kk_str_eq(int64_t a_i, int64_t b_i) {

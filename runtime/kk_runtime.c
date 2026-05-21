@@ -2668,6 +2668,62 @@ int64_t integer_mod(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
  * (named `integer_neg`) so the call is saturated. */
 int64_t integer_neg(int64_t a) { return -a; }
 
+/* ---- Mercury HLDS higher-order shims -------------------------------------
+ * The bridge sees Mercury `apply(F, X)`, `list.foldl(P, L, A)` etc. as
+ * direct calls; after arity-tagging and stdlib-prefix filtering, the
+ * call-site link symbols are `apply__2`, `list_foldl`, etc.  These
+ * shims forward to the runtime's existing closure/list machinery
+ * (kk_call_closure_N, kk_list_foldl, kk_list_map, kk_list_filter).
+ *
+ * Closure ABI (kk_runtime.h):  closure[0] = fptr i64; fptr is invoked
+ * as fptr(closure, args...).  All values flow as i64.
+ */
+/* Forward declarations of the existing helpers (defined later in this TU). */
+static int64_t kk_call_closure_1(int64_t closure, int64_t a);
+static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b);
+int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f);
+int64_t kk_list_map(int64_t xs, int64_t f);
+int64_t kk_list_filter(int64_t xs, int64_t p);
+int64_t kk_list_length(int64_t xs);
+
+/* Generic HO dispatch (apply / call / class_method_call). */
+int64_t apply__2(int64_t f, int64_t a)        { return kk_call_closure_1(f, a); }
+int64_t apply__3(int64_t f, int64_t a, int64_t b) { return kk_call_closure_2(f, a, b); }
+int64_t call__2 (int64_t f, int64_t a)        { return kk_call_closure_1(f, a); }
+int64_t call__3 (int64_t f, int64_t a, int64_t b) { return kk_call_closure_2(f, a, b); }
+int64_t class_method_call__2(int64_t f, int64_t a) {
+    return kk_call_closure_1(f, a);
+}
+int64_t class_method_call__3(int64_t f, int64_t a, int64_t b) {
+    return kk_call_closure_2(f, a, b);
+}
+
+/* Mercury list.foldl(F, L, A0) = A — typeclass dispatch prepends two
+ * TypeInfo args, so the bridge sees 5 inputs (TI1, TI2, F, L, A0). */
+int64_t list_foldl(int64_t ti1, int64_t ti2,
+                   int64_t f, int64_t list, int64_t acc) {
+    (void)ti1; (void)ti2;
+    return kk_list_foldl(list, acc, f);
+}
+
+/* list.map(F, L) — 4 inputs after the two TypeInfo args. */
+int64_t list_map(int64_t ti1, int64_t ti2, int64_t f, int64_t list) {
+    (void)ti1; (void)ti2;
+    return kk_list_map(list, f);
+}
+
+/* list.filter(P, L) — 3 inputs (one TypeInfo, the pred, the list). */
+int64_t list_filter(int64_t ti, int64_t p, int64_t list) {
+    (void)ti;
+    return kk_list_filter(list, p);
+}
+
+/* list.length(L) — 2 inputs (TypeInfo + the list). */
+int64_t list_length(int64_t ti, int64_t list) {
+    (void)ti;
+    return kk_list_length(list);
+}
+
 /* Mercury require.error/1 — fatal error with a message.  Prints the
  * message (a kk_string_t pointer) to stderr with a trailing newline,
  * then exits with status 1.  Used by surd's rational_norm when the

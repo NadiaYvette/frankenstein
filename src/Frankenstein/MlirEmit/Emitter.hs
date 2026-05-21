@@ -924,6 +924,16 @@ emitProgramText prog =
     , "  func.func private @require_func_error(i64, i64, i64) -> i64"
     , "  func.func private @integer_integer(i64) -> i64"
     , "  func.func private @rational() -> i64"
+    , "  func.func private @apply__2(i64, i64) -> i64"
+    , "  func.func private @apply__3(i64, i64, i64) -> i64"
+    , "  func.func private @call__2(i64, i64) -> i64"
+    , "  func.func private @call__3(i64, i64, i64) -> i64"
+    , "  func.func private @class_method_call__2(i64, i64) -> i64"
+    , "  func.func private @class_method_call__3(i64, i64, i64) -> i64"
+    , "  func.func private @list_foldl(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_map(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_filter(i64, i64, i64) -> i64"
+    , "  func.func private @list_length(i64, i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1379,6 +1389,16 @@ emitProgramWasm prog =
     , "  func.func private @require_func_error(i64, i64, i64) -> i64"
     , "  func.func private @integer_integer(i64) -> i64"
     , "  func.func private @rational() -> i64"
+    , "  func.func private @apply__2(i64, i64) -> i64"
+    , "  func.func private @apply__3(i64, i64, i64) -> i64"
+    , "  func.func private @call__2(i64, i64) -> i64"
+    , "  func.func private @call__3(i64, i64, i64) -> i64"
+    , "  func.func private @class_method_call__2(i64, i64) -> i64"
+    , "  func.func private @class_method_call__3(i64, i64, i64) -> i64"
+    , "  func.func private @list_foldl(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_map(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_filter(i64, i64, i64) -> i64"
+    , "  func.func private @list_length(i64, i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4147,6 +4167,12 @@ externalRuntimeFns = Set.fromList
   , "require_func_error" -- require.func_error/3 — same with type-info
   , "integer_integer"    -- integer.integer/1 — wrap (identity in i64 model)
   , "rational"      -- atom name passed to type_ctor_info (error path)
+  -- Mercury higher-order dispatch shims (call into kk_call_closure_N)
+  , "apply__2", "apply__3"
+  , "call__2", "call__3"
+  , "class_method_call__2", "class_method_call__3"
+  -- Mercury list HO functions — typeclass dispatch prepends TypeInfo args
+  , "list_foldl", "list_map", "list_filter", "list_length"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4208,6 +4234,10 @@ externalRuntimeArity = Map.fromList
   , ("unify", 2)
   , ("io_format", 3), ("require_error", 1), ("rational", 0)
   , ("require_func_error", 3), ("integer_integer", 1)
+  , ("apply__2", 2), ("apply__3", 3)
+  , ("call__2", 2),  ("call__3", 3)
+  , ("class_method_call__2", 2), ("class_method_call__3", 3)
+  , ("list_foldl", 5), ("list_map", 4), ("list_filter", 3), ("list_length", 2)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

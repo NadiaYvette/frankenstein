@@ -393,7 +393,7 @@ translateGoalAsTest :: Set Text -> Set Text -> MercuryGoal -> Expr
 translateGoalAsTest knownCtors env (GoalCall predName' args)
   | Just op <- T.stripPrefix "int." predName'
   , [lhs, rhs] <- args =
-      EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
+      EApp (EVar (Name op 0)) [argExpr lhs, argExpr rhs]
   | otherwise =
       let isStdlibPrefixed n = any (`T.isPrefixOf` n)
             ["io.", "int.", "integer.", "string.", "list.", "char."
@@ -403,7 +403,7 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
             | isStdlibPrefixed predName' = predName'
             | otherwise = predName' <> "__" <> T.pack (show (length args))
       in EApp (EVar (Name taggedName 0))
-           (map (\a -> EVar (Name a 0)) args)
+           (map argExpr args)
 translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
   []  -> ELit (LitInt 1)
   [g] -> translateGoalAsTest knownCtors env g
@@ -510,27 +510,27 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       callExpr
         | Just op <- stripIntOp predName'
         , [lhs, rhs] <- args =
-            EApp (EVar (Name op 0)) [EVar (Name lhs 0), EVar (Name rhs 0)]
+            EApp (EVar (Name op 0)) [argExpr lhs, argExpr rhs]
         -- Mercury io stdlib calls: route through the Frankenstein
         -- runtime's string printer.  The trailing two args are the
         -- io::di/uo state variables — discarded since the runtime is
         -- effectful but does not thread an IO state token.
         | Just rtName <- ioCallRuntimeName predName' args =
             case args of
-              (s:_) -> EApp (EVar (Name rtName 0)) [EVar (Name s 0)]
+              (s:_) -> EApp (EVar (Name rtName 0)) [argExpr s]
               []    -> EApp (EVar (Name rtName 0)) []
         -- Unary integer negation: the bridge's parseMercuryBuiltin
         -- emits `integer.(- X)` as `integer.-` with 1 arg.  The
         -- runtime's @integer_zm@ is binary subtraction; route to a
         -- dedicated unary stub instead so the call is saturated.
         | predName' == "integer.-", [a] <- callInputs =
-            EApp (EVar (Name "integer_neg" 0)) [EVar (Name a 0)]
+            EApp (EVar (Name "integer_neg" 0)) [argExpr a]
         -- Unary integer plus: identity in the i64 model.
         | predName' == "integer.+", [a] <- callInputs =
-            EVar (Name a 0)
+            argExpr a
         | otherwise =
             EApp (EVar (Name taggedName 0))
-                 (map (\a -> EVar (Name a 0)) callInputs)
+                 (map argExpr callInputs)
       stripIntOp n = T.stripPrefix "int." n
       -- Mercury io.* predicates that have a direct runtime equivalent.
       -- Returns the Frankenstein runtime name when the call shape matches.
@@ -738,7 +738,9 @@ stdlibCtorNames = Set.fromList
   [ "s", "i", "f", "c"
   , "string.s", "string.i", "string.f", "string.c"
   , "type_ctor_info", "private_builtin.type_info"
-  , "list_nil", "list_cons"            -- emitted by parseListLiteral
+  , "list_Nil", "list_Cons"            -- emitted by parseListLiteral
+                                       -- (capitalised so the bridge hits
+                                       -- kkConsTag/kkNilTag fast path)
   , "list.[]"
   -- builtin comparison_result tags (parseQualifiedOp emits these)
   , "builtin.=", "builtin.<", "builtin.>"
@@ -754,15 +756,43 @@ stdlibCtorNames = Set.fromList
 
 -- | Lift a Mercury HLDS atom into the right Core expression: int
 -- literal → ELit (LitInt); double-quoted string → ELit (LitString);
--- anything else falls back to an EVar reference (which will resolve
--- against the binding env or escape as a free name downstream).
+-- single-quoted char → ELit (LitInt codepoint); anything else falls
+-- back to an EVar reference (which resolves against the binding env
+-- or escapes as a free name downstream).
 argExpr :: Text -> Expr
 argExpr a =
   case readMaybe (T.unpack a) :: Maybe Integer of
     Just n  -> ELit (LitInt n)
     Nothing -> case parseMercuryStringLit a of
       Just s  -> ELit (LitString s)
-      Nothing -> EVar (Name a 0)
+      Nothing -> case parseMercuryCharLit a of
+        Just cp -> ELit (LitInt cp)
+        Nothing -> EVar (Name a 0)
+
+-- | Recognise Mercury's @'c'@ char literal form and return the
+-- codepoint as an Integer.  Used by 'argExpr' so a char arg like
+-- @'a'@ doesn't leak as a free EVar reference (sanitised to
+-- @_a__$0@ at link time).
+parseMercuryCharLit :: Text -> Maybe Integer
+parseMercuryCharLit t = case T.uncons t of
+  Just ('\'', rest) -> case T.unsnoc rest of
+    Just (inner, '\'') -> case T.uncons inner of
+      Just (c, rest')
+        | T.null rest' -> Just (toInteger (fromEnum c))
+      -- Mercury escapes like '\n', '\t', '\\', '\''
+      _ | T.length inner == 2
+        , Just ('\\', after) <- T.uncons inner
+        , Just (esc, _) <- T.uncons after
+        -> case esc of
+             'n' -> Just 10
+             't' -> Just 9
+             'r' -> Just 13
+             '\\' -> Just 92
+             '\'' -> Just 39
+             _   -> Just (toInteger (fromEnum esc))
+      _ -> Nothing
+    _ -> Nothing
+  _ -> Nothing
 
 -- | Common type shortcuts used by the translator.
 intTy :: Type

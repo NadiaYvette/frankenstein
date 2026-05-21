@@ -966,18 +966,18 @@ parseListLiteral lhs rhs =
       Just (inner, ']') ->
         let stripped = T.strip inner
         in if T.null stripped
-           then Just (GoalConstruct lhs "list_nil" [])
+           -- Names end in "Nil" / "Cons" so the bridge's
+           -- Core.ConTags.assignProgramTags hits its fast path
+           -- (kkNilTag = 31636, kkConsTag = 46589) — matching the C
+           -- runtime's KK_HASKELL_NIL_TAG / KK_HASKELL_CONS_TAG so
+           -- bridge-built and runtime-built list cells share tags.
+           then Just (GoalConstruct lhs "list_Nil" [])
            else case T.breakOn "|" stripped of
              (h, t) | not (T.null t) ->
-               Just (GoalConstruct lhs "list_cons"
+               Just (GoalConstruct lhs "list_Cons"
                        [T.strip h, T.strip (T.drop 1 t)])
              _ ->
-               -- "[a, b, c]" form — desugar to nested cons.
-               -- For the smoke-test path only "[X | Y]" appears, so
-               -- the unparenthesised form falls through to nil if
-               -- the inner is empty after the strip above; otherwise
-               -- treat as a 1-element list `[X]` = `[X | []]`.
-               Just (GoalConstruct lhs "list_cons"
+               Just (GoalConstruct lhs "list_Cons"
                        [T.strip stripped, "[]"])
       _ -> Nothing
     _ -> Nothing

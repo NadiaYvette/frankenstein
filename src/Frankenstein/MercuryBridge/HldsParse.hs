@@ -248,8 +248,41 @@ extractPredicates (l:ls)
   | "  % pred id " `T.isPrefixOf` l =
       -- Collect lines until next pred id
       let (block, rest) = span (\x -> not ("  % pred id " `T.isPrefixOf` x)) ls
-      in parsePredBlock l block : extractPredicates rest
+      in if isStdlibPredHeader l
+         then extractPredicates rest  -- skip Mercury stdlib preds
+         else parsePredBlock l block : extractPredicates rest
   | otherwise = extractPredicates ls
+
+-- | Recognise pred headers belonging to Mercury stdlib modules.  mmc's
+-- HLDS dump for a user module includes pred blocks for imported stdlib
+-- predicates that the user module references (for type-check context);
+-- translating those would re-emit list.sort, list.merge, term.var, etc.
+-- as user defs with mismatched names.  Skip them — runtime stubs cover
+-- whatever the bridge actually needs to call into.
+isStdlibPredHeader :: Text -> Bool
+isStdlibPredHeader headerLine =
+  case T.breakOn "`" headerLine of
+    (_, rest) | not (T.null rest) ->
+      let qname = T.takeWhile (/= '\'') (T.drop 1 rest)
+          modName = case T.breakOnEnd "." qname of
+            ("", _)   -> ""
+            (m, _)    -> T.dropEnd 1 m  -- strip trailing "."
+      in Set.member modName stdlibModules
+    _ -> False
+
+-- Mercury stdlib modules whose HLDS contributions we always skip.
+-- Aligned with 'opaqueModules' (which controls BFS), plus a few
+-- mmc-internal module names that surface in HLDS dumps but don't
+-- correspond to anything a user can import.
+stdlibModules :: Set.Set Text
+stdlibModules = Set.fromList
+  [ "integer", "list", "string", "io", "int", "char", "bool", "maybe"
+  , "require", "exception", "math", "float", "array", "map", "set"
+  , "tree234", "assoc_list", "pair", "ordering", "type_desc"
+  , "term", "varset", "term_io"   -- term library (used internally by mmc)
+  , "builtin", "private_builtin", "table_builtin", "type_info_hlds"
+  , "rtti_implementation", "string.format", "stream"
+  ]
 
 parsePredBlock :: Text -> [Text] -> MercuryPred
 parsePredBlock headerLine bodyLines =
@@ -449,6 +482,13 @@ parseSingleGoal txt
               Just (ctor, args) -> GoalConstruct lhs' ctor args
               -- Plain list literal syntax — keep the old best-effort path.
               Nothing | "[" `T.isInfixOf` rhs' -> GoalConstruct lhs' rhs' []
+              -- Module-qualified no-arg call: 'V = integer.zero' should
+              -- bind V to a call of integer.zero, not unify V with the
+              -- string 'integer.zero'.  Detect a clean 'module.name'
+              -- shape and emit GoalConstruct with zero args.
+              Nothing | "." `T.isInfixOf` rhs'
+                      , isCleanCallName rhs'
+                          -> GoalConstruct lhs' rhs' []
               -- Otherwise it's a bare unification / assignment.
               Nothing -> GoalUnify lhs' rhs'
   -- Mercury builtin without an LHS bind (rare — typically tests inside a

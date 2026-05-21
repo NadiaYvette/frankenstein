@@ -898,6 +898,24 @@ emitProgramText prog =
     , "  func.func private @cast_Double_Int(i64) -> i64"
     , "  func.func private @cast_Double_String(i64) -> i64"
     , ""
+    , "  // Mercury surd-mercury integer-module substitution (i64-based)"
+    , "  func.func private @integer_zero() -> i64"
+    , "  func.func private @integer_one() -> i64"
+    , "  func.func private @integer_is_zero(i64) -> i64"
+    , "  func.func private @integer_zl(i64, i64) -> i64"
+    , "  func.func private @integer_zg(i64, i64) -> i64"
+    , "  func.func private @integer_zezl(i64, i64) -> i64"
+    , "  func.func private @integer_zgze(i64, i64) -> i64"
+    , "  func.func private @integer_zp(i64, i64) -> i64"
+    , "  func.func private @integer_zm(i64, i64) -> i64"
+    , "  func.func private @integer_zt(i64, i64) -> i64"
+    , "  func.func private @integer_zs(i64, i64) -> i64"
+    , "  func.func private @integer_abs(i64) -> i64"
+    , "  func.func private @integer_signum(i64) -> i64"
+    , "  func.func private @integer_float(i64) -> i64"
+    , "  func.func private @integer_to_string(i64) -> i64"
+    , "  func.func private @unify(i64, i64) -> i64"
+    , ""
     , externDeclText
     , kokaBuiltinText
     , "  // Lifted functions"
@@ -1325,6 +1343,24 @@ emitProgramWasm prog =
     , "  func.func private @cast_Integer_Double(i64) -> i64"
     , "  func.func private @cast_Double_Int(i64) -> i64"
     , "  func.func private @cast_Double_String(i64) -> i64"
+    , ""
+    , "  // Mercury surd-mercury integer-module substitution (i64-based)"
+    , "  func.func private @integer_zero() -> i64"
+    , "  func.func private @integer_one() -> i64"
+    , "  func.func private @integer_is_zero(i64) -> i64"
+    , "  func.func private @integer_zl(i64, i64) -> i64"
+    , "  func.func private @integer_zg(i64, i64) -> i64"
+    , "  func.func private @integer_zezl(i64, i64) -> i64"
+    , "  func.func private @integer_zgze(i64, i64) -> i64"
+    , "  func.func private @integer_zp(i64, i64) -> i64"
+    , "  func.func private @integer_zm(i64, i64) -> i64"
+    , "  func.func private @integer_zt(i64, i64) -> i64"
+    , "  func.func private @integer_zs(i64, i64) -> i64"
+    , "  func.func private @integer_abs(i64) -> i64"
+    , "  func.func private @integer_signum(i64) -> i64"
+    , "  func.func private @integer_float(i64) -> i64"
+    , "  func.func private @integer_to_string(i64) -> i64"
+    , "  func.func private @unify(i64, i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4075,6 +4111,13 @@ externalRuntimeFns = Set.fromList
   , "idris_double_gte", "idris_double_gt"
   , "idris2_newIORef", "idris2_readIORef", "idris2_writeIORef"
   , "cast_Integer_Double", "cast_Double_Int", "cast_Double_String"
+  -- Mercury surd-mercury integer-module substitution (i64-based; lossy
+  -- vs arbitrary precision but sufficient for smoke tests).
+  , "integer_zero", "integer_one", "integer_is_zero"
+  , "integer_zl", "integer_zg", "integer_zezl", "integer_zgze"
+  , "integer_zp", "integer_zm", "integer_zt", "integer_zs"
+  , "integer_abs", "integer_signum", "integer_float", "integer_to_string"
+  , "unify"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4127,6 +4170,12 @@ externalRuntimeArity = Map.fromList
   , ("idris_double_gte", 2), ("idris_double_gt", 2)
   , ("idris2_newIORef", 3), ("idris2_readIORef", 3), ("idris2_writeIORef", 4)
   , ("cast_Integer_Double", 1), ("cast_Double_Int", 1), ("cast_Double_String", 1)
+  , ("integer_zero", 0), ("integer_one", 0), ("integer_is_zero", 1)
+  , ("integer_zl", 2), ("integer_zg", 2), ("integer_zezl", 2), ("integer_zgze", 2)
+  , ("integer_zp", 2), ("integer_zm", 2), ("integer_zt", 2), ("integer_zs", 2)
+  , ("integer_abs", 1), ("integer_signum", 1), ("integer_float", 1)
+  , ("integer_to_string", 1)
+  , ("unify", 2)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

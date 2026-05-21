@@ -2612,6 +2612,45 @@ int64_t mercury_choose(void) {
 int64_t mercury_fail(void) { return 0; }
 int64_t mercury_exn_fail(void) { return 0; }
 
+/* Mercury stdlib stubs for the surd-mercury integer module.  Surd
+ * vendors Mercury's stdlib 'integer.m' (arbitrary precision), but
+ * Frankenstein substitutes a plain-i64 model — sufficient for the
+ * smoke tests, lossy for large values.  Names match what the bridge
+ * emits after sanitization of 'integer.<op>'. */
+int64_t integer_zero(void)               { return 0; }
+int64_t integer_one(void)                { return 1; }
+int64_t integer_is_zero(int64_t x)       { return x == 0 ? 1 : 0; }
+int64_t integer_zl(int64_t a, int64_t b) { return a <  b ? 1 : 0; } /* < */
+int64_t integer_zg(int64_t a, int64_t b) { return a >  b ? 1 : 0; } /* > */
+int64_t integer_zezl(int64_t a, int64_t b){return a <= b ? 1 : 0; } /* =< */
+int64_t integer_zgze(int64_t a, int64_t b){return a >= b ? 1 : 0; } /* >= */
+int64_t integer_zp(int64_t a, int64_t b) { return a + b; }          /* + */
+int64_t integer_zm(int64_t a, int64_t b) { return a - b; }          /* - */
+int64_t integer_zt(int64_t a, int64_t b) { return a * b; }          /* * */
+int64_t integer_zs(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; } /* / */
+int64_t integer_abs(int64_t x)           { return x < 0 ? -x : x; }
+int64_t integer_signum(int64_t x)        { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
+int64_t integer_float(int64_t x)         { double d = (double)x;
+                                            int64_t b; memcpy(&b, &d, 8); return b; }
+
+/* integer.to_string: format an int as decimal in an owned heap string. */
+int64_t integer_to_string(int64_t x) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof tmp, "%lld", (long long)x);
+    if (n < 0) n = 0;
+    char* heap = (char*)malloc((size_t)n + 1);
+    if (!heap) return kk_string_empty();
+    memcpy(heap, tmp, (size_t)n);
+    heap[n] = '\0';
+    int64_t r = (int64_t)kk_str_alloc_leaf(heap, (int64_t)n, 1);
+    kk_register_string(r);
+    return r;
+}
+
+/* Mercury builtin.unify/2 — structural equality.  Forwards to
+ * kk_structural_eq which already handles the i64/string/arena cases. */
+int64_t unify(int64_t a, int64_t b) { return kk_structural_eq(a, b); }
+
 int64_t mercury_collect_choices(int64_t fn_ptr) {
     typedef int64_t (*body_fn_t)(void);
     body_fn_t body = (body_fn_t)fn_ptr;

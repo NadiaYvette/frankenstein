@@ -2676,6 +2676,8 @@ int64_t int_zp(int64_t a, int64_t b) { return a + b; }
 int64_t int_zm(int64_t a, int64_t b) { return a - b; }
 int64_t int_zt(int64_t a, int64_t b) { return a * b; }
 int64_t int_zs(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+/* Mercury int.// (integer division, sanitises to "int___"). */
+int64_t int___(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 int64_t int_zl(int64_t a, int64_t b) { return a <  b ? 1 : 0; }
 int64_t int_zg(int64_t a, int64_t b) { return a >  b ? 1 : 0; }
 int64_t int_zezl(int64_t a, int64_t b){ return a <= b ? 1 : 0; }

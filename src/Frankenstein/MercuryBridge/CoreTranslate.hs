@@ -607,9 +607,26 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
         ("io.print_line",   3) -> Just "println_str"
         ("io.nl",           2) -> Just "putStrLn"  -- prints just newline (need empty string + putStrLn)
         _                      -> Nothing
+      -- Default-bind every secondary trailing-unbound output to 0.
+      -- The call only returns one value (the FIRST output), but multi-
+      -- output preds like @poly.div_mod(In1, In2, Q, R)@ have the
+      -- caller subsequently reference R as if bound.  Without a default
+      -- binding, R surfaces as an unresolved EVar leaks at link time.
+      -- @0@ is a placeholder — semantically wrong but link-clean, and
+      -- programs that actually depend on the secondary output will
+      -- need an explicit multi-output tuple-returning protocol later.
+      secondaryOutputs = case trailingUnbound of
+        (_:rest) -> rest
+        []       -> []
+      wrapSecondaries body = foldr
+        (\n acc -> ELet [[Bind (Name n 0) intTy (ELit (LitInt 0)) DefVal]] acc)
+        body
+        secondaryOutputs
   in case outputBinding of
-       Nothing      -> ELet [[Bind (Name "_" 0) intTy callExpr DefVal]] k
-       Just outName -> ELet [[Bind (Name outName 0) intTy callExpr DefVal]] k
+       Nothing      -> ELet [[Bind (Name "_" 0) intTy callExpr DefVal]]
+                            (wrapSecondaries k)
+       Just outName -> ELet [[Bind (Name outName 0) intTy callExpr DefVal]]
+                            (wrapSecondaries k)
 
 translateGoalK kctors env (GoalConj goals) k =
   -- foldr: first goal wraps the rest (left-to-right execution order).

@@ -937,6 +937,7 @@ emitProgramText prog =
     , "  func.func private @int_zm(i64, i64) -> i64"
     , "  func.func private @int_zt(i64, i64) -> i64"
     , "  func.func private @int_zs(i64, i64) -> i64"
+    , "  func.func private @int___(i64, i64) -> i64"
     , "  func.func private @int_zl(i64, i64) -> i64"
     , "  func.func private @int_zg(i64, i64) -> i64"
     , "  func.func private @int_zezl(i64, i64) -> i64"
@@ -1539,6 +1540,7 @@ emitProgramWasm prog =
     , "  func.func private @int_zm(i64, i64) -> i64"
     , "  func.func private @int_zt(i64, i64) -> i64"
     , "  func.func private @int_zs(i64, i64) -> i64"
+    , "  func.func private @int___(i64, i64) -> i64"
     , "  func.func private @int_zl(i64, i64) -> i64"
     , "  func.func private @int_zg(i64, i64) -> i64"
     , "  func.func private @int_zezl(i64, i64) -> i64"
@@ -4541,7 +4543,7 @@ externalRuntimeFns = Set.fromList
   , "integer_neg"  -- unary integer negation (saturated counterpart to
                    -- the binary integer_zm)
   -- Mercury `int.<op>` aliases (i64 model — identical to integer.*)
-  , "int_zp", "int_zm", "int_zt", "int_zs"
+  , "int_zp", "int_zm", "int_zt", "int_zs", "int___"
   , "int_zl", "int_zg", "int_zezl", "int_zgze", "int_zezeze"
   , "int_rem", "int_mod", "int_max", "int_min", "int_abs", "int_neg"
   , "integer_divide_with_rem"
@@ -4672,6 +4674,7 @@ externalRuntimeArity = Map.fromList
   , ("integer_to_string", 1)
   , ("integer___", 2), ("integer_rem", 2), ("integer_mod", 2), ("integer_neg", 1)
   , ("int_zp", 2), ("int_zm", 2), ("int_zt", 2), ("int_zs", 2)
+  , ("int___", 2)
   , ("int_zl", 2), ("int_zg", 2), ("int_zezl", 2), ("int_zgze", 2), ("int_zezeze", 2)
   , ("int_rem", 2), ("int_mod", 2), ("int_max", 2), ("int_min", 2)
   , ("int_abs", 1), ("int_neg", 1)

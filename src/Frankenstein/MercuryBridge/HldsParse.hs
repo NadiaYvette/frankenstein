@@ -793,14 +793,37 @@ splitLambda strippedLs = case strippedLs of
     parseLambdaParams paramText isFunc afterParens =
       let chunks = map T.strip (T.splitOn "," paramText)
           extractName ch = T.strip (T.takeWhile (\c -> c /= ':' && c /= ' ') ch)
-          inputs = filter (not . T.null) (map extractName chunks)
-          mOut =
-            if not isFunc then Nothing
-            else case T.breakOn "(" (T.dropWhile (/= '=') afterParens) of
-                   (_, rest) | not (T.null rest) ->
-                     let inside = T.takeWhile (/= ')') (T.drop 1 rest)
-                     in Just (extractName inside)
-                   _ -> Nothing
+          -- Extract the mode marker after "::" — in / out / di / uo /
+          -- unused.  An empty mode means we couldn't see one (probably
+          -- pre-mode-inferred dump or a non-standard form); default to
+          -- treating the param as an input to be safe (matches the
+          -- previous behaviour for forms without explicit modes).
+          extractMode ch = case T.breakOn "::" ch of
+            (_, rest) | not (T.null rest) -> T.strip (T.drop 2 rest)
+            _                             -> T.empty
+          isInputMode m = T.null m
+                       || m == "in"
+                       || m == "di"
+                       || T.isPrefixOf "in(" m  -- HO mode like `in((pred(in) is semidet))`
+          named = [ (extractName c, extractMode c) | c <- chunks
+                                                   , not (T.null c) ]
+          inputs = [ n | (n, m) <- named, isInputMode m ]
+          predOuts = [ n | (n, m) <- named, not (isInputMode m) ]
+          mOut
+            | isFunc =
+                case T.breakOn "(" (T.dropWhile (/= '=') afterParens) of
+                  (_, rest) | not (T.null rest) ->
+                    let inside = T.takeWhile (/= ')') (T.drop 1 rest)
+                    in Just (extractName inside)
+                  _ -> Nothing
+            -- Pred forms with explicit @out@/@uo@ modes get their
+            -- terminator from the FIRST output param (the predicate's
+            -- "primary" return value, matching translatePred's
+            -- choice of @head outputModes@).  The OTHER pred outputs
+            -- stay live as variables the lambda body must bind on its
+            -- own; we just don't pre-register them as inputs.
+            | (o:_) <- predOuts = Just o
+            | otherwise = Nothing
       in (inputs, mOut)
 
 -- | Recognise Mercury HLDS if-then-else block structure.  HLDS prints:

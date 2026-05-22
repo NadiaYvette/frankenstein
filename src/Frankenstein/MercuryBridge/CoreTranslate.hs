@@ -40,6 +40,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Text.Read (readMaybe)
 import Control.Applicative ((<|>))
+import Data.Maybe (isJust)
 
 -- | Translate a full Mercury HLDS module to Frankenstein Core
 translateHlds :: MercuryHLDS -> Either Text Program
@@ -518,21 +519,34 @@ translateGoalK _kctors env (GoalUnify x y) k =
                   DefVal]] k
 
 translateGoalK _kctors _env (GoalCall predName' args) k =
-  -- Identify the output variable using a "last unbound arg" heuristic.
+  -- Identify output variables using a "trailing unbound args" heuristic.
   -- Mercury HLDS lists every argument of a predicate at the call site,
-  -- inputs and outputs alike.  For det predicates, the output is bound
-  -- on return — so the unbound last arg names the receive slot, not an
-  -- input value.  Passing it to the callee as if it were an input
-  -- produces a free reference that the emitter resolves to a top-level
-  -- 0-arg call (`@STATE_VARIABLE_IO_8$0()`), surfacing later as an
-  -- unresolved symbol at link time.
+  -- inputs and outputs alike.  For det predicates whose mode declaration
+  -- is `(in, in, out, out)` (e.g. poly.div_mod / 4), BOTH trailing outputs
+  -- are unbound at the call site and must be dropped from the input
+  -- arg list — otherwise the call's arity disagrees with translatePred's
+  -- definition arity (which only counts ModeIn/ModeDi positions).
+  --
+  -- The bind side: we treat the FIRST trailing-unbound arg as the
+  -- "primary" output (the value the call returns), matching translatePred's
+  -- choice of @outputName = head [ args !! i | i <- outputModes ]@.
+  -- Additional trailing outputs are dropped without re-binding; this
+  -- mirrors the bridge's current behaviour for multi-output preds where
+  -- only the first output's value flows through the CPS chain.
   let env = _env
-      (callInputs, outputBinding) = case args of
-        [] -> ([], Nothing)
-        _  -> let outName = last args
-              in if Set.member outName env
-                 then (args, Nothing)
-                 else (init args, Just outName)
+      isLitArg t = isJust (readMaybe (T.unpack t) :: Maybe Integer)
+                || isJust (parseMercuryStringLit t)
+                || isJust (parseMercuryCharLit t)
+      isBound t = Set.member t env || isLitArg t
+      -- Walk args from the right, dropping a contiguous run of unbound
+      -- variable names.  Anything else stays in callInputs.
+      (revBoundPrefix, trailingUnbound) =
+        let (suffix, prefix) = span (not . isBound) (reverse args)
+        in (reverse prefix, reverse suffix)
+      callInputs = revBoundPrefix
+      outputBinding = case trailingUnbound of
+        (n:_) -> Just n
+        []    -> Nothing
       -- Same arity-suffix convention as translatePred uses for def
       -- names: append "__<n>" where n is the number of inputs the
       -- callee receives.  Lets the linker disambiguate overloads

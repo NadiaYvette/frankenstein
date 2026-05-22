@@ -626,6 +626,16 @@ parseGoalLines ls0 =
     -- `,` separators that would otherwise shatter it apart.
     _ | Just (lhs, params, mOut, bodyLs) <- splitLambda stripped ->
           GoalLambda lhs params mOut (parseGoalLines bodyLs)
+      -- Mercury negation `not ( body )`.  HLDS prints `not (` as a
+      -- line of its own, then the body, then a closing `)` on its
+      -- own line.  Without this catch, the line set falls through
+      -- to parseSingleGoal which sees a `=` inside the body (e.g.
+      -- `E = re_lit(V_3)`) and concocts a unify-stub whose LHS is
+      -- `not (\nE` (a fused goal-text leak that also leaves the
+      -- inner deconstruct variables — V_3 here — unresolved at
+      -- link).
+      | Just bodyLs <- splitNot stripped ->
+          GoalNot (parseGoalLines bodyLs)
       -- If we just stripped a `( % conjunction ... )` wrapper AND the
       -- inner content splits into multiple conjuncts at depth 0, take
       -- the conjunction path FIRST.  Otherwise an inner conjunct that
@@ -656,6 +666,15 @@ parseGoalLines ls0 =
           GoalConj (map parseGoalLines conjParts)
       | length disjParts > 1 ->
           GoalDisj (map parseGoalLines disjParts)
+      -- No structural marker, but multiple depth-0 conjuncts.  This
+      -- happens inside lambda bodies after stripLambdaWrappers has
+      -- removed the `% conjunction` line; the conjuncts survive as
+      -- bare lines separated by depth-0 commas.  Without this catch
+      -- the whole body falls into parseSingleGoal's unify-stub
+      -- catchall and the `,` separators get sanitised into a single
+      -- mangled name (e.g. `C__V_13_ze_rational_zt__3`).
+      | length conjParts > 1 ->
+          GoalConj (map parseGoalLines conjParts)
       | otherwise -> parseSingleGoal (T.unlines (filter (not . isComment) stripped))
 
 -- | Recognise an inline lambda binding in HLDS-printed form:
@@ -784,6 +803,29 @@ splitLambda strippedLs = case strippedLs of
 --
 -- Nested ITEs work because 'parseGoalLines' is called recursively on each
 -- segment and re-runs the splitter.
+-- | Recognise Mercury negation HLDS form:
+--   not (
+--     <body...>
+--   )
+-- where the body may be a conjunction (and so contain its own
+-- `% conjunction` marker and `,` separators).  Returns the body
+-- lines on a match.
+splitNot :: [Text] -> Maybe [Text]
+splitNot rawLs = case rawLs of
+  ("not (" : rest) -> Just (trimEnd rest)
+  _                -> Nothing
+  where
+    isBlank l = T.null (T.strip l)
+    isBareClose l =
+      let s = T.strip (T.dropWhileEnd (`elem` (" ." :: String)) (T.strip l))
+      in s == ")"
+    trimEnd ls =
+      let rev = reverse ls
+          afterBlanks = dropWhile isBlank rev
+      in case afterBlanks of
+           (l:rest') | isBareClose l -> reverse rest'
+           _                         -> reverse afterBlanks
+
 splitIfThenElse :: [Text] -> Maybe ([Text], [Text], [Text])
 splitIfThenElse rawLs =
   let strippedLs = map T.strip rawLs

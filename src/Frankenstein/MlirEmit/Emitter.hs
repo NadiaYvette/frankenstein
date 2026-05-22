@@ -1039,6 +1039,21 @@ emitProgramText prog =
     , "  func.func private @string_sub_string_search(i64, i64) -> i64"
     , "  func.func private @list_all_true(i64, i64) -> i64"
     , "  func.func private @list_drop(i64, i64) -> i64"
+    , "  func.func private @list_delete_all(i64, i64, i64) -> i64"
+    , "  func.func private @list_det_tail(i64, i64) -> i64"
+    , "  func.func private @list_det_split_last(i64, i64) -> i64"
+    , "  func.func private @list_take_upto(i64, i64, i64) -> i64"
+    , "  func.func private @list_sort_and_remove_dups(i64, i64) -> i64"
+    , "  func.func private @list_map_corresponding(i64, i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @int_even(i64) -> i64"
+    , "  func.func private @int_odd(i64) -> i64"
+    , "  func.func private @integer_pow(i64, i64) -> i64"
+    , "  func.func private @integer_det_to_int(i64) -> i64"
+    , "  func.func private @float_round_to_int(i64) -> i64"
+    , "  func.func private @float_truncate_to_int(i64) -> i64"
+    , "  func.func private @mercury_not(i64) -> i64"
+    , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
+    , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1594,6 +1609,21 @@ emitProgramWasm prog =
     , "  func.func private @string_sub_string_search(i64, i64) -> i64"
     , "  func.func private @list_all_true(i64, i64) -> i64"
     , "  func.func private @list_drop(i64, i64) -> i64"
+    , "  func.func private @list_delete_all(i64, i64, i64) -> i64"
+    , "  func.func private @list_det_tail(i64, i64) -> i64"
+    , "  func.func private @list_det_split_last(i64, i64) -> i64"
+    , "  func.func private @list_take_upto(i64, i64, i64) -> i64"
+    , "  func.func private @list_sort_and_remove_dups(i64, i64) -> i64"
+    , "  func.func private @list_map_corresponding(i64, i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @int_even(i64) -> i64"
+    , "  func.func private @int_odd(i64) -> i64"
+    , "  func.func private @integer_pow(i64, i64) -> i64"
+    , "  func.func private @integer_det_to_int(i64) -> i64"
+    , "  func.func private @float_round_to_int(i64) -> i64"
+    , "  func.func private @float_truncate_to_int(i64) -> i64"
+    , "  func.func private @mercury_not(i64) -> i64"
+    , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
+    , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4493,6 +4523,14 @@ externalRuntimeFns = Set.fromList
   , "string_to_int", "string_to_float", "string_sub_string_search"
   -- Mercury list.* (higher-order)
   , "list_all_true", "list_drop"
+  , "list_delete_all", "list_det_tail", "list_det_split_last"
+  , "list_take_upto", "list_sort_and_remove_dups", "list_map_corresponding"
+  -- Mercury int / integer / float extras
+  , "int_even", "int_odd"
+  , "integer_pow", "integer_det_to_int"
+  , "float_round_to_int", "float_truncate_to_int"
+  -- Mercury negation + builtin comparison
+  , "mercury_not", "builtin_compare", "builtin_ordering"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4593,6 +4631,13 @@ externalRuntimeArity = Map.fromList
   , ("string_to_int", 1), ("string_to_float", 1)
   , ("string_sub_string_search", 2)
   , ("list_all_true", 2), ("list_drop", 2)
+  , ("list_delete_all", 3), ("list_det_tail", 2), ("list_det_split_last", 2)
+  , ("list_take_upto", 3), ("list_sort_and_remove_dups", 2)
+  , ("list_map_corresponding", 6)
+  , ("int_even", 1), ("int_odd", 1)
+  , ("integer_pow", 2), ("integer_det_to_int", 1)
+  , ("float_round_to_int", 1), ("float_truncate_to_int", 1)
+  , ("mercury_not", 1), ("builtin_compare", 4), ("builtin_ordering", 3)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

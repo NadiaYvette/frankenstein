@@ -2912,8 +2912,9 @@ int64_t string_sub_string_search(int64_t whole, int64_t sub) {
     return -1;
 }
 
-/* Forward declaration for the static helper defined further below. */
+/* Forward declarations for the static helpers defined further below. */
 static int64_t kk_call_closure_1(int64_t closure, int64_t a);
+static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b);
 
 /* list.all_true(P, Xs) — semidet: P holds for every X in Xs. */
 int64_t list_all_true(int64_t p, int64_t xs) {
@@ -2934,6 +2935,205 @@ int64_t list_drop(int64_t n, int64_t xs) {
         n--;
     }
     return xs;
+}
+
+/* list.delete_all(Xs, X, Ys) — remove all occurrences of X from Xs. */
+int64_t list_delete_all(int64_t tinfo, int64_t xs, int64_t x) {
+    (void)tinfo;
+    /* Build result by walking, skipping any element equal to x. */
+    int64_t* slots = NULL;
+    int64_t cap = 0, n = 0;
+    while (!kk_is_nil(xs)) {
+        int64_t h = kk_field(xs, 0);
+        if (!kk_structural_eq(h, x)) {
+            if (n + 1 > cap) {
+                cap = cap == 0 ? 8 : cap * 2;
+                slots = (int64_t*)realloc(slots, (size_t)cap * sizeof(int64_t));
+            }
+            slots[n++] = h;
+        }
+        xs = kk_field(xs, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(slots[i], acc);
+    free(slots);
+    return acc;
+}
+
+/* list.det_tail(Xs) — return the tail; abort if Xs is nil. */
+int64_t list_det_tail(int64_t tinfo, int64_t xs) {
+    (void)tinfo;
+    if (kk_is_nil(xs)) {
+        fprintf(stderr, "*** list.det_tail: empty list\n");
+        exit(1);
+    }
+    return kk_field(xs, 1);
+}
+
+/* list.det_split_last(Xs, AllButLast, Last) — split off the last element.
+ * In our flattened return we'd return a tuple {AllButLast, Last}; for
+ * the bridge's i64 model, return the AllButLast list (Last is dropped
+ * since the bridge's call-site only binds the first output). */
+int64_t list_det_split_last(int64_t tinfo, int64_t xs) {
+    (void)tinfo;
+    if (kk_is_nil(xs)) {
+        fprintf(stderr, "*** list.det_split_last: empty list\n");
+        exit(1);
+    }
+    /* Walk and collect everything except the last element. */
+    int64_t* slots = NULL;
+    int64_t cap = 0, n = 0;
+    while (!kk_is_nil(xs)) {
+        int64_t h = kk_field(xs, 0);
+        int64_t t = kk_field(xs, 1);
+        if (kk_is_nil(t)) break;  /* h is the second-to-last; t is the [last]. */
+        if (n + 1 > cap) {
+            cap = cap == 0 ? 8 : cap * 2;
+            slots = (int64_t*)realloc(slots, (size_t)cap * sizeof(int64_t));
+        }
+        slots[n++] = h;
+        xs = t;
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(slots[i], acc);
+    free(slots);
+    return acc;
+}
+
+/* list.take_upto(N, Xs, Ys) — take at most N elements from Xs. */
+int64_t list_take_upto(int64_t tinfo, int64_t n, int64_t xs) {
+    (void)tinfo;
+    int64_t* slots = NULL;
+    int64_t cap = 0, cnt = 0;
+    while (cnt < n && !kk_is_nil(xs)) {
+        int64_t h = kk_field(xs, 0);
+        if (cnt + 1 > cap) {
+            cap = cap == 0 ? 8 : cap * 2;
+            slots = (int64_t*)realloc(slots, (size_t)cap * sizeof(int64_t));
+        }
+        slots[cnt++] = h;
+        xs = kk_field(xs, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = cnt - 1; i >= 0; i--) acc = kk_cons(slots[i], acc);
+    free(slots);
+    return acc;
+}
+
+/* list.sort_and_remove_dups(Xs, Ys) — sort (typeinfo-dispatched compare)
+ * and drop consecutive duplicates.  Use kk_compare for ordering. */
+int64_t list_sort_and_remove_dups(int64_t tinfo, int64_t xs) {
+    (void)tinfo;
+    /* Materialize into an array. */
+    int64_t* arr = NULL;
+    int64_t cap = 0, n = 0;
+    {
+        int64_t cur = xs;
+        while (!kk_is_nil(cur)) {
+            if (n + 1 > cap) {
+                cap = cap == 0 ? 16 : cap * 2;
+                arr = (int64_t*)realloc(arr, (size_t)cap * sizeof(int64_t));
+            }
+            arr[n++] = kk_field(cur, 0);
+            cur = kk_field(cur, 1);
+        }
+    }
+    /* Simple insertion sort using kk_compare. */
+    for (int64_t i = 1; i < n; i++) {
+        int64_t v = arr[i];
+        int64_t j = i - 1;
+        while (j >= 0 && kk_compare(arr[j], v) > 0) {
+            arr[j + 1] = arr[j];
+            j--;
+        }
+        arr[j + 1] = v;
+    }
+    /* Build cons list, skipping consecutive duplicates. */
+    int64_t acc = kk_nil();
+    int64_t prev = 0;
+    int havePrev = 0;
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (!havePrev || !kk_structural_eq(arr[i], prev)) {
+            acc = kk_cons(arr[i], acc);
+            prev = arr[i];
+            havePrev = 1;
+        }
+    }
+    free(arr);
+    return acc;
+}
+
+/* list.map_corresponding(F, Xs, Ys, Zs) — parallel map; both lists same
+ * length.  Typeinfo dispatch prepends 3 type args for input/input/output. */
+int64_t list_map_corresponding(int64_t tinfo_a, int64_t tinfo_b,
+                               int64_t tinfo_c, int64_t f,
+                               int64_t xs, int64_t ys) {
+    (void)tinfo_a; (void)tinfo_b; (void)tinfo_c;
+    int64_t* slots = NULL;
+    int64_t cap = 0, cnt = 0;
+    while (!kk_is_nil(xs) && !kk_is_nil(ys)) {
+        int64_t h1 = kk_field(xs, 0);
+        int64_t h2 = kk_field(ys, 0);
+        int64_t z = kk_call_closure_2(f, h1, h2);
+        if (cnt + 1 > cap) {
+            cap = cap == 0 ? 8 : cap * 2;
+            slots = (int64_t*)realloc(slots, (size_t)cap * sizeof(int64_t));
+        }
+        slots[cnt++] = z;
+        xs = kk_field(xs, 1);
+        ys = kk_field(ys, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = cnt - 1; i >= 0; i--) acc = kk_cons(slots[i], acc);
+    free(slots);
+    return acc;
+}
+
+/* int.even / int.odd — semidet parity tests. */
+int64_t int_even(int64_t n) { return (n % 2 == 0) ? 1 : 0; }
+int64_t int_odd(int64_t n)  { return (n % 2 != 0) ? 1 : 0; }
+
+/* integer.pow(Base, Exp, Result) — non-negative integer exponentiation. */
+int64_t integer_pow(int64_t base, int64_t exp) {
+    int64_t r = 1;
+    while (exp > 0) {
+        if (exp & 1) r *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return r;
+}
+int64_t integer_det_to_int(int64_t x) { return x; }
+
+/* float.round_to_int / float.truncate_to_int — aliases for the
+ * already-existing float_round / float_truncate stubs. */
+int64_t float_round_to_int(int64_t a)    { return float_round(a); }
+int64_t float_truncate_to_int(int64_t a) { return float_truncate(a); }
+
+/* mercury_not — logical negation: returns 1 - x for x in {0, 1}. */
+int64_t mercury_not(int64_t closure) {
+    /* The argument is a closure (a goal-as-value).  Call it; invert. */
+    int64_t r = kk_call_closure_1(closure, 0);
+    return r == 0 ? 1 : 0;
+}
+
+/* builtin.compare(Result, A, B) — set Result to ordering of A vs B.
+ * In Mercury this is a 3-arg pred with the result as output; the
+ * bridge sees it as 4 args (including a typeclass-info arg).  We
+ * accept four i64 args and return the comparison result. */
+int64_t builtin_compare(int64_t tinfo, int64_t a, int64_t b, int64_t cmp_out) {
+    (void)tinfo; (void)cmp_out;
+    int64_t c = kk_compare(a, b);
+    /* Mercury comparison_result: (<)=0, (=)=1, (>)=2 — but our enum
+     * uses different tags.  We return the kk_compare value; callers
+     * that pattern-match on builtin.(=)/(<)/(>) tags will misalign
+     * but for stub purposes this is the best we can do without
+     * threading ctor tags from the bridge. */
+    return c;
+}
+int64_t builtin_ordering(int64_t tinfo, int64_t a, int64_t b) {
+    (void)tinfo;
+    return kk_compare(a, b);
 }
 
 /* integer.divide_with_rem(A, B) — Mercury returns a 2-tuple {Q, R}.

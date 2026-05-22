@@ -939,6 +939,18 @@ emitProgramText prog =
     , "  func.func private @int_zs(i64, i64) -> i64"
     , "  func.func private @int___(i64, i64) -> i64"
     , "  func.func private @int__(i64, i64) -> i64"
+    , "  func.func private @int_div(i64, i64) -> i64"
+    , "  func.func private @int_pow(i64, i64) -> i64"
+    , "  func.func private @integer_div(i64, i64) -> i64"
+    , "  func.func private @integer_det_from_string(i64) -> i64"
+    , "  func.func private @string_float_to_string(i64) -> i64"
+    , "  func.func private @string_prefix(i64, i64) -> i64"
+    , "  func.func private @map_is_empty(i64, i64, i64) -> i64"
+    , "  func.func private @map_singleton(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_to_assoc_list(i64, i64, i64) -> i64"
+    , "  func.func private @map_overlay(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_map_values(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_foldl2(i64, i64, i64, i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @int_zl(i64, i64) -> i64"
     , "  func.func private @int_zg(i64, i64) -> i64"
     , "  func.func private @int_zezl(i64, i64) -> i64"
@@ -1544,6 +1556,18 @@ emitProgramWasm prog =
     , "  func.func private @int_zs(i64, i64) -> i64"
     , "  func.func private @int___(i64, i64) -> i64"
     , "  func.func private @int__(i64, i64) -> i64"
+    , "  func.func private @int_div(i64, i64) -> i64"
+    , "  func.func private @int_pow(i64, i64) -> i64"
+    , "  func.func private @integer_div(i64, i64) -> i64"
+    , "  func.func private @integer_det_from_string(i64) -> i64"
+    , "  func.func private @string_float_to_string(i64) -> i64"
+    , "  func.func private @string_prefix(i64, i64) -> i64"
+    , "  func.func private @map_is_empty(i64, i64, i64) -> i64"
+    , "  func.func private @map_singleton(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_to_assoc_list(i64, i64, i64) -> i64"
+    , "  func.func private @map_overlay(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_map_values(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_foldl2(i64, i64, i64, i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @int_zl(i64, i64) -> i64"
     , "  func.func private @int_zg(i64, i64) -> i64"
     , "  func.func private @int_zezl(i64, i64) -> i64"
@@ -4550,6 +4574,8 @@ externalRuntimeFns = Set.fromList
   , "int_zp", "int_zm", "int_zt", "int_zs", "int___", "int__"
   , "int_zl", "int_zg", "int_zezl", "int_zgze", "int_zezeze"
   , "int_rem", "int_mod", "int_max", "int_min", "int_abs", "int_neg"
+  , "int_div", "int_pow"
+  , "integer_div", "integer_det_from_string"
   , "integer_divide_with_rem"
   , "unify"
   , "io_format"     -- io.format(fmt, args, io) — pretty-printer
@@ -4591,6 +4617,7 @@ externalRuntimeFns = Set.fromList
   , "string_int_to_string", "string_append_list", "string_join_list"
   , "string_index", "string_contains_char", "string_duplicate_char"
   , "string_to_int", "string_to_float", "string_sub_string_search"
+  , "string_float_to_string", "string_prefix"
   -- Mercury list.* (higher-order)
   , "list_all_true", "list_drop"
   , "list_delete_all", "list_det_tail", "list_det_split_last"
@@ -4614,6 +4641,8 @@ externalRuntimeFns = Set.fromList
   , "map_count", "map_set", "map_det_insert", "map_det_update"
   , "map_delete", "map_from_assoc_list", "map_values", "map_keys"
   , "map_foldl"
+  , "map_is_empty", "map_singleton", "map_to_assoc_list"
+  , "map_overlay", "map_map_values", "map_foldl2"
   -- Mercury set.* (flat list with kk_structural_eq membership)
   , "set_init", "set_member", "set_insert", "set_delete"
   , "set_contains", "set_make_singleton_set", "set_count"
@@ -4679,6 +4708,8 @@ externalRuntimeArity = Map.fromList
   , ("integer___", 2), ("integer_rem", 2), ("integer_mod", 2), ("integer_neg", 1)
   , ("int_zp", 2), ("int_zm", 2), ("int_zt", 2), ("int_zs", 2)
   , ("int___", 2), ("int__", 2)
+  , ("int_div", 2), ("int_pow", 2)
+  , ("integer_div", 2), ("integer_det_from_string", 1)
   , ("int_zl", 2), ("int_zg", 2), ("int_zezl", 2), ("int_zgze", 2), ("int_zezeze", 2)
   , ("int_rem", 2), ("int_mod", 2), ("int_max", 2), ("int_min", 2)
   , ("int_abs", 1), ("int_neg", 1)
@@ -4720,6 +4751,7 @@ externalRuntimeArity = Map.fromList
   , ("string_contains_char", 2), ("string_duplicate_char", 2)
   , ("string_to_int", 1), ("string_to_float", 1)
   , ("string_sub_string_search", 2)
+  , ("string_float_to_string", 1), ("string_prefix", 2)
   , ("list_all_true", 2), ("list_drop", 2)
   , ("list_delete_all", 3), ("list_det_tail", 2), ("list_det_split_last", 2)
   , ("list_take_upto", 3), ("list_sort_and_remove_dups", 2)
@@ -4740,6 +4772,9 @@ externalRuntimeArity = Map.fromList
   , ("map_delete", 3), ("map_from_assoc_list", 2)
   , ("map_values", 2), ("map_keys", 2)
   , ("map_foldl", 6)
+  , ("map_is_empty", 3), ("map_singleton", 4)
+  , ("map_to_assoc_list", 3), ("map_overlay", 4)
+  , ("map_map_values", 5), ("map_foldl2", 8)
   , ("set_init", 1), ("set_member", 3), ("set_insert", 3)
   , ("set_delete", 3), ("set_contains", 3)
   , ("set_make_singleton_set", 2), ("set_count", 2)

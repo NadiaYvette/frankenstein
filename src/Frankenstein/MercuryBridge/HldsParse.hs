@@ -1345,6 +1345,7 @@ parseMercuryBuiltin txt
     -- mis-split.
     parseInfixExpr e =
       let ops = [ " // ", " ++ ", " >= ", " =< ", " == ", " mod ", " rem "
+                , " div "
                 , " > ", " < ", " + ", " - ", " * ", " / " ]
           tryOp [] = Nothing
           tryOp (op:rest') =

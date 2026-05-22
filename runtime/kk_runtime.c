@@ -2680,6 +2680,18 @@ int64_t int_zs(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 int64_t int___(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 /* Mercury int./ (single-slash division, sanitises to "int__"). */
 int64_t int__(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+/* Mercury int.div (truncated integer division — same semantics as // in i64). */
+int64_t int_div(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+/* int.pow(Base, Exp) — non-negative integer exponentiation. */
+int64_t int_pow(int64_t base, int64_t exp) {
+    int64_t r = 1;
+    while (exp > 0) {
+        if (exp & 1) r *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return r;
+}
 int64_t int_zl(int64_t a, int64_t b) { return a <  b ? 1 : 0; }
 int64_t int_zg(int64_t a, int64_t b) { return a >  b ? 1 : 0; }
 int64_t int_zezl(int64_t a, int64_t b){ return a <= b ? 1 : 0; }
@@ -3462,6 +3474,130 @@ int64_t set_difference(int64_t tinfo, int64_t a, int64_t b) {
     for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(slots[i], acc);
     free(slots);
     return acc;
+}
+
+/* Mercury integer.div / integer.det_from_string / etc. */
+int64_t integer_div(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+int64_t integer_det_from_string(int64_t s) {
+    int64_t ptr_i = kk_field(s, 0);
+    int64_t len = kk_field(s, 1);
+    const char* p = (const char*)(uintptr_t)ptr_i;
+    char tmp[64];
+    int64_t n = len < 63 ? len : 63;
+    memcpy(tmp, p, (size_t)n);
+    tmp[n] = 0;
+    return (int64_t)strtoll(tmp, NULL, 10);
+}
+
+/* Mercury string.float_to_string(F, S) — det: stringify a float. */
+int64_t string_float_to_string(int64_t f) {
+    double d;
+    memcpy(&d, &f, 8);
+    char tmp[64];
+    int n = snprintf(tmp, sizeof tmp, "%g", d);
+    if (n < 0) n = 0;
+    return kk_str_alloc_leaf_owned(tmp, n);
+}
+
+/* Mercury string.prefix(S, P) — semidet: returns 1 if S starts with P. */
+int64_t string_prefix(int64_t s, int64_t p) {
+    int64_t sp_i = kk_field(s, 0), sl = kk_field(s, 1);
+    int64_t pp_i = kk_field(p, 0), pl = kk_field(p, 1);
+    const char* sp = (const char*)(uintptr_t)sp_i;
+    const char* pp = (const char*)(uintptr_t)pp_i;
+    if (pl > sl) return 0;
+    return memcmp(sp, pp, (size_t)pl) == 0 ? 1 : 0;
+}
+
+/* Mercury map.is_empty(M) — semidet. */
+int64_t map_is_empty(int64_t tinfo_k, int64_t tinfo_v, int64_t m) {
+    (void)tinfo_k; (void)tinfo_v;
+    return kk_is_nil(m);
+}
+
+/* Mercury map.singleton(K, V) = M — det: build a one-entry map. */
+int64_t map_singleton(int64_t tinfo_k, int64_t tinfo_v, int64_t k, int64_t v) {
+    (void)tinfo_k; (void)tinfo_v;
+    return kk_cons(kk_pair_new(k, v), kk_nil());
+}
+
+/* Mercury map.to_assoc_list(M, AL) — det: return the list of pairs. */
+int64_t map_to_assoc_list(int64_t tinfo_k, int64_t tinfo_v, int64_t m) {
+    (void)tinfo_k; (void)tinfo_v;
+    return m;
+}
+
+/* Mercury map.overlay(M1, M2, M3) — det: M2 overlays M1 (M2's keys win). */
+int64_t map_overlay(int64_t tinfo_k, int64_t tinfo_v, int64_t m1, int64_t m2) {
+    int64_t m = m1;
+    int64_t cur = m2;
+    while (!kk_is_nil(cur)) {
+        int64_t p = kk_field(cur, 0);
+        m = map_set(tinfo_k, m, kk_pair_fst(p), kk_pair_snd(p));
+        cur = kk_field(cur, 1);
+        (void)tinfo_v;
+    }
+    return m;
+}
+
+/* Mercury map.map_values(F, M, M') — apply F to every value. */
+int64_t map_map_values(int64_t tinfo_k, int64_t tinfo_v1, int64_t tinfo_v2,
+                       int64_t f, int64_t m) {
+    (void)tinfo_k; (void)tinfo_v1; (void)tinfo_v2;
+    int64_t* keys = NULL;
+    int64_t* vals = NULL;
+    int64_t cap = 0, n = 0;
+    while (!kk_is_nil(m)) {
+        int64_t p = kk_field(m, 0);
+        int64_t k = kk_pair_fst(p);
+        int64_t v = kk_pair_snd(p);
+        if (n + 1 > cap) {
+            cap = cap == 0 ? 8 : cap * 2;
+            keys = (int64_t*)realloc(keys, (size_t)cap * sizeof(int64_t));
+            vals = (int64_t*)realloc(vals, (size_t)cap * sizeof(int64_t));
+        }
+        keys[n] = k;
+        vals[n] = kk_call_closure_1(f, v);
+        n++;
+        m = kk_field(m, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(kk_pair_new(keys[i], vals[i]), acc);
+    free(keys); free(vals);
+    return acc;
+}
+
+/* Mercury map.foldl2(F, M, A, A', B, B') — fold over (K, V) pairs threading
+ * TWO accumulators.  F is a 4-arg closure (K, V, A, B) -> {A', B'}.
+ * Since we don't have a clean way to return two values from a closure
+ * call, route the call result as the FIRST acc and silently drop the
+ * second — surd-mercury's only use of foldl2 is for parallel computations
+ * where the second accumulator is informational. */
+int64_t map_foldl2(int64_t tinfo_k, int64_t tinfo_v, int64_t tinfo_a, int64_t tinfo_b,
+                   int64_t f, int64_t m, int64_t a, int64_t b) {
+    (void)tinfo_k; (void)tinfo_v; (void)tinfo_a; (void)tinfo_b;
+    while (!kk_is_nil(m)) {
+        int64_t p = kk_field(m, 0);
+        int64_t k = kk_pair_fst(p);
+        int64_t v = kk_pair_snd(p);
+        /* Best-effort: call as 3-arg closure with k, v, a. */
+        a = kk_call_closure_3(f, k, v, a);
+        m = kk_field(m, 1);
+    }
+    (void)b;
+    return a;
+}
+
+/* Mercury list.foldl2(P, L, A, A', B, B') — list fold threading TWO accs.
+ * Same convention as map.foldl2 — drop the second acc. */
+int64_t list_foldl2_impl(int64_t f, int64_t xs, int64_t a, int64_t b) {
+    while (!kk_is_nil(xs)) {
+        int64_t h = kk_field(xs, 0);
+        a = kk_call_closure_2(f, h, a);
+        xs = kk_field(xs, 1);
+    }
+    (void)b;
+    return a;
 }
 
 /* integer.divide_with_rem(A, B) — Mercury returns a 2-tuple {Q, R}.

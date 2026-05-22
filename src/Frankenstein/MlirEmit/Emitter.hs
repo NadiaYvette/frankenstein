@@ -1055,6 +1055,11 @@ emitProgramText prog =
     , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
     , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
     , "  func.func private @list_range(i64, i64) -> i64"
+    , "  func.func private @type_info_const__1(i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__5(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @typeclass_info_const__1(i64) -> i64"
     , "  func.func private @map_init(i64) -> i64"
     , "  func.func private @map_search(i64, i64, i64) -> i64"
     , "  func.func private @map_lookup(i64, i64, i64) -> i64"
@@ -1652,6 +1657,11 @@ emitProgramWasm prog =
     , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
     , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
     , "  func.func private @list_range(i64, i64) -> i64"
+    , "  func.func private @type_info_const__1(i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__5(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @typeclass_info_const__1(i64) -> i64"
     , "  func.func private @map_init(i64) -> i64"
     , "  func.func private @map_search(i64, i64, i64) -> i64"
     , "  func.func private @map_lookup(i64, i64, i64) -> i64"
@@ -4586,6 +4596,13 @@ externalRuntimeFns = Set.fromList
   -- Mercury negation + builtin comparison + range literal
   , "mercury_not", "builtin_compare", "builtin_ordering"
   , "list_range"
+  -- Mercury private-builtin type-info helpers (arity-suffixed names
+  -- match the bridge's call-site convention)
+  , "type_info_const__1"
+  , "type_info_cell_constructor__2"
+  , "type_info_cell_constructor__4"
+  , "type_info_cell_constructor__5"
+  , "typeclass_info_const__1"
   -- Mercury map.* (cons-of-pairs implementation)
   , "map_init", "map_search", "map_lookup", "map_contains"
   , "map_count", "map_set", "map_det_insert", "map_det_update"
@@ -4704,6 +4721,11 @@ externalRuntimeArity = Map.fromList
   , ("float_round_to_int", 1), ("float_truncate_to_int", 1)
   , ("mercury_not", 1), ("builtin_compare", 4), ("builtin_ordering", 3)
   , ("list_range", 2)
+  , ("type_info_const__1", 1)
+  , ("type_info_cell_constructor__2", 2)
+  , ("type_info_cell_constructor__4", 4)
+  , ("type_info_cell_constructor__5", 5)
+  , ("typeclass_info_const__1", 1)
   , ("map_init", 1), ("map_search", 3), ("map_lookup", 3)
   , ("map_contains", 3), ("map_count", 2)
   , ("map_set", 4), ("map_det_insert", 4), ("map_det_update", 4)

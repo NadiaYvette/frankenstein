@@ -570,6 +570,12 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
         , "bool.", "require.", "exception.", "math.", "float."
         , "builtin.", "private_builtin."
         , "map.", "set.", "maybe.", "pair.", "assoc_list."]
+        -- The bridge-synthesised intrinsics live without a module
+        -- qualifier (they correspond to runtime helpers like
+        -- @mercury_fail@, @mercury_not@, @list_range@) — keep them
+        -- bare so the call name matches the def name verbatim.
+        || n `elem` ["mercury_fail", "mercury_not", "list_range"
+                    , "unify", "mercury_choose"]
       taggedName
         | isStdlibPrefixed predName' = predName'
         | otherwise = predName' <> "__" <> T.pack (show (length callInputs))

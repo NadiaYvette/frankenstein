@@ -3141,6 +3141,24 @@ int64_t builtin_ordering(int64_t tinfo, int64_t a, int64_t b) {
 extern int64_t kk_range_list(int64_t lo, int64_t hi);
 int64_t list_range(int64_t lo, int64_t hi) { return kk_range_list(lo, hi); }
 
+/* Mercury private-builtin type-info helpers.  The compiler synthesises
+ * @type_info_const@ / @type_info_cell_constructor@ calls during type
+ * specialisation to carry around runtime type-info values; our
+ * erased-type model treats them as opaque i64 sentinels.  The arity
+ * suffix matches the bridge's call-site naming convention
+ * (@__N@ where N is the call arity post-output-drop). */
+int64_t type_info_const__1(int64_t n) { return n; }
+int64_t type_info_cell_constructor__2(int64_t a, int64_t b) {
+    (void)a; (void)b; return 0;
+}
+int64_t type_info_cell_constructor__4(int64_t a, int64_t b, int64_t c, int64_t d) {
+    (void)a; (void)b; (void)c; (void)d; return 0;
+}
+int64_t type_info_cell_constructor__5(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e) {
+    (void)a; (void)b; (void)c; (void)d; (void)e; return 0;
+}
+int64_t typeclass_info_const__1(int64_t n) { return n; }
+
 /* Mercury `map` module — implemented here as a cons-of-pairs.  Mercury's
  * real implementation is a 2-3 tree, but for surd-mercury demos a flat
  * list suffices.  Each entry is a 2-field pair cell {Key, Value}; the

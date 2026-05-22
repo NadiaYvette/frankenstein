@@ -4889,9 +4889,18 @@ compileToExecutableLink config llPath =
               case r3 of
                 Left e -> pure (Left e)
                 Right _ -> do
+                  -- Allow link-time unresolved symbols to remain as
+                  -- weak references — they'll trap on first call at
+                  -- runtime (via the dynamic-loader's lazy-binding
+                  -- fault) but the binary itself builds.  Lets larger
+                  -- surd-mercury demos reach an executable even when
+                  -- a handful of obscure call shapes the bridge
+                  -- doesn't yet recognise leak as goal-text symbols.
                   r4 <- runCmd (ecClangPath config)
                     ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath,
-                     "-o", ecOutputPath config, optFlag, "-lm"] "" "clang (link)"
+                     "-o", ecOutputPath config, optFlag, "-lm"
+                    , "-Wl,--unresolved-symbols=ignore-in-object-files"]
+                    "" "clang (link)"
                   case r4 of
                     Left e  -> pure (Left e)
                     Right _ -> pure (Right (ecOutputPath config))

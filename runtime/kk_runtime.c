@@ -3184,10 +3184,14 @@ int64_t type_info_cell_constructor__5(int64_t a, int64_t b, int64_t c, int64_t d
 int64_t typeclass_info_const__1(int64_t n) { return n; }
 
 /* Mercury io.command_line_arguments(Args, !IO) — returns the argv list
- * (excluding argv[0]).  Bridge sees this as 2 args (Args output, IO state);
- * trailing-unbound drops both, but since the call site reads Args via
- * the secondary-output default-binding, we just return @kk_nil()@. */
-int64_t io_command_line_arguments(void) { return kk_nil(); }
+ * (excluding argv[0]).  Bridge calls with 2 args after dropping
+ * STATE_VARIABLE_IO output: (Args, IO).  Args is the bridge's
+ * synthetic output-binding slot (the bridge writes to it via the
+ * let-binding), so we just return kk_nil().  IO threads through. */
+int64_t io_command_line_arguments(int64_t args, int64_t io) {
+    (void)args; (void)io;
+    return kk_nil();
+}
 
 /* Mercury pair "minus" — surd-mercury uses @K - V@ as a pair literal
  * (the @pair@ module declares @-@ as the pair constructor).  Returns

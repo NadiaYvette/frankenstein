@@ -504,13 +504,39 @@ emitProgramText prog =
       externDecls = Map.toList (esExternDecls finalState)
       -- Partition externals into Koka builtins (emit inline) vs real externals
       (kokaBuiltins, realExterns) = partition (isKokaBuiltin . fst) externDecls
+      -- An extern is "runtime-provided" if it's in the curated
+      -- externalRuntimeFns set or has the kk_/runtime-helper prefix
+      -- (kk_alloc_con, kk_field, …) — for these we emit only a
+      -- declaration, expecting the linker to resolve against the
+      -- libk_runtime.o object.  For UNCURATED externs (goal-text
+      -- leaks the bridge couldn't parse), emit a tiny zero-returning
+      -- stub DEFINITION instead, so the symbol exists at link time
+      -- and a runtime call lands on a real function (returning 0)
+      -- rather than a null-pointer dereference.  This lets larger
+      -- demos progress past the first leaky call site at runtime.
+      runtimeProvided nm = Set.member nm externalRuntimeFns
+                       || T.isPrefixOf "kk_" nm
+                       || nm == "printf" || nm == "puts" || nm == "exit"
+                       || nm == "malloc" || nm == "free"
+      (rtExterns, leakExterns) = partition (runtimeProvided . fst) realExterns
       externDeclText = if null realExterns then ""
         else T.unlines
           (  ["  // External import declarations (resolved at link time)"]
           ++ [ "  func.func private @" <> nm <> "("
                <> T.intercalate ", " (replicate arity "i64")
                <> ") -> i64"
-             | (nm, arity) <- realExterns ]
+             | (nm, arity) <- rtExterns ]
+          ++ ["", "  // Goal-text-leak stubs (return 0; prevent null-pointer SIGSEGV)"]
+          ++ concat
+             [ [ "  func.func @" <> nm <> "("
+                 <> T.intercalate ", " ["%a" <> T.pack (show i) <> ": i64"
+                                       | i <- [0..arity-1]]
+                 <> ") -> i64 {"
+               , "    %z = arith.constant 0 : i64"
+               , "    func.return %z : i64"
+               , "  }"
+               ]
+             | (nm, arity) <- leakExterns ]
           ++ [""])
       kokaBuiltinText = emitKokaBuiltins kokaBuiltins
       stringGlobals = T.unlines

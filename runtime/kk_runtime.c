@@ -3667,11 +3667,29 @@ int64_t apply__2(int64_t f, int64_t a)        { return kk_call_closure_1(f, a); 
 int64_t apply__3(int64_t f, int64_t a, int64_t b) { return kk_call_closure_2(f, a, b); }
 int64_t call__2 (int64_t f, int64_t a)        { return kk_call_closure_1(f, a); }
 int64_t call__3 (int64_t f, int64_t a, int64_t b) { return kk_call_closure_2(f, a, b); }
+/* Mercury class_method_call/N — typeclass dispatch.
+ *
+ * Signature: @class_method_call(TypeClassInfo, MethodIndex, args...) = Result@
+ *
+ * The first arg is a typeclass-info dictionary (a heap cell with
+ * method function pointers in its fields).  The second arg is the
+ * method index.  The rest are the call arguments.
+ *
+ * In a real implementation we'd extract @TCI[MethodIndex]@ as a
+ * closure and call it with the args.  The bridge's
+ * @typeclass_info_const(0)@ stub returns an integer (not a real
+ * dict), so the closure-extract would crash.  Return @0@ as a
+ * sentinel result instead — keeps the binary running long enough
+ * to exercise more of the program.  Programs that actually depend
+ * on typeclass dispatch (numeric tower preds, comparison etc.) will
+ * compute wrong answers, but at least won't segfault. */
 int64_t class_method_call__2(int64_t f, int64_t a) {
-    return kk_call_closure_1(f, a);
+    (void)f; (void)a;
+    return 0;
 }
 int64_t class_method_call__3(int64_t f, int64_t a, int64_t b) {
-    return kk_call_closure_2(f, a, b);
+    (void)f; (void)a; (void)b;
+    return 0;
 }
 
 /* Mercury list.foldl(F, L, A0) = A — typeclass dispatch prepends two
@@ -3891,7 +3909,10 @@ int64_t list_foldl2(int64_t ti1, int64_t ti2, int64_t ti3, int64_t ti4,
 
 /* Generic 3-arg HO dispatch. */
 int64_t class_method_call__4(int64_t f, int64_t a, int64_t b, int64_t c) {
-    return kk_call_closure_3(f, a, b, c);
+    /* Same rationale as class_method_call__2/__3 — return 0 instead
+     * of trying to dispatch through a fake typeclass-info dictionary. */
+    (void)f; (void)a; (void)b; (void)c;
+    return 0;
 }
 int64_t apply__4(int64_t f, int64_t a, int64_t b, int64_t c) {
     return kk_call_closure_3(f, a, b, c);

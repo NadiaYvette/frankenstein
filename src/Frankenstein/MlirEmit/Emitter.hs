@@ -1072,8 +1072,11 @@ emitProgramText prog =
     , "  func.func private @list_range(i64, i64) -> i64"
     , "  func.func private @type_info_const__1(i64) -> i64"
     , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__3(i64, i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__5(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @io_command_line_arguments() -> i64"
+    , "  func.func private @pair_zm(i64, i64) -> i64"
     , "  func.func private @typeclass_info_const__1(i64) -> i64"
     , "  func.func private @map_init(i64) -> i64"
     , "  func.func private @map_search(i64, i64, i64) -> i64"
@@ -1689,8 +1692,11 @@ emitProgramWasm prog =
     , "  func.func private @list_range(i64, i64) -> i64"
     , "  func.func private @type_info_const__1(i64) -> i64"
     , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
+    , "  func.func private @type_info_cell_constructor__3(i64, i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__5(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @io_command_line_arguments() -> i64"
+    , "  func.func private @pair_zm(i64, i64) -> i64"
     , "  func.func private @typeclass_info_const__1(i64) -> i64"
     , "  func.func private @map_init(i64) -> i64"
     , "  func.func private @map_search(i64, i64, i64) -> i64"
@@ -4633,8 +4639,10 @@ externalRuntimeFns = Set.fromList
   -- match the bridge's call-site convention)
   , "type_info_const__1"
   , "type_info_cell_constructor__2"
+  , "type_info_cell_constructor__3"
   , "type_info_cell_constructor__4"
   , "type_info_cell_constructor__5"
+  , "io_command_line_arguments", "pair_zm"
   , "typeclass_info_const__1"
   -- Mercury map.* (cons-of-pairs implementation)
   , "map_init", "map_search", "map_lookup", "map_contains"
@@ -4763,8 +4771,10 @@ externalRuntimeArity = Map.fromList
   , ("list_range", 2)
   , ("type_info_const__1", 1)
   , ("type_info_cell_constructor__2", 2)
+  , ("type_info_cell_constructor__3", 3)
   , ("type_info_cell_constructor__4", 4)
   , ("type_info_cell_constructor__5", 5)
+  , ("io_command_line_arguments", 0), ("pair_zm", 2)
   , ("typeclass_info_const__1", 1)
   , ("map_init", 1), ("map_search", 3), ("map_lookup", 3)
   , ("map_contains", 3), ("map_count", 2)

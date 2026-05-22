@@ -3175,10 +3175,32 @@ int64_t type_info_cell_constructor__2(int64_t a, int64_t b) {
 int64_t type_info_cell_constructor__4(int64_t a, int64_t b, int64_t c, int64_t d) {
     (void)a; (void)b; (void)c; (void)d; return 0;
 }
+int64_t type_info_cell_constructor__3(int64_t a, int64_t b, int64_t c) {
+    (void)a; (void)b; (void)c; return 0;
+}
 int64_t type_info_cell_constructor__5(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e) {
     (void)a; (void)b; (void)c; (void)d; (void)e; return 0;
 }
 int64_t typeclass_info_const__1(int64_t n) { return n; }
+
+/* Mercury io.command_line_arguments(Args, !IO) — returns the argv list
+ * (excluding argv[0]).  Bridge sees this as 2 args (Args output, IO state);
+ * trailing-unbound drops both, but since the call site reads Args via
+ * the secondary-output default-binding, we just return @kk_nil()@. */
+int64_t io_command_line_arguments(void) { return kk_nil(); }
+
+/* Mercury pair "minus" — surd-mercury uses @K - V@ as a pair literal
+ * (the @pair@ module declares @-@ as the pair constructor).  Returns
+ * a 2-field heap cell with fields {K, V}.  The 3-arg variant emerges
+ * when the pair is the OUTPUT of a det predicate; the bridge passes
+ * the would-be output last, so we honour the (K, V, _Out) signature
+ * by ignoring the third arg. */
+int64_t pair_zm(int64_t k, int64_t v) {
+    int64_t p = kk_alloc_con(0, 2);
+    kk_set_field(p, 0, k);
+    kk_set_field(p, 1, v);
+    return p;
+}
 
 /* Mercury `map` module — implemented here as a cons-of-pairs.  Mercury's
  * real implementation is a 2-3 tree, but for surd-mercury demos a flat

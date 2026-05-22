@@ -1197,6 +1197,15 @@ parseListLiteral lhs rhs =
         Just rest -> rest
         Nothing   -> rhs
   in case T.uncons body of
+    -- Mercury list range syntax: @list.(Lo .. Hi)@ builds the list
+    -- [Lo, Lo+1, ..., Hi].  Route to the runtime @list_range@ helper
+    -- (kk_range_list under the hood).
+    Just ('(', after) | Just (inner, ')') <- T.unsnoc after
+                      , T.isInfixOf " .. " inner ->
+      let (lo, hi) = T.breakOn " .. " (T.strip inner)
+          loS = T.strip lo
+          hiS = T.strip (T.drop 4 hi)  -- drop " .. "
+      in Just (GoalCall "list_range" [loS, hiS, lhs])
     Just ('[', after) -> case T.unsnoc after of
       Just (inner, ']') ->
         let stripped = T.strip inner

@@ -3137,6 +3137,10 @@ int64_t builtin_ordering(int64_t tinfo, int64_t a, int64_t b) {
     return kk_compare(a, b);
 }
 
+/* list_range(Lo, Hi) — Mercury list range syntax @list.(Lo .. Hi)@. */
+extern int64_t kk_range_list(int64_t lo, int64_t hi);
+int64_t list_range(int64_t lo, int64_t hi) { return kk_range_list(lo, hi); }
+
 /* Mercury `map` module — implemented here as a cons-of-pairs.  Mercury's
  * real implementation is a 2-3 tree, but for surd-mercury demos a flat
  * list suffices.  Each entry is a 2-field pair cell {Key, Value}; the

@@ -626,16 +626,23 @@ parseGoalLines ls0 =
     -- `,` separators that would otherwise shatter it apart.
     _ | Just (lhs, params, mOut, bodyLs) <- splitLambda stripped ->
           GoalLambda lhs params mOut (parseGoalLines bodyLs)
+      -- If we just stripped a `( % conjunction ... )` wrapper AND the
+      -- inner content splits into multiple conjuncts at depth 0, take
+      -- the conjunction path FIRST.  Otherwise an inner conjunct that
+      -- happens to start with `( if` would be greedily consumed by
+      -- splitIfThenElse, which extends its "else" block past the
+      -- ITE's closing `)` and swallows the sibling conjuncts (e.g.
+      -- the `, TypeClassInfo_for_field = ..., poly.div_mod(...)`
+      -- that follows an inner ITE inside integrate_rational's outer
+      -- else).  Those sibling conjuncts then surface as part of the
+      -- ITE body's goal-text leak, fusing `then`, `else`, and the
+      -- bound variables into a single unparsed meganame.
+      | wrappedConj, length conjParts > 1 ->
+          GoalConj (map parseGoalLines conjParts)
       | Just (condLs, thenLs, elseLs) <- splitIfThenElse stripped ->
           GoalIfThenElse (parseGoalLines condLs)
                          (parseGoalLines thenLs)
                          (parseGoalLines elseLs)
-      -- If we just stripped a `( % conjunction ... )` wrapper, the
-      -- inner content IS the conjunction body — split it directly.
-      -- The marker check below would miss this because the only
-      -- `% conjunction` line was removed by the strip.
-      | wrappedConj, length conjParts > 1 ->
-          GoalConj (map parseGoalLines conjParts)
       | wrappedConj ->  -- single-goal conjunction body — just parse it
           parseSingleGoal (T.unlines (filter (not . isComment) stripped))
       -- Outer form is a conjunction wrapping (possibly) a nested
@@ -818,11 +825,34 @@ splitIfThenElse rawLs =
             (Just tIdx, Just eIdx) | tIdx < eIdx ->
               let condLs = drop startIdx (take tIdx strippedLs)
                   thenLs = drop (tIdx + 1) (take eIdx strippedLs)
-                  -- Else block extends to the last meaningful line; trim
-                  -- trailing ')' which closes the enclosing ITE paren.
+                  -- Else block extends to the last meaningful line.  The
+                  -- ITE is terminated by exactly ONE bare-`)` line that
+                  -- matches the `( if` opener; any inner `)`s belong to
+                  -- inner constructs (e.g. the closing `)` of an else-arm's
+                  -- `( % conjunction ... )` wrapper).  Drop trailing pure
+                  -- whitespace lines, then drop exactly the first
+                  -- bare-`)` line we encounter scanning from the end —
+                  -- aggressive multi-`)` stripping eats the else-arm's
+                  -- wrapper close, which prevents stripConjunctionWrapperMaybe
+                  -- from recognising the wrapper and surfaces every inner
+                  -- conjunct as a free-EVar leak fused with the surrounding
+                  -- if/then/else markers.
                   rest   = drop (eIdx + 1) strippedLs
-                  trim t = T.dropWhileEnd (`elem` (" )." :: String)) (T.strip t)
-                  elseLs = reverse (dropWhile (\l -> T.null (trim l)) (reverse rest))
+                  isBlank l = T.null (T.strip l)
+                  isBareCloseParen l =
+                    let s = T.strip (T.dropWhileEnd (`elem` (" ." :: String)) (T.strip l))
+                    in s == ")"
+                  -- Reverse, drop leading blank lines, drop ONE bare `)`,
+                  -- then reverse back.  If no bare `)` line is present
+                  -- (unusual but defensive) we leave the input alone past
+                  -- the blank trim.
+                  trimEnd ls =
+                    let rev = reverse ls
+                        afterBlanks = dropWhile isBlank rev
+                    in case afterBlanks of
+                         (l:rest') | isBareCloseParen l -> reverse rest'
+                         _ -> reverse afterBlanks
+                  elseLs = trimEnd rest
               in Just (condLs, thenLs, elseLs)
             _ -> Nothing
 

@@ -39,6 +39,7 @@ import qualified Data.Text as T
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Text.Read (readMaybe)
+import Control.Applicative ((<|>))
 
 -- | Translate a full Mercury HLDS module to Frankenstein Core
 translateHlds :: MercuryHLDS -> Either Text Program
@@ -394,6 +395,20 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
   | Just op <- T.stripPrefix "int." predName'
   , [lhs, rhs] <- args =
       EApp (EVar (Name op 0)) [argExpr lhs, argExpr rhs]
+  -- If the call has an UNBOUND last arg, it's an output binding (Mercury
+  -- HLDS lists every formal parameter, including outputs).  Reuse
+  -- translateGoalK's output-binding heuristic so the output gets bound
+  -- via `let outName = call(inputs...)` BEFORE returning the test
+  -- result; otherwise the output appears as a free-EVar reference in
+  -- the cond and leaks as an unresolved extern at link time.  For
+  -- semidet predicates in a cond position the call's result IS the
+  -- test, so terminate the CPS with the bound name (or @1@ when all
+  -- args are already bound).
+  | not (null args)
+  , let outName = last args
+  , not (Set.member outName env)
+  , isJustVar outName =
+      translateGoalK knownCtors env (GoalCall predName' args) (EVar (Name outName 0))
   | otherwise =
       let isStdlibPrefixed n = any (`T.isPrefixOf` n)
             ["io.", "int.", "integer.", "string.", "list.", "char."
@@ -404,6 +419,21 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
             | otherwise = predName' <> "__" <> T.pack (show (length args))
       in EApp (EVar (Name taggedName 0))
            (map argExpr args)
+  where
+    -- A "real" variable arg is one that won't be treated as a literal by
+    -- argExpr: not a Mercury int/string/char literal, and not a lowercase
+    -- atom (which the bridge wraps as a 0-arg ctor allocation).
+    isJustVar t =
+      case readMaybe (T.unpack t) :: Maybe Integer of
+        Just _ -> False
+        Nothing -> isNothing (parseMercuryStringLit t)
+                   && isNothing (parseMercuryCharLit t)
+                   && not (isMercuryAtomLowercase t)
+    isMercuryAtomLowercase t = case T.uncons t of
+      Just (c, _) | c >= 'a' && c <= 'z' -> True
+      _ -> False
+    isNothing Nothing = True
+    isNothing _       = False
 translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
   []  -> ELit (LitInt 1)
   [g] -> translateGoalAsTest knownCtors env g
@@ -449,9 +479,16 @@ translateGoalK _kctors env (GoalUnify x y) k =
       rhsLit = readMaybe (T.unpack y) :: Maybe Integer
       lhsStr = parseMercuryStringLit x
       rhsStr = parseMercuryStringLit y
+      -- Mercury char literals (e.g. @'a'@) carry an int codepoint
+      -- through the i64-model; treat them like int literals for
+      -- binding-direction inference so X = 'a' binds X to 97
+      -- rather than falling to the unify-stub fallback (which
+      -- leaves X unbound and surfaces as a free-EVar leak).
+      lhsChar = parseMercuryCharLit x
+      rhsChar = parseMercuryCharLit y
       bindLhs = not (Set.member x env)
       bindRhs = not (Set.member y env)
-  in case (lhsLit, rhsLit, lhsStr, rhsStr) of
+  in case (lhsLit <|> lhsChar, rhsLit <|> rhsChar, lhsStr, rhsStr) of
        -- Both Int literals: no binding; just continue.
        (Just _, Just _, _, _) -> k
        -- X = <int literal>: bind X to the literal if not yet bound.

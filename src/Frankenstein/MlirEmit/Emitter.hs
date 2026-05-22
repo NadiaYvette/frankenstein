@@ -3733,8 +3733,20 @@ emitIfElse condOps condName thenExpr elseExpr = do
 emitScfIf :: [Text] -> Text -> Expr -> Expr -> Emit ([Text], Text)
 emitScfIf preOps condName thenExpr elseExpr = do
   resultName <- freshName "v"
+  -- MLIR scf.if regions are lexically isolated: SSA values defined in
+  -- one branch are not visible in the other.  Save and restore esAliases
+  -- around each branch so a let-binding emitted in the then-branch
+  -- (e.g. HeadVar__20 <- field(L, 0) introduced by Mercury's ITE
+  -- cond-bindings flow) doesn't overshadow the else-branch's mapping
+  -- when the same Mercury variable was already bound to an outer SSA.
+  -- Without this, the else-branch's references resolve to the
+  -- then-branch's SSA name, which is out of scope in the else region
+  -- and produces "use of undeclared SSA value".
+  savedA <- gets esAliases
   (thenOps, thenResult) <- emitExpr thenExpr
+  modify (\s -> s { esAliases = savedA })
   (elseOps, elseResult) <- emitExpr elseExpr
+  modify (\s -> s { esAliases = savedA })
   let ifOps =
         [ "%" <> resultName <> " = scf.if %" <> condName <> " -> i64 {" ] ++
         map ("  " <>) thenOps ++

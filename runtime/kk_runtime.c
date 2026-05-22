@@ -2915,6 +2915,7 @@ int64_t string_sub_string_search(int64_t whole, int64_t sub) {
 /* Forward declarations for the static helpers defined further below. */
 static int64_t kk_call_closure_1(int64_t closure, int64_t a);
 static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b);
+static int64_t kk_call_closure_3(int64_t closure, int64_t a, int64_t b, int64_t c);
 
 /* list.all_true(P, Xs) — semidet: P holds for every X in Xs. */
 int64_t list_all_true(int64_t p, int64_t xs) {
@@ -3134,6 +3135,302 @@ int64_t builtin_compare(int64_t tinfo, int64_t a, int64_t b, int64_t cmp_out) {
 int64_t builtin_ordering(int64_t tinfo, int64_t a, int64_t b) {
     (void)tinfo;
     return kk_compare(a, b);
+}
+
+/* Mercury `map` module — implemented here as a cons-of-pairs.  Mercury's
+ * real implementation is a 2-3 tree, but for surd-mercury demos a flat
+ * list suffices.  Each entry is a 2-field pair cell {Key, Value}; the
+ * map itself is a cons-list of these pairs.  Empty map = nil. */
+static int64_t kk_pair_new(int64_t k, int64_t v) {
+    int64_t p = kk_alloc_con(0, 2);
+    kk_set_field(p, 0, k);
+    kk_set_field(p, 1, v);
+    return p;
+}
+static int64_t kk_pair_fst(int64_t p) { return kk_field(p, 0); }
+static int64_t kk_pair_snd(int64_t p) { return kk_field(p, 1); }
+
+/* map.init(M) — bind M to the empty map. */
+int64_t map_init(int64_t tinfo)            { (void)tinfo; return kk_nil(); }
+
+/* map.search(M, K, V) — semidet: V := value associated with K in M;
+ * fails (returns 0) if missing.  In the i64 model we return the
+ * value when found; 0 is also a valid value, so callers that need
+ * to distinguish "not found" must use map.contains first. */
+int64_t map_search(int64_t tinfo, int64_t m, int64_t k) {
+    (void)tinfo;
+    while (!kk_is_nil(m)) {
+        int64_t p = kk_field(m, 0);
+        if (kk_structural_eq(kk_pair_fst(p), k)) return kk_pair_snd(p);
+        m = kk_field(m, 1);
+    }
+    return 0;
+}
+
+/* map.lookup(M, K, V) — det: same as search but expects K to be present.
+ * We fall through to a 0 sentinel if missing rather than aborting. */
+int64_t map_lookup(int64_t tinfo, int64_t m, int64_t k) {
+    return map_search(tinfo, m, k);
+}
+
+/* map.contains(M, K) — semidet. */
+int64_t map_contains(int64_t tinfo, int64_t m, int64_t k) {
+    (void)tinfo;
+    while (!kk_is_nil(m)) {
+        int64_t p = kk_field(m, 0);
+        if (kk_structural_eq(kk_pair_fst(p), k)) return 1;
+        m = kk_field(m, 1);
+    }
+    return 0;
+}
+
+/* map.count(M, N) — det: bind N to the number of entries in M. */
+int64_t map_count(int64_t tinfo, int64_t m) {
+    (void)tinfo;
+    int64_t n = 0;
+    while (!kk_is_nil(m)) { n++; m = kk_field(m, 1); }
+    return n;
+}
+
+/* map.set(M, K, V, M') — det: insert (or update if K already present)
+ * and return the new map.  Walks once; if K is found we replace its
+ * pair, otherwise prepend a fresh pair at the head. */
+int64_t map_set(int64_t tinfo, int64_t m, int64_t k, int64_t v) {
+    (void)tinfo;
+    /* Build a new map by walking M, replacing the matching pair if any. */
+    int64_t* keys = NULL;
+    int64_t* vals = NULL;
+    int64_t cap = 0, n = 0;
+    int replaced = 0;
+    int64_t cur = m;
+    while (!kk_is_nil(cur)) {
+        int64_t p = kk_field(cur, 0);
+        int64_t pk = kk_pair_fst(p);
+        int64_t pv = kk_pair_snd(p);
+        if (n + 1 > cap) {
+            cap = cap == 0 ? 8 : cap * 2;
+            keys = (int64_t*)realloc(keys, (size_t)cap * sizeof(int64_t));
+            vals = (int64_t*)realloc(vals, (size_t)cap * sizeof(int64_t));
+        }
+        if (!replaced && kk_structural_eq(pk, k)) {
+            keys[n] = pk; vals[n] = v;
+            replaced = 1;
+        } else {
+            keys[n] = pk; vals[n] = pv;
+        }
+        n++;
+        cur = kk_field(cur, 1);
+    }
+    int64_t acc = kk_nil();
+    if (!replaced) acc = kk_cons(kk_pair_new(k, v), acc);
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(kk_pair_new(keys[i], vals[i]), acc);
+    free(keys); free(vals);
+    return acc;
+}
+
+/* map.det_insert(M, K, V) and map.det_update(M, K, V) both alias to set
+ * in our stub.  Real Mercury aborts on key-already-present /
+ * key-not-found, but stub behaviour is to silently insert/update. */
+int64_t map_det_insert(int64_t tinfo, int64_t m, int64_t k, int64_t v) {
+    return map_set(tinfo, m, k, v);
+}
+int64_t map_det_update(int64_t tinfo, int64_t m, int64_t k, int64_t v) {
+    return map_set(tinfo, m, k, v);
+}
+
+/* map.delete(M, K, M') — det: remove K from M if present. */
+int64_t map_delete(int64_t tinfo, int64_t m, int64_t k) {
+    (void)tinfo;
+    int64_t* keys = NULL;
+    int64_t* vals = NULL;
+    int64_t cap = 0, n = 0;
+    int64_t cur = m;
+    while (!kk_is_nil(cur)) {
+        int64_t p = kk_field(cur, 0);
+        int64_t pk = kk_pair_fst(p);
+        int64_t pv = kk_pair_snd(p);
+        if (!kk_structural_eq(pk, k)) {
+            if (n + 1 > cap) {
+                cap = cap == 0 ? 8 : cap * 2;
+                keys = (int64_t*)realloc(keys, (size_t)cap * sizeof(int64_t));
+                vals = (int64_t*)realloc(vals, (size_t)cap * sizeof(int64_t));
+            }
+            keys[n] = pk; vals[n] = pv;
+            n++;
+        }
+        cur = kk_field(cur, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(kk_pair_new(keys[i], vals[i]), acc);
+    free(keys); free(vals);
+    return acc;
+}
+
+/* map.from_assoc_list(Pairs, M) — det: build a map from a list of
+ * key-value pairs.  We accept the list directly since our map is
+ * already a list of pairs. */
+int64_t map_from_assoc_list(int64_t tinfo, int64_t pairs) {
+    (void)tinfo;
+    return pairs;
+}
+
+/* map.values(M, Vs) — det: list of values in some order. */
+int64_t map_values(int64_t tinfo, int64_t m) {
+    (void)tinfo;
+    int64_t* vs = NULL;
+    int64_t cap = 0, n = 0;
+    while (!kk_is_nil(m)) {
+        int64_t p = kk_field(m, 0);
+        if (n + 1 > cap) {
+            cap = cap == 0 ? 8 : cap * 2;
+            vs = (int64_t*)realloc(vs, (size_t)cap * sizeof(int64_t));
+        }
+        vs[n++] = kk_pair_snd(p);
+        m = kk_field(m, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(vs[i], acc);
+    free(vs);
+    return acc;
+}
+
+/* map.keys(M, Ks) — det: list of keys in some order. */
+int64_t map_keys(int64_t tinfo, int64_t m) {
+    (void)tinfo;
+    int64_t* ks = NULL;
+    int64_t cap = 0, n = 0;
+    while (!kk_is_nil(m)) {
+        int64_t p = kk_field(m, 0);
+        if (n + 1 > cap) {
+            cap = cap == 0 ? 8 : cap * 2;
+            ks = (int64_t*)realloc(ks, (size_t)cap * sizeof(int64_t));
+        }
+        ks[n++] = kk_pair_fst(p);
+        m = kk_field(m, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(ks[i], acc);
+    free(ks);
+    return acc;
+}
+
+/* map.foldl(F, M, A, A') — det: fold F over (K, V) pairs threading
+ * the accumulator.  F is a 3-arg closure (K, V, A) -> A'.
+ * Mercury's HLDS prepends typeclass-info args; we accept and ignore. */
+int64_t map_foldl(int64_t tinfo_k, int64_t tinfo_v, int64_t tinfo_a,
+                  int64_t f, int64_t m, int64_t acc0) {
+    (void)tinfo_k; (void)tinfo_v; (void)tinfo_a;
+    while (!kk_is_nil(m)) {
+        int64_t p = kk_field(m, 0);
+        int64_t k = kk_pair_fst(p);
+        int64_t v = kk_pair_snd(p);
+        /* call_closure_3 dispatches a 3-arg closure. */
+        acc0 = kk_call_closure_3(f, k, v, acc0);
+        m = kk_field(m, 1);
+    }
+    return acc0;
+}
+
+/* Mercury `set` module — flat-list implementation (kk_cons / kk_nil),
+ * with kk_structural_eq for membership.  Like map.* this is a stub
+ * sufficient for surd-mercury demos rather than a real balanced tree. */
+int64_t set_init(int64_t tinfo)            { (void)tinfo; return kk_nil(); }
+
+int64_t set_member(int64_t tinfo, int64_t x, int64_t s) {
+    (void)tinfo;
+    while (!kk_is_nil(s)) {
+        int64_t h = kk_field(s, 0);
+        if (kk_structural_eq(h, x)) return 1;
+        s = kk_field(s, 1);
+    }
+    return 0;
+}
+
+int64_t set_insert(int64_t tinfo, int64_t s, int64_t x) {
+    if (set_member(tinfo, x, s)) return s;
+    return kk_cons(x, s);
+}
+
+int64_t set_delete(int64_t tinfo, int64_t s, int64_t x) {
+    return list_delete_all(tinfo, s, x);
+}
+
+int64_t set_contains(int64_t tinfo, int64_t s, int64_t x) {
+    return set_member(tinfo, x, s);
+}
+
+int64_t set_make_singleton_set(int64_t tinfo, int64_t x) {
+    (void)tinfo;
+    return kk_cons(x, kk_nil());
+}
+
+int64_t set_count(int64_t tinfo, int64_t s) {
+    (void)tinfo;
+    int64_t n = 0;
+    while (!kk_is_nil(s)) { n++; s = kk_field(s, 1); }
+    return n;
+}
+
+int64_t set_to_sorted_list(int64_t tinfo, int64_t s) {
+    return list_sort_and_remove_dups(tinfo, s);
+}
+
+int64_t set_from_list(int64_t tinfo, int64_t xs) {
+    return list_sort_and_remove_dups(tinfo, xs);
+}
+
+int64_t set_is_empty(int64_t tinfo, int64_t s) {
+    (void)tinfo;
+    return kk_is_nil(s);
+}
+
+int64_t set_union(int64_t tinfo, int64_t a, int64_t b) {
+    while (!kk_is_nil(a)) {
+        int64_t h = kk_field(a, 0);
+        b = set_insert(tinfo, b, h);
+        a = kk_field(a, 1);
+    }
+    return b;
+}
+
+int64_t set_intersect(int64_t tinfo, int64_t a, int64_t b) {
+    int64_t* slots = NULL;
+    int64_t cap = 0, n = 0;
+    while (!kk_is_nil(a)) {
+        int64_t h = kk_field(a, 0);
+        if (set_member(tinfo, h, b)) {
+            if (n + 1 > cap) {
+                cap = cap == 0 ? 8 : cap * 2;
+                slots = (int64_t*)realloc(slots, (size_t)cap * sizeof(int64_t));
+            }
+            slots[n++] = h;
+        }
+        a = kk_field(a, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(slots[i], acc);
+    free(slots);
+    return acc;
+}
+
+int64_t set_difference(int64_t tinfo, int64_t a, int64_t b) {
+    int64_t* slots = NULL;
+    int64_t cap = 0, n = 0;
+    while (!kk_is_nil(a)) {
+        int64_t h = kk_field(a, 0);
+        if (!set_member(tinfo, h, b)) {
+            if (n + 1 > cap) {
+                cap = cap == 0 ? 8 : cap * 2;
+                slots = (int64_t*)realloc(slots, (size_t)cap * sizeof(int64_t));
+            }
+            slots[n++] = h;
+        }
+        a = kk_field(a, 1);
+    }
+    int64_t acc = kk_nil();
+    for (int64_t i = n - 1; i >= 0; i--) acc = kk_cons(slots[i], acc);
+    free(slots);
+    return acc;
 }
 
 /* integer.divide_with_rem(A, B) — Mercury returns a 2-tuple {Q, R}.

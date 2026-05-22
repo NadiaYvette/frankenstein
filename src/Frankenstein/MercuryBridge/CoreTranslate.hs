@@ -414,7 +414,8 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
       let isStdlibPrefixed n = any (`T.isPrefixOf` n)
             ["io.", "int.", "integer.", "string.", "list.", "char."
             , "bool.", "require.", "exception.", "math.", "float."
-            , "builtin.", "private_builtin."]
+            , "builtin.", "private_builtin."
+            , "map.", "set.", "maybe.", "pair.", "assoc_list."]
           taggedName
             | isStdlibPrefixed predName' = predName'
             | otherwise = predName' <> "__" <> T.pack (show (length args))
@@ -556,7 +557,8 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       isStdlibPrefixed n = any (`T.isPrefixOf` n)
         ["io.", "int.", "integer.", "string.", "list.", "char."
         , "bool.", "require.", "exception.", "math.", "float."
-        , "builtin.", "private_builtin."]
+        , "builtin.", "private_builtin."
+        , "map.", "set.", "maybe.", "pair.", "assoc_list."]
       taggedName
         | isStdlibPrefixed predName' = predName'
         | otherwise = predName' <> "__" <> T.pack (show (length callInputs))

@@ -1054,6 +1054,32 @@ emitProgramText prog =
     , "  func.func private @mercury_not(i64) -> i64"
     , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
     , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
+    , "  func.func private @map_init(i64) -> i64"
+    , "  func.func private @map_search(i64, i64, i64) -> i64"
+    , "  func.func private @map_lookup(i64, i64, i64) -> i64"
+    , "  func.func private @map_contains(i64, i64, i64) -> i64"
+    , "  func.func private @map_count(i64, i64) -> i64"
+    , "  func.func private @map_set(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_insert(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_update(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_delete(i64, i64, i64) -> i64"
+    , "  func.func private @map_from_assoc_list(i64, i64) -> i64"
+    , "  func.func private @map_values(i64, i64) -> i64"
+    , "  func.func private @map_keys(i64, i64) -> i64"
+    , "  func.func private @map_foldl(i64, i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @set_init(i64) -> i64"
+    , "  func.func private @set_member(i64, i64, i64) -> i64"
+    , "  func.func private @set_insert(i64, i64, i64) -> i64"
+    , "  func.func private @set_delete(i64, i64, i64) -> i64"
+    , "  func.func private @set_contains(i64, i64, i64) -> i64"
+    , "  func.func private @set_make_singleton_set(i64, i64) -> i64"
+    , "  func.func private @set_count(i64, i64) -> i64"
+    , "  func.func private @set_to_sorted_list(i64, i64) -> i64"
+    , "  func.func private @set_from_list(i64, i64) -> i64"
+    , "  func.func private @set_is_empty(i64, i64) -> i64"
+    , "  func.func private @set_union(i64, i64, i64) -> i64"
+    , "  func.func private @set_intersect(i64, i64, i64) -> i64"
+    , "  func.func private @set_difference(i64, i64, i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1624,6 +1650,32 @@ emitProgramWasm prog =
     , "  func.func private @mercury_not(i64) -> i64"
     , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
     , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
+    , "  func.func private @map_init(i64) -> i64"
+    , "  func.func private @map_search(i64, i64, i64) -> i64"
+    , "  func.func private @map_lookup(i64, i64, i64) -> i64"
+    , "  func.func private @map_contains(i64, i64, i64) -> i64"
+    , "  func.func private @map_count(i64, i64) -> i64"
+    , "  func.func private @map_set(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_insert(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_update(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_delete(i64, i64, i64) -> i64"
+    , "  func.func private @map_from_assoc_list(i64, i64) -> i64"
+    , "  func.func private @map_values(i64, i64) -> i64"
+    , "  func.func private @map_keys(i64, i64) -> i64"
+    , "  func.func private @map_foldl(i64, i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @set_init(i64) -> i64"
+    , "  func.func private @set_member(i64, i64, i64) -> i64"
+    , "  func.func private @set_insert(i64, i64, i64) -> i64"
+    , "  func.func private @set_delete(i64, i64, i64) -> i64"
+    , "  func.func private @set_contains(i64, i64, i64) -> i64"
+    , "  func.func private @set_make_singleton_set(i64, i64) -> i64"
+    , "  func.func private @set_count(i64, i64) -> i64"
+    , "  func.func private @set_to_sorted_list(i64, i64) -> i64"
+    , "  func.func private @set_from_list(i64, i64) -> i64"
+    , "  func.func private @set_is_empty(i64, i64) -> i64"
+    , "  func.func private @set_union(i64, i64, i64) -> i64"
+    , "  func.func private @set_intersect(i64, i64, i64) -> i64"
+    , "  func.func private @set_difference(i64, i64, i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4531,6 +4583,16 @@ externalRuntimeFns = Set.fromList
   , "float_round_to_int", "float_truncate_to_int"
   -- Mercury negation + builtin comparison
   , "mercury_not", "builtin_compare", "builtin_ordering"
+  -- Mercury map.* (cons-of-pairs implementation)
+  , "map_init", "map_search", "map_lookup", "map_contains"
+  , "map_count", "map_set", "map_det_insert", "map_det_update"
+  , "map_delete", "map_from_assoc_list", "map_values", "map_keys"
+  , "map_foldl"
+  -- Mercury set.* (flat list with kk_structural_eq membership)
+  , "set_init", "set_member", "set_insert", "set_delete"
+  , "set_contains", "set_make_singleton_set", "set_count"
+  , "set_to_sorted_list", "set_from_list", "set_is_empty"
+  , "set_union", "set_intersect", "set_difference"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4638,6 +4700,18 @@ externalRuntimeArity = Map.fromList
   , ("integer_pow", 2), ("integer_det_to_int", 1)
   , ("float_round_to_int", 1), ("float_truncate_to_int", 1)
   , ("mercury_not", 1), ("builtin_compare", 4), ("builtin_ordering", 3)
+  , ("map_init", 1), ("map_search", 3), ("map_lookup", 3)
+  , ("map_contains", 3), ("map_count", 2)
+  , ("map_set", 4), ("map_det_insert", 4), ("map_det_update", 4)
+  , ("map_delete", 3), ("map_from_assoc_list", 2)
+  , ("map_values", 2), ("map_keys", 2)
+  , ("map_foldl", 6)
+  , ("set_init", 1), ("set_member", 3), ("set_insert", 3)
+  , ("set_delete", 3), ("set_contains", 3)
+  , ("set_make_singleton_set", 2), ("set_count", 2)
+  , ("set_to_sorted_list", 2), ("set_from_list", 2)
+  , ("set_is_empty", 2)
+  , ("set_union", 3), ("set_intersect", 3), ("set_difference", 3)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

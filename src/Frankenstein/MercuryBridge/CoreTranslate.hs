@@ -398,6 +398,9 @@ detToEffectRow CCNondet  = EffectRowExtend (QName "mercury" (Name "exn" 0))
 -- For a single comparison, returns the comparison result.
 translateGoalAsTest :: Set Text -> Set Text -> MercuryGoal -> Expr
 translateGoalAsTest knownCtors env (GoalCall predName' args)
+  | Just (newName, newArgs) <- rewriteTypeclassMethod predName' args =
+      translateGoalAsTest knownCtors env (GoalCall newName newArgs)
+translateGoalAsTest knownCtors env (GoalCall predName' args)
   -- If the call has an UNBOUND last arg, it's an output binding (Mercury
   -- HLDS lists every formal parameter, including outputs).  Reuse
   -- translateGoalK's output-binding heuristic so the output gets bound
@@ -494,6 +497,40 @@ translateGoalAsTest knownCtors env goal =
 translateGoal :: MercuryGoal -> Expr
 translateGoal g = translateGoalK Set.empty Set.empty g (ELit (LitInt 0))
 
+-- | Typeclass-method-wrapper rewrites: surd's polymorphic code goes
+-- through @poly.ring_zero(TCI)@, @poly.ring_add(TCI, A, B)@, etc.,
+-- which the Mercury compiler implements as
+-- @class_method_call(TCI, MethodIdx, args)@.  We don't have a real
+-- typeclass-info dictionary, so the class_method_call stubs return
+-- identity sentinels and produce wrong values.  As a monomorphisation
+-- hack, rewrite these wrappers at translation time to direct calls
+-- on the rational instance (the most common instance in surd
+-- demos).  Returns Just rewritten-call on a match, Nothing
+-- otherwise.
+rewriteTypeclassMethod :: Text -> [Text] -> Maybe (Text, [Text])
+rewriteTypeclassMethod predName' args = case (predName', args) of
+  -- ring(K) methods: drop the leading TypeClassInfo arg, dispatch
+  -- to the rational instance.
+  ("poly.ring_zero",     [_tci])          -> Just ("rational.zero",  [])
+  ("poly.ring_one",      [_tci])          -> Just ("rational.one",   [])
+  ("poly.ring_add",      [_tci, a, b])    -> Just ("rational.+",     [a, b])
+  ("poly.ring_sub",      [_tci, a, b])    -> Just ("rational.-",     [a, b])
+  ("poly.ring_mul",      [_tci, a, b])    -> Just ("rational.*",     [a, b])
+  ("poly.ring_negate",   [_tci, a])       -> Just ("rational.-",     [a])
+  ("poly.ring_is_zero",  [_tci, a])       -> Just ("rational.is_zero", [a])
+  ("poly.ring_from_int", [_tci, a])       -> Just ("rational.rational", [a])
+  ("poly.ring_equal",    [_tci, a, b])    -> Just ("rational.equal", [a, b])
+  -- field(K) methods.
+  ("poly.field_div",     [_tci, a, b])    -> Just ("rational./",     [a, b])
+  ("poly.field_recip",   [_tci, a])       -> Just ("rational.recip", [a])
+  -- ord(K) methods.
+  ("poly.ord_cmp",       [_tci, a, b])    -> Just ("rational.cmp",   [a, b])
+  ("poly.ord_lt",        [_tci, a, b])    -> Just ("rational.<",     [a, b])
+  ("poly.ord_le",        [_tci, a, b])    -> Just ("rational.=<",    [a, b])
+  ("poly.ord_gt",        [_tci, a, b])    -> Just ("rational.>",     [a, b])
+  ("poly.ord_ge",        [_tci, a, b])    -> Just ("rational.>=",    [a, b])
+  _ -> Nothing
+
 -- | CPS-style goal translation.
 --
 -- @translateGoalK env g k@ translates @g@ with knowledge of the variables
@@ -557,6 +594,9 @@ translateGoalK _kctors env (GoalUnify x y) k =
                         [argExpr x, argExpr y])
                   DefVal]] k
 
+translateGoalK _kctors _env (GoalCall predName' args) k
+  | Just (newName, newArgs) <- rewriteTypeclassMethod predName' args =
+      translateGoalK _kctors _env (GoalCall newName newArgs) k
 translateGoalK _kctors _env (GoalCall predName' args) k =
   -- Identify output variables using a "trailing unbound args" heuristic.
   -- Mercury HLDS lists every argument of a predicate at the call site,

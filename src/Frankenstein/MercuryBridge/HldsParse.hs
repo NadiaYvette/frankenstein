@@ -535,8 +535,17 @@ parseGoalText txt
   | otherwise = parseGoalLines (T.lines txt)
 
 parseGoalLines :: [Text] -> MercuryGoal
-parseGoalLines ls =
-  let stripped = map T.strip ls
+parseGoalLines ls0 =
+  let -- Strip a fully-wrapped `( % conjunction ... )` shell first.
+      -- The marker check below is INFIX over the line set, so once
+      -- the wrapper line is gone the marker check returns False —
+      -- we lose the "this is a conjunction" signal even though the
+      -- structure is plainly a conjunction.  Track whether we
+      -- stripped so we can bypass the marker check.
+      (ls, wrappedConj) = case stripConjunctionWrapperMaybe ls0 of
+        Just inner -> (inner, True)
+        Nothing    -> (ls0, False)
+      stripped = map T.strip ls
       -- Look for structural markers
       conjParts = splitOnMarker "," stripped
       disjParts = splitOnMarker ";" stripped
@@ -583,6 +592,14 @@ parseGoalLines ls =
           GoalIfThenElse (parseGoalLines condLs)
                          (parseGoalLines thenLs)
                          (parseGoalLines elseLs)
+      -- If we just stripped a `( % conjunction ... )` wrapper, the
+      -- inner content IS the conjunction body — split it directly.
+      -- The marker check below would miss this because the only
+      -- `% conjunction` line was removed by the strip.
+      | wrappedConj, length conjParts > 1 ->
+          GoalConj (map parseGoalLines conjParts)
+      | wrappedConj ->  -- single-goal conjunction body — just parse it
+          parseSingleGoal (T.unlines (filter (not . isComment) stripped))
       -- Outer form is a conjunction wrapping (possibly) a nested
       -- switch/disjunction goal.  Split first so the inner construct
       -- isn't consumed in place of the outer.
@@ -806,6 +823,42 @@ splitOnMarker marker ls =
             reverse acc : go [] rest
         | otherwise = go (l:acc) rest
   in go [] (zip ls depthBefore)
+
+-- | Strip a fully-wrapped `( % conjunction ... )` shell, returning
+-- only the inner conjuncts.  Idempotent: returns the input unchanged
+-- if (1) the first stripped line doesn't have the expected
+-- `( % conjunction` opener, or (2) the matching `)` isn't the last
+-- non-blank line.  Restricting to "fully wrapped" prevents stripping
+-- chunks of a split-conjunction (which start with the wrapper opener
+-- but don't carry the matching closer — that closer is in the LAST
+-- chunk).  Disjunction and switch wrappers are intentionally NOT
+-- stripped: parseSwitch needs the `switch on \`Var\'` line on the
+-- header, and GoalDisj's structure is captured by the `;` split.
+-- | Returns Just <inner-lines> when the input is fully wrapped in a
+-- `( % conjunction ... )` shell (the closing ')' is the last
+-- non-blank line); else Nothing.  The caller can use Nothing as a
+-- signal that no stripping occurred (so the existing marker checks
+-- still apply).
+stripConjunctionWrapperMaybe :: [Text] -> Maybe [Text]
+stripConjunctionWrapperMaybe ls = case ls of
+  (l : rest)
+    | "( % conjunction" `T.isPrefixOf` T.strip l ->
+        let parenDelta t =
+              let opens  = T.length (T.filter (== '(') t)
+                  closes = T.length (T.filter (== ')') t)
+              in opens - closes
+            go _ _ [] = Nothing
+            go d i (x:xs) =
+              let d' = d + parenDelta x
+              in if d' <= 0
+                 then if all (T.null . T.strip) xs
+                      then Just i
+                      else Nothing
+                 else go d' (i + 1) xs
+        in case go 1 (0 :: Int) rest of
+             Just closeIdx -> Just (take closeIdx rest)
+             Nothing       -> Nothing
+  _ -> Nothing
 
 parseSwitch :: [Text] -> MercuryGoal
 parseSwitch ls =

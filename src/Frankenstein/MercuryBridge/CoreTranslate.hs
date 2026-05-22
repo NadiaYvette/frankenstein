@@ -603,10 +603,16 @@ translateGoalK _kctors env (GoalUnify x y) k =
        (_, _, Just s, _, _, _) | bindRhs ->
          ELet [[Bind (Name y 0) stringTy (ELit (LitString s)) DefVal]] k
        -- X = Y, one side bound: bind the other as an alias.
+       -- Type the alias as @mercury.value@ (boxed) so Perceus inserts
+       -- retains based on multi-use count.  Using @intTy@ (std.int) here
+       -- would mark the alias as unboxed and Perceus would skip refcounting
+       -- — but the underlying value is often a heap-allocated rational /
+       -- list / etc.  kk_retain/kk_drop are safe on plain ints too because
+       -- they gate on kk_is_heap_ptr.
        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) | bindLhs && not bindRhs ->
-         ELet [[Bind (Name x 0) intTy (EVar (Name y 0)) DefVal]] k
+         ELet [[Bind (Name x 0) valueTy (EVar (Name y 0)) DefVal]] k
        (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) | bindRhs && not bindLhs ->
-         ELet [[Bind (Name y 0) intTy (EVar (Name x 0)) DefVal]] k
+         ELet [[Bind (Name y 0) valueTy (EVar (Name x 0)) DefVal]] k
        -- Fallback: emit a stub unify call.  Use argExpr so literal
        -- ints / chars / strings don't leak as bogus free EVar refs
        -- (e.g. `0` sanitised to `_0$0`).
@@ -764,8 +770,13 @@ translateGoalK kctors env (GoalIfThenElse cond then' else') k =
        ]
 
 translateGoalK kctors env (GoalSwitch var cases) k =
+  -- Strip module qualifier and @/arity@ suffix from the HLDS functor name
+  -- so the switch arm's tag matches the construction-side ECon tag.
+  -- HLDS prints functors as @module.ctor/arity@ (e.g. @euler1/1@);
+  -- parseCtorApp on the construction side returns just @euler1@.  Without
+  -- matching strips the tag hashes diverge and every switch arm fails.
   ECase (EVar (Name var 0))
-    [ Branch (PatCon (QName "" (Name tag 0)) []) Nothing
+    [ Branch (PatCon (QName "" (Name (bareTag tag) 0)) []) Nothing
              (translateGoalK kctors env body k)
     | (tag, body) <- cases
     ]
@@ -1104,9 +1115,31 @@ parseMercuryCharLit raw =
       _ -> Nothing
     _ -> Nothing
 
+-- | Strip both the module qualifier (everything up to and including the
+-- last @.@) and the @/arity@ suffix from an HLDS functor name, returning
+-- the bare constructor name that hashes to the same tag as the
+-- construction-side @ECon@.  For example:
+-- @euler_integrate.euler1/1@ → @euler1@, @list_Cons/2@ → @list_Cons@.
+bareTag :: Text -> Text
+bareTag t =
+  let afterDot = case T.breakOnEnd "." t of
+        ("", n) -> n
+        (_,  n) -> n
+      (prefix, slashRest) = T.breakOn "/" afterDot
+      arityRest = T.drop 1 slashRest
+  in if not (T.null arityRest) && T.all (\c -> c >= '0' && c <= '9') arityRest
+       then prefix
+       else afterDot
+
 -- | Common type shortcuts used by the translator.
 intTy :: Type
 intTy = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
+
+-- | Mercury "any boxed value" type used for alias binds where we don't
+-- know whether the RHS is a plain int or a heap pointer.  Treated as
+-- boxed by Perceus so multi-use vars get refcounted.
+valueTy :: Type
+valueTy = TCon (TypeCon (QName "mercury" (Name "value" 0)) KindValue)
 
 boolTy :: Type
 boolTy = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)

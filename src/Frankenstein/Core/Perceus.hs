@@ -215,11 +215,16 @@ perceusBranch scope mScrutVar br =
       scope' = foldl (\s (n, _) -> Map.insert n Many s) scope patVars
       body = branchBody br
       bodyFree = freeVars body
+      -- Analyze on the PRE-Perceus body so we count real consuming uses,
+      -- not retains we add ourselves.
+      bodyUsage = analyzeUsage body
       body' = perceusExpr scope' body
 
-      -- Used pattern variables (need retaining before scrutinee drop)
-      -- Skip retain for unboxed types — they're plain integers, not heap ptrs
-      usedPats = [ n | (n, t) <- patVars
+      -- Used pattern variables (need retaining before scrutinee drop) paired
+      -- with their consuming-use count.  Skip retain for unboxed types —
+      -- they're plain integers, not heap ptrs.
+      usedPats = [ (n, Map.findWithDefault 0 n bodyUsage)
+                 | (n, t) <- patVars
                  , Set.member n bodyFree
                  , not (isUnboxedType t) ]
       -- Unused pattern variables (for fallback when no scrutinee var)
@@ -232,12 +237,18 @@ perceusBranch scope mScrutVar br =
       -- Koka-style: retain used fields FIRST, then drop the scrutinee.
       -- Order matters: retain must precede drop because kk_drop is
       -- recursive and would free the fields before retain bumps their rc.
+      --
+      -- Retain math: kk_field loads the pointer without bumping refcount,
+      -- so the field enters at rc=1 (owned by parent).  After N retains
+      -- and the scrutinee drop (which recursively decrements children by
+      -- 1), the field has refcount N.  For @cnt@ consuming uses we need
+      -- final rc = cnt, hence N = cnt retains via @wrapRetains n (cnt+1)@.
       let -- First: drop the scrutinee (innermost — emitted AFTER retains)
           droppedBody = ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar sv)) DefVal]]
                              body'
           -- Then: wrap retains around the drop (outermost — emitted BEFORE drop)
           retainedBody = foldr
-            (\n e -> ELet [[Bind (Name "_retain" 0) unitType (ERetain (EVar n)) DefVal]] e)
+            (\(n, cnt) e -> wrapRetains n (cnt + 1) e)
             droppedBody usedPats
       in br { branchBody = retainedBody }
     _ ->

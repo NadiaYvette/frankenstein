@@ -537,6 +537,22 @@ rewriteTypeclassMethod predName' args = case (predName', args) of
   ("poly.ord_ge",        [_tci, a, b])    -> Just ("rational.>=",    [a, b])
   _ -> Nothing
 
+-- | Names that share their bare-form with a known stdlib TYPE but are
+-- actually stdlib FUNCTIONS — when parseCtorApp returns one of these
+-- the translator must route through GoalCall (function semantics)
+-- rather than ECon (allocation).  E.g. @integer.integer/1@ converts
+-- an @int@ to an @integer@; the bare name @integer@ matches a type
+-- ctor recorded via type_ctor_info, but the call is a function.
+isKnownStdlibFunction :: Text -> Bool
+isKnownStdlibFunction n = n `elem`
+  [ "integer.integer"
+  , "integer.zero", "integer.one"
+  , "rational.rational", "rational.zero", "rational.one"
+  , "float.float"
+  , "char.det_from_int", "char.to_int"
+  , "string.from_int", "string.int_to_string"
+  ]
+
 -- | CPS-style goal translation.
 --
 -- @translateGoalK env g k@ translates @g@ with knowledge of the variables
@@ -775,8 +791,20 @@ translateGoalK kctors env (GoalConstruct var ctor args) k
                    [PatVar (Name a 0) anyTy | a <- args])
                  Nothing k
         ]
-  | Set.member ctor kctors || Set.member bareCtor kctors =
+  | Set.member ctor kctors || Set.member bareCtor kctors
+  , not (isKnownStdlibFunction ctor) =
       -- Real ctor allocation.  ECon name is bare (the data-decl form).
+      -- The @isKnownStdlibFunction@ guard rejects names like
+      -- @integer.integer@ that have the same bare name as a type
+      -- ctor (@integer@) but are actually FUNCTIONS in the stdlib
+      -- (int-to-integer conversion).  Without this guard, the
+      -- type_ctor_info scan adds @integer@ to kctors, then the
+      -- @rational(N) = rational_norm(integer(N), integer.one)@
+      -- chain routes @integer(N)@ through ECon allocation instead
+      -- of EApp + integer_integer runtime stub — producing a
+      -- 1-field cell where surd expected the raw integer N, and the
+      -- whole rational arithmetic chain inherits a non-integer
+      -- pointer in the numerator field.
       ELet [[Bind (Name var 0) anyTy
                (EApp (ECon (QName "" (Name bareCtor 0)))
                      (map argExpr args))

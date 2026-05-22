@@ -417,12 +417,27 @@ parseModeDecl line =
   -- Higher-order modes like "in((pred(in) is semidet))" contain nested
   -- parens, so naive ')'-as-terminator and ','-as-separator both fail.
   -- Use paren-depth-aware extraction and splitting.
-  let (paramText, afterCloseParen) = takeParenBalanced (T.dropWhile (/= '(') line)
-      paramModes = map parseMode $ splitCommasOuter paramText
+  let -- Nullary func form has no `(` (e.g. `:- mode zero = out is det`);
+      -- distinguish from the predicate form to avoid emitting a bogus
+      -- ModeIn placeholder for the missing param list.
+      lineAfterModeKw = T.dropWhile (/= '(') line
+      hasParamList    = not (T.null lineAfterModeKw)
+      (paramText, afterCloseParen) =
+        if hasParamList
+          then takeParenBalanced lineAfterModeKw
+          else (T.empty, line)
+      paramModes = if hasParamList
+                     then map parseMode (splitCommasOuter paramText)
+                     else []
       (gapBeforeIs, _) = T.breakOn " is " afterCloseParen
-      retModes = case T.stripPrefix "=" (T.strip gapBeforeIs) of
-        Just rest -> [parseMode (T.strip rest)]
-        Nothing   -> []
+      -- Strip optional leading whitespace then look for `= mode`.  The
+      -- whole gapBeforeIs in the nullary-func form is the entire line
+      -- minus the trailing ` is det.` (e.g. `:- mode zero = out`);
+      -- find `=` anywhere and parse what follows as the return mode.
+      retModes = case T.breakOn "=" (T.strip gapBeforeIs) of
+        (_, eq) | not (T.null eq) ->
+          [parseMode (T.strip (T.drop 1 eq))]
+        _ -> []
       modes = paramModes ++ retModes
       afterIs = T.strip $ T.drop 4 $ snd $ T.breakOn " is " line
       det = parseDet $ T.takeWhile (/= '.') afterIs

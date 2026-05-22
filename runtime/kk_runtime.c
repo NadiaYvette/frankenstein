@@ -2688,6 +2688,72 @@ int64_t int_min(int64_t a, int64_t b) { return a < b ? a : b; }
 int64_t int_abs(int64_t x) { return x < 0 ? -x : x; }
 int64_t int_neg(int64_t x) { return -x; }
 
+/* Mercury `float.<op>` stubs.  Floats are stored as the raw IEEE-754
+ * bit pattern in an i64 (same convention as integer_float above).
+ * The bridge emits these names; without runtime entries they show up
+ * as link-time unresolved symbols in float-heavy Mercury programs
+ * (trig_table, elliptic_integral). */
+static inline double kkf_unbox(int64_t b) { double d; memcpy(&d, &b, 8); return d; }
+static inline int64_t kkf_box(double d) { int64_t b; memcpy(&b, &d, 8); return b; }
+
+int64_t float_zp(int64_t a, int64_t b) { return kkf_box(kkf_unbox(a) + kkf_unbox(b)); }
+int64_t float_zm(int64_t a, int64_t b) { return kkf_box(kkf_unbox(a) - kkf_unbox(b)); }
+int64_t float_zt(int64_t a, int64_t b) { return kkf_box(kkf_unbox(a) * kkf_unbox(b)); }
+int64_t float_zs(int64_t a, int64_t b) {
+    double y = kkf_unbox(b);
+    return kkf_box(y == 0.0 ? 0.0 : kkf_unbox(a) / y);
+}
+int64_t float_zl(int64_t a, int64_t b)   { return kkf_unbox(a) <  kkf_unbox(b) ? 1 : 0; }
+int64_t float_zg(int64_t a, int64_t b)   { return kkf_unbox(a) >  kkf_unbox(b) ? 1 : 0; }
+int64_t float_zezl(int64_t a, int64_t b) { return kkf_unbox(a) <= kkf_unbox(b) ? 1 : 0; }
+int64_t float_zgze(int64_t a, int64_t b) { return kkf_unbox(a) >= kkf_unbox(b) ? 1 : 0; }
+int64_t float_zezeze(int64_t a, int64_t b){ return kkf_unbox(a) == kkf_unbox(b) ? 1 : 0; }
+int64_t float_abs(int64_t a) {
+    double d = kkf_unbox(a);
+    return kkf_box(d < 0 ? -d : d);
+}
+int64_t float_neg(int64_t a) { return kkf_box(-kkf_unbox(a)); }
+int64_t float_max(int64_t a, int64_t b) {
+    double x = kkf_unbox(a), y = kkf_unbox(b);
+    return kkf_box(x > y ? x : y);
+}
+int64_t float_min(int64_t a, int64_t b) {
+    double x = kkf_unbox(a), y = kkf_unbox(b);
+    return kkf_box(x < y ? x : y);
+}
+/* `float.float(I)` converts an integer to a float (same as integer_float). */
+int64_t float_float(int64_t x) {
+    double d = (double)x;
+    return kkf_box(d);
+}
+int64_t float_round(int64_t a) {
+    double d = kkf_unbox(a);
+    /* Mercury's float.round/1 returns an int; round half-away-from-zero. */
+    return (int64_t)(d < 0 ? d - 0.5 : d + 0.5);
+}
+int64_t float_truncate(int64_t a) {
+    double d = kkf_unbox(a);
+    return (int64_t)d;
+}
+int64_t float_floor(int64_t a) {
+    double d = kkf_unbox(a);
+    int64_t r = (int64_t)d;
+    return (d < 0 && d != (double)r) ? r - 1 : r;
+}
+int64_t float_ceiling(int64_t a) {
+    double d = kkf_unbox(a);
+    int64_t r = (int64_t)d;
+    return (d > 0 && d != (double)r) ? r + 1 : r;
+}
+int64_t float_is_nan(int64_t a) {
+    double d = kkf_unbox(a);
+    return (d != d) ? 1 : 0;
+}
+int64_t float_is_inf(int64_t a) {
+    double d = kkf_unbox(a);
+    return (d != 0.0 && d * 2.0 == d) ? 1 : 0;
+}
+
 /* integer.divide_with_rem(A, B) — Mercury returns a 2-tuple {Q, R}.
  * In the bridge's i64 model, build a tuple cell.  The bridge uses
  * `tuple` as the ctor name (parseTupleLiteral), which the emitter

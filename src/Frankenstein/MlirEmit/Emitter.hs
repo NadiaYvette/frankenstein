@@ -983,6 +983,26 @@ emitProgramText prog =
     , "  func.func private @string_zpzp(i64, i64) -> i64"
     , "  func.func private @char_det_from_int(i64) -> i64"
     , "  func.func private @char_to_int(i64) -> i64"
+    , "  func.func private @float_zp(i64, i64) -> i64"
+    , "  func.func private @float_zm(i64, i64) -> i64"
+    , "  func.func private @float_zt(i64, i64) -> i64"
+    , "  func.func private @float_zs(i64, i64) -> i64"
+    , "  func.func private @float_zl(i64, i64) -> i64"
+    , "  func.func private @float_zg(i64, i64) -> i64"
+    , "  func.func private @float_zezl(i64, i64) -> i64"
+    , "  func.func private @float_zgze(i64, i64) -> i64"
+    , "  func.func private @float_zezeze(i64, i64) -> i64"
+    , "  func.func private @float_abs(i64) -> i64"
+    , "  func.func private @float_neg(i64) -> i64"
+    , "  func.func private @float_max(i64, i64) -> i64"
+    , "  func.func private @float_min(i64, i64) -> i64"
+    , "  func.func private @float_float(i64) -> i64"
+    , "  func.func private @float_round(i64) -> i64"
+    , "  func.func private @float_truncate(i64) -> i64"
+    , "  func.func private @float_floor(i64) -> i64"
+    , "  func.func private @float_ceiling(i64) -> i64"
+    , "  func.func private @float_is_nan(i64) -> i64"
+    , "  func.func private @float_is_inf(i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1482,6 +1502,26 @@ emitProgramWasm prog =
     , "  func.func private @string_zpzp(i64, i64) -> i64"
     , "  func.func private @char_det_from_int(i64) -> i64"
     , "  func.func private @char_to_int(i64) -> i64"
+    , "  func.func private @float_zp(i64, i64) -> i64"
+    , "  func.func private @float_zm(i64, i64) -> i64"
+    , "  func.func private @float_zt(i64, i64) -> i64"
+    , "  func.func private @float_zs(i64, i64) -> i64"
+    , "  func.func private @float_zl(i64, i64) -> i64"
+    , "  func.func private @float_zg(i64, i64) -> i64"
+    , "  func.func private @float_zezl(i64, i64) -> i64"
+    , "  func.func private @float_zgze(i64, i64) -> i64"
+    , "  func.func private @float_zezeze(i64, i64) -> i64"
+    , "  func.func private @float_abs(i64) -> i64"
+    , "  func.func private @float_neg(i64) -> i64"
+    , "  func.func private @float_max(i64, i64) -> i64"
+    , "  func.func private @float_min(i64, i64) -> i64"
+    , "  func.func private @float_float(i64) -> i64"
+    , "  func.func private @float_round(i64) -> i64"
+    , "  func.func private @float_truncate(i64) -> i64"
+    , "  func.func private @float_floor(i64) -> i64"
+    , "  func.func private @float_ceiling(i64) -> i64"
+    , "  func.func private @float_is_nan(i64) -> i64"
+    , "  func.func private @float_is_inf(i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4357,6 +4397,12 @@ externalRuntimeFns = Set.fromList
   , "apply__4", "call__4", "class_method_call__4"
   , "list_zpzp", "string_zpzp"
   , "char_det_from_int", "char_to_int"
+  -- Mercury float arithmetic (IEEE-754 bit pattern in i64)
+  , "float_zp", "float_zm", "float_zt", "float_zs"
+  , "float_zl", "float_zg", "float_zezl", "float_zgze", "float_zezeze"
+  , "float_abs", "float_neg", "float_max", "float_min", "float_float"
+  , "float_round", "float_truncate", "float_floor", "float_ceiling"
+  , "float_is_nan", "float_is_inf"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4434,6 +4480,13 @@ externalRuntimeArity = Map.fromList
   , ("apply__4", 4), ("call__4", 4), ("class_method_call__4", 4)
   , ("list_zpzp", 3), ("string_zpzp", 2)
   , ("char_det_from_int", 1), ("char_to_int", 1)
+  , ("float_zp", 2), ("float_zm", 2), ("float_zt", 2), ("float_zs", 2)
+  , ("float_zl", 2), ("float_zg", 2), ("float_zezl", 2), ("float_zgze", 2)
+  , ("float_zezeze", 2)
+  , ("float_abs", 1), ("float_neg", 1)
+  , ("float_max", 2), ("float_min", 2), ("float_float", 1)
+  , ("float_round", 1), ("float_truncate", 1), ("float_floor", 1), ("float_ceiling", 1)
+  , ("float_is_nan", 1), ("float_is_inf", 1)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

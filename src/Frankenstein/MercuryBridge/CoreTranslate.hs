@@ -368,7 +368,13 @@ translatePred knownCtors srcModule pred' = do
     , defVisibility = Public
     }
   where
-    intType = TypeCon (QName "std" (Name "int" 0)) KindValue
+    -- Use a Mercury-specific value type (NOT std.int) so the Perceus
+    -- pass treats Mercury values as boxed/heap-allocated and inserts
+    -- proper retain/drop pairs.  The bridge's pred args are typed
+    -- @mercury.value@ — same i64 width at the MLIR level but
+    -- triggers refcount management for multi-use args (e.g. an EI
+    -- struct used by multiple ei_a/ei_b/ei_c deconstructs).
+    intType = TypeCon (QName "mercury" (Name "value" 0)) KindValue
 
 -- | Convert Mercury mode to multiplicity
 modeToMult :: MercuryMode -> Multiplicity

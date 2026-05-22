@@ -199,18 +199,23 @@ translateMultiHlds (entry : rest) = do
 -- @mercury_collect_choices@ with a function pointer to @pick@.
 -- This enumerates all choice-effect solutions and returns their sum.
 makeMultiWrapper :: Text -> MercuryPred -> [Def]
-makeMultiWrapper _modName pred'
+makeMultiWrapper modName pred'
   | predDet pred' `elem` [Multi, Nondet, CCMulti, CCNondet] =
-      let rawName = predName pred'
-          -- The raw predicate's mangled name after evidence pass
-          mangledName = "mercury_" <> rawName
+      let rawName    = predName pred'
+          -- Match translatePred's effectiveName convention: append
+          -- "__<inputArity>" to non-main pred names so the EFunRef
+          -- resolves against the actual emitted def symbol.
+          inputArity = length [m | m <- predModes pred', m == ModeIn || m == ModeDi]
+          effectiveName
+            | rawName == "main" = rawName
+            | otherwise         = rawName <> "__" <> T.pack (show inputArity)
           wrapperName = rawName <> "_all"
           intT = TCon (TypeCon (QName "std" (Name "int" 0)) KindValue)
       in [ Def
              { defName = QName "" (Name wrapperName 0)
              , defType = TFun [] EffectRowEmpty intT
              , defExpr = EApp (EVar (Name "mercury_collect_choices" 0))
-                              [EFunRef (QName "mercury" (Name rawName 0))]
+                              [EFunRef (QName modName (Name effectiveName 0))]
              , defSort = DefFun
              , defVisibility = Public
              }

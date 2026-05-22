@@ -2272,22 +2272,25 @@ emitExpr (EFunRef qn) = do
   pfx <- gets esModulePrefix
   let qualName = if T.isPrefixOf pfx rawQualName then rawQualName
                  else pfx <> rawQualName
-  -- Declare as external if not defined locally. The `() -> i64` type is the
-  -- minimum-arity convention used in the func.constant cast below; the actual
-  -- function may have higher arity but MLIR allows function-type aliasing
-  -- through the ptrtoint dance.
   topFns <- gets esTopFns
+  arityMap <- gets esTopFnArity
+  -- Look up the function's actual arity so the func.constant's
+  -- function type matches MLIR's verifier expectations.  Without
+  -- this, multi-input preds like @galois_identify.identify_group_cc/2@
+  -- emitted as defs with @(i64) -> i64@ are referenced as
+  -- @() -> i64@, which mlir-opt rejects with "mismatched type".
+  let arity = Map.findWithDefault 0 qualName arityMap
+      paramTys = T.intercalate ", " (replicate arity "i64")
+      fnTy = "(" <> paramTys <> ") -> i64"
   if Set.member qualName topFns
     then pure ()
-    else addExternDecl qualName 0
+    else addExternDecl qualName arity
   refName <- freshName "v"
   fptrName <- freshName "v"
-  -- func.constant produces a value of function type (() -> i64)
-  -- We cast it to !llvm.ptr then to i64 to pass as a regular argument.
   ptrName <- freshName "v"
   pure ([ "// funref @" <> qualName
-        , "%" <> refName <> " = func.constant @" <> qualName <> " : () -> i64"
-        , "%" <> ptrName <> " = builtin.unrealized_conversion_cast %" <> refName <> " : () -> i64 to !llvm.ptr"
+        , "%" <> refName <> " = func.constant @" <> qualName <> " : " <> fnTy
+        , "%" <> ptrName <> " = builtin.unrealized_conversion_cast %" <> refName <> " : " <> fnTy <> " to !llvm.ptr"
         , "%" <> fptrName <> " = llvm.ptrtoint %" <> ptrName <> " : !llvm.ptr to i64"
         ], fptrName)
 

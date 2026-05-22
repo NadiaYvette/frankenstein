@@ -551,6 +551,15 @@ isKnownStdlibFunction n = n `elem`
   , "float.float"
   , "char.det_from_int", "char.to_int"
   , "string.from_int", "string.int_to_string"
+  -- Mercury's typeclass-info construction: HLDS emits
+  -- @TCI = typeclass_info_const(N)@ where N is the instance index.
+  -- Route to the runtime stub (identity returning N) so the TCI is a
+  -- plain int.  Without this guard the bridge sees @typeclass_info_const@
+  -- as a known ctor and allocates a 1-field cell with field 0 = N;
+  -- downstream typeclass dispatch then tries to call that field as a
+  -- function pointer (= N) and crashes at PC=N.
+  , "typeclass_info_const"
+  , "private_builtin.typeclass_info_const"
   ]
 
 -- | CPS-style goal translation.
@@ -651,10 +660,30 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       (revBoundPrefix, trailingUnbound) =
         let (suffix, prefix) = span (not . isBound) (reverse args)
         in (reverse prefix, reverse suffix)
-      callInputs = revBoundPrefix
+      -- Mercury's `private_builtin.type_info_from_typeclass_info` and
+      -- `private_builtin.superclass_from_typeclass_info` are 3-place
+      -- predicates @pred(TCI, Idx, Out)@; our runtime stubs are 2-arg
+      -- identity functions.  When @Out@ is already bound (Mercury emits
+      -- the same extraction redundantly), keeping it in callInputs makes
+      -- the emitter oversaturate the 2-arg stub and dispatch through
+      -- field 0 of the TCI as a function pointer — crash.  Drop the
+      -- 3rd arg and re-bind it (idempotent: stub returns same value).
+      isPrivateBuiltinTciFn n = n `elem`
+        [ "private_builtin.type_info_from_typeclass_info"
+        , "private_builtin.superclass_from_typeclass_info"
+        , "private_builtin.instance_constructor_from_typeclass_info"
+        ]
+      privBuiltinAllBound =
+        isPrivateBuiltinTciFn predName' && null trailingUnbound
+                                        && length revBoundPrefix == 3
+      callInputs
+        | privBuiltinAllBound = take 2 revBoundPrefix
+        | otherwise = revBoundPrefix
       outputBinding = case trailingUnbound of
         (n:_) -> Just n
-        []    -> Nothing
+        []
+          | privBuiltinAllBound -> Just (last revBoundPrefix)
+          | otherwise           -> Nothing
       -- Same arity-suffix convention as translatePred uses for def
       -- names: append "__<n>" where n is the number of inputs the
       -- callee receives.  Lets the linker disambiguate overloads

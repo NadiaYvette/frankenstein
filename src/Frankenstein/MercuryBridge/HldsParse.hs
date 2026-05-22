@@ -1085,6 +1085,13 @@ parseSingleGoal txt
               Nothing | "." `T.isInfixOf` rhs'
                       , isCleanCallName rhs'
                           -> GoalConstruct lhs' rhs' []
+              -- Module-qualified quoted-op call: 'V = list.'++'(A, B, C)'.
+              -- Mercury prints binary operators as functions via the
+              -- @list.'++'(...)@ shape.  Strip the quotes around the
+              -- operator and emit a GoalCall with the LHS appended as
+              -- the synthesised output arg.
+              Nothing | Just (op, args) <- parseQuotedOpCall rhs'
+                          -> GoalCall op (args ++ [lhs'])
               -- Module-qualified bare operator: 'Cmp = builtin.(=)',
               -- 'Cmp = builtin.(<)' etc.  These are 0-arg tag values
               -- (members of a comparison_result enum).  Treat them as
@@ -1191,6 +1198,36 @@ isLambdaRhs t =
 -- two-field cons cell rather than a 0-field ctor with the bracketed
 -- text baked into the name.  The chosen ctor names @list_nil@ /
 -- @list_cons@ sanitise stably so the runtime can rely on the tags.
+-- | Recognise Mercury's quoted-operator call syntax:
+-- @module.'op'(arg1, arg2, ...)@.  Mercury prints binary operators as
+-- functions this way (e.g. @list.'++'(TypeInfo, A, B)@).  Returns the
+-- fully-qualified call name (e.g. @list.++@) and the comma-separated
+-- arg list when matched, else 'Nothing'.  Uses the existing comma
+-- splitter so nested parens in args (e.g. @type_ctor_info(a,b,c)@)
+-- are respected.
+parseQuotedOpCall :: Text -> Maybe (Text, [Text])
+parseQuotedOpCall t = do
+  -- Find ".'" which delimits the module from the quoted op.
+  let s = T.strip t
+  (modPart, after) <- case T.breakOn ".'" s of
+    (m, rest) | not (T.null rest) -> Just (m, T.drop 2 rest)
+              | otherwise         -> Nothing
+  -- after = "op'(arg1, ...)" — find the closing quote of the op.
+  (op, after2) <- case T.breakOn "'" after of
+    (o, rest) | not (T.null rest) -> Just (o, T.drop 1 rest)
+              | otherwise         -> Nothing
+  -- after2 must be "(args...)" — strip the parens.
+  case T.uncons after2 of
+    Just ('(', inner) -> case T.unsnoc inner of
+      Just (argsTxt, ')') ->
+        let args = filter (not . T.null)
+                 $ map T.strip
+                 $ splitCtorArgs argsTxt
+            callName = modPart <> "." <> op
+        in Just (callName, args)
+      _ -> Nothing
+    _ -> Nothing
+
 parseListLiteral :: Text -> Text -> Maybe MercuryGoal
 parseListLiteral lhs rhs =
   let body = case T.stripPrefix "list." rhs of
@@ -1205,7 +1242,7 @@ parseListLiteral lhs rhs =
       let (lo, hi) = T.breakOn " .. " (T.strip inner)
           loS = T.strip lo
           hiS = T.strip (T.drop 4 hi)  -- drop " .. "
-      in Just (GoalCall "list_range" [loS, hiS, lhs])
+      in Just (GoalCall "list.range" [loS, hiS, lhs])
     Just ('[', after) -> case T.unsnoc after of
       Just (inner, ']') ->
         let stripped = T.strip inner

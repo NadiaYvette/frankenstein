@@ -1003,6 +1003,42 @@ emitProgramText prog =
     , "  func.func private @float_ceiling(i64) -> i64"
     , "  func.func private @float_is_nan(i64) -> i64"
     , "  func.func private @float_is_inf(i64) -> i64"
+    , "  func.func private @math_pi() -> i64"
+    , "  func.func private @math_e() -> i64"
+    , "  func.func private @math_sqrt(i64) -> i64"
+    , "  func.func private @math_sin(i64) -> i64"
+    , "  func.func private @math_cos(i64) -> i64"
+    , "  func.func private @math_tan(i64) -> i64"
+    , "  func.func private @math_asin(i64) -> i64"
+    , "  func.func private @math_acos(i64) -> i64"
+    , "  func.func private @math_atan(i64) -> i64"
+    , "  func.func private @math_atan2(i64, i64) -> i64"
+    , "  func.func private @math_exp(i64) -> i64"
+    , "  func.func private @math_ln(i64) -> i64"
+    , "  func.func private @math_log10(i64) -> i64"
+    , "  func.func private @math_log2(i64) -> i64"
+    , "  func.func private @math_pow(i64, i64) -> i64"
+    , "  func.func private @math_sinh(i64) -> i64"
+    , "  func.func private @math_cosh(i64) -> i64"
+    , "  func.func private @math_tanh(i64) -> i64"
+    , "  func.func private @require_unexpected(i64, i64, i64) -> i64"
+    , "  func.func private @private_builtin_type_info_from_typeclass_info(i64, i64) -> i64"
+    , "  func.func private @private_builtin_superclass_from_typeclass_info(i64, i64) -> i64"
+    , "  func.func private @private_builtin_instance_constructor_from_typeclass_info(i64, i64) -> i64"
+    , "  func.func private @string_length(i64) -> i64"
+    , "  func.func private @string_append(i64, i64) -> i64"
+    , "  func.func private @string_from_char(i64) -> i64"
+    , "  func.func private @string_int_to_string(i64) -> i64"
+    , "  func.func private @string_append_list(i64) -> i64"
+    , "  func.func private @string_join_list(i64, i64) -> i64"
+    , "  func.func private @string_index(i64, i64) -> i64"
+    , "  func.func private @string_contains_char(i64, i64) -> i64"
+    , "  func.func private @string_duplicate_char(i64, i64) -> i64"
+    , "  func.func private @string_to_int(i64) -> i64"
+    , "  func.func private @string_to_float(i64) -> i64"
+    , "  func.func private @string_sub_string_search(i64, i64) -> i64"
+    , "  func.func private @list_all_true(i64, i64) -> i64"
+    , "  func.func private @list_drop(i64, i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1522,6 +1558,42 @@ emitProgramWasm prog =
     , "  func.func private @float_ceiling(i64) -> i64"
     , "  func.func private @float_is_nan(i64) -> i64"
     , "  func.func private @float_is_inf(i64) -> i64"
+    , "  func.func private @math_pi() -> i64"
+    , "  func.func private @math_e() -> i64"
+    , "  func.func private @math_sqrt(i64) -> i64"
+    , "  func.func private @math_sin(i64) -> i64"
+    , "  func.func private @math_cos(i64) -> i64"
+    , "  func.func private @math_tan(i64) -> i64"
+    , "  func.func private @math_asin(i64) -> i64"
+    , "  func.func private @math_acos(i64) -> i64"
+    , "  func.func private @math_atan(i64) -> i64"
+    , "  func.func private @math_atan2(i64, i64) -> i64"
+    , "  func.func private @math_exp(i64) -> i64"
+    , "  func.func private @math_ln(i64) -> i64"
+    , "  func.func private @math_log10(i64) -> i64"
+    , "  func.func private @math_log2(i64) -> i64"
+    , "  func.func private @math_pow(i64, i64) -> i64"
+    , "  func.func private @math_sinh(i64) -> i64"
+    , "  func.func private @math_cosh(i64) -> i64"
+    , "  func.func private @math_tanh(i64) -> i64"
+    , "  func.func private @require_unexpected(i64, i64, i64) -> i64"
+    , "  func.func private @private_builtin_type_info_from_typeclass_info(i64, i64) -> i64"
+    , "  func.func private @private_builtin_superclass_from_typeclass_info(i64, i64) -> i64"
+    , "  func.func private @private_builtin_instance_constructor_from_typeclass_info(i64, i64) -> i64"
+    , "  func.func private @string_length(i64) -> i64"
+    , "  func.func private @string_append(i64, i64) -> i64"
+    , "  func.func private @string_from_char(i64) -> i64"
+    , "  func.func private @string_int_to_string(i64) -> i64"
+    , "  func.func private @string_append_list(i64) -> i64"
+    , "  func.func private @string_join_list(i64, i64) -> i64"
+    , "  func.func private @string_index(i64, i64) -> i64"
+    , "  func.func private @string_contains_char(i64, i64) -> i64"
+    , "  func.func private @string_duplicate_char(i64, i64) -> i64"
+    , "  func.func private @string_to_int(i64) -> i64"
+    , "  func.func private @string_to_float(i64) -> i64"
+    , "  func.func private @string_sub_string_search(i64, i64) -> i64"
+    , "  func.func private @list_all_true(i64, i64) -> i64"
+    , "  func.func private @list_drop(i64, i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4403,6 +4475,24 @@ externalRuntimeFns = Set.fromList
   , "float_abs", "float_neg", "float_max", "float_min", "float_float"
   , "float_round", "float_truncate", "float_floor", "float_ceiling"
   , "float_is_nan", "float_is_inf"
+  -- Mercury math.* (float bit pattern in i64)
+  , "math_pi", "math_e"
+  , "math_sqrt", "math_sin", "math_cos", "math_tan"
+  , "math_asin", "math_acos", "math_atan", "math_atan2"
+  , "math_exp", "math_ln", "math_log10", "math_log2"
+  , "math_pow", "math_sinh", "math_cosh", "math_tanh"
+  -- require.unexpected/3 and private_builtin type-info helpers
+  , "require_unexpected"
+  , "private_builtin_type_info_from_typeclass_info"
+  , "private_builtin_superclass_from_typeclass_info"
+  , "private_builtin_instance_constructor_from_typeclass_info"
+  -- Mercury string.* aliases (forward to kk_str_* helpers)
+  , "string_length", "string_append", "string_from_char"
+  , "string_int_to_string", "string_append_list", "string_join_list"
+  , "string_index", "string_contains_char", "string_duplicate_char"
+  , "string_to_int", "string_to_float", "string_sub_string_search"
+  -- Mercury list.* (higher-order)
+  , "list_all_true", "list_drop"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4487,6 +4577,22 @@ externalRuntimeArity = Map.fromList
   , ("float_max", 2), ("float_min", 2), ("float_float", 1)
   , ("float_round", 1), ("float_truncate", 1), ("float_floor", 1), ("float_ceiling", 1)
   , ("float_is_nan", 1), ("float_is_inf", 1)
+  , ("math_pi", 0), ("math_e", 0)
+  , ("math_sqrt", 1), ("math_sin", 1), ("math_cos", 1), ("math_tan", 1)
+  , ("math_asin", 1), ("math_acos", 1), ("math_atan", 1), ("math_atan2", 2)
+  , ("math_exp", 1), ("math_ln", 1), ("math_log10", 1), ("math_log2", 1)
+  , ("math_pow", 2), ("math_sinh", 1), ("math_cosh", 1), ("math_tanh", 1)
+  , ("require_unexpected", 3)
+  , ("private_builtin_type_info_from_typeclass_info", 2)
+  , ("private_builtin_superclass_from_typeclass_info", 2)
+  , ("private_builtin_instance_constructor_from_typeclass_info", 2)
+  , ("string_length", 1), ("string_append", 2), ("string_from_char", 1)
+  , ("string_int_to_string", 1), ("string_append_list", 1)
+  , ("string_join_list", 2), ("string_index", 2)
+  , ("string_contains_char", 2), ("string_duplicate_char", 2)
+  , ("string_to_int", 1), ("string_to_float", 1)
+  , ("string_sub_string_search", 2)
+  , ("list_all_true", 2), ("list_drop", 2)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

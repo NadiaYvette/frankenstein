@@ -2754,6 +2754,188 @@ int64_t float_is_inf(int64_t a) {
     return (d != 0.0 && d * 2.0 == d) ? 1 : 0;
 }
 
+/* Mercury `math.<op>` stubs.  Floats use the same bit-pattern-in-i64
+ * encoding as the float_* operators above. */
+int64_t math_pi(void)             { return kkf_box(3.14159265358979323846); }
+int64_t math_e(void)              { return kkf_box(2.71828182845904523536); }
+int64_t math_sqrt(int64_t a)      { return kkf_box(sqrt(kkf_unbox(a))); }
+int64_t math_sin(int64_t a)       { return kkf_box(sin(kkf_unbox(a))); }
+int64_t math_cos(int64_t a)       { return kkf_box(cos(kkf_unbox(a))); }
+int64_t math_tan(int64_t a)       { return kkf_box(tan(kkf_unbox(a))); }
+int64_t math_asin(int64_t a)      { return kkf_box(asin(kkf_unbox(a))); }
+int64_t math_acos(int64_t a)      { return kkf_box(acos(kkf_unbox(a))); }
+int64_t math_atan(int64_t a)      { return kkf_box(atan(kkf_unbox(a))); }
+int64_t math_exp(int64_t a)       { return kkf_box(exp(kkf_unbox(a))); }
+int64_t math_ln(int64_t a)        { return kkf_box(log(kkf_unbox(a))); }
+int64_t math_log10(int64_t a)     { return kkf_box(log10(kkf_unbox(a))); }
+int64_t math_log2(int64_t a)      { return kkf_box(log2(kkf_unbox(a))); }
+int64_t math_pow(int64_t a, int64_t b) { return kkf_box(pow(kkf_unbox(a), kkf_unbox(b))); }
+int64_t math_atan2(int64_t a, int64_t b) { return kkf_box(atan2(kkf_unbox(a), kkf_unbox(b))); }
+int64_t math_sinh(int64_t a)      { return kkf_box(sinh(kkf_unbox(a))); }
+int64_t math_cosh(int64_t a)      { return kkf_box(cosh(kkf_unbox(a))); }
+int64_t math_tanh(int64_t a)      { return kkf_box(tanh(kkf_unbox(a))); }
+
+/* require.unexpected/3: Mercury aborts on unexpected with a formatted
+ * message.  We fprintf to stderr and exit; the args are heap-allocated
+ * Mercury strings (boxed pointers to char* via kk_string_from_literal).
+ * The string layout puts a char* at field 1 — but for stubs, we just
+ * trap and exit(1) for now. */
+int64_t require_unexpected(int64_t mod, int64_t pred, int64_t msg) {
+    (void)mod; (void)pred; (void)msg;
+    fprintf(stderr, "*** Mercury: unexpected condition (require.unexpected)\n");
+    exit(1);
+    return 0;
+}
+
+/* private_builtin.* type-info helpers: in our erased-type model these
+ * are identity-ish — the bridge passes type-info-shaped values but
+ * doesn't use their contents.  Return the input so downstream code
+ * that just threads the value keeps working. */
+int64_t private_builtin_type_info_from_typeclass_info(int64_t tci, int64_t idx) {
+    (void)idx; return tci;
+}
+int64_t private_builtin_superclass_from_typeclass_info(int64_t tci, int64_t idx) {
+    (void)idx; return tci;
+}
+int64_t private_builtin_instance_constructor_from_typeclass_info(int64_t tci, int64_t idx) {
+    (void)idx; return tci;
+}
+
+/* Mercury `string.<op>` stubs.  These are aliases for the existing
+ * kk_str_* runtime helpers, exposed under the names the bridge emits
+ * (string_<op>) so unresolved-symbol failures go away. */
+int64_t string_length(int64_t s)                  { return kk_str_char_len(s); }
+int64_t string_append(int64_t a, int64_t b)       { return kk_str_concat(a, b); }
+int64_t string_from_char(int64_t c)               { return kk_string_from_char(c); }
+int64_t string_int_to_string(int64_t i)           { return kk_str_show_int(i); }
+
+/* string.append_list(Xs) — concatenate a list of strings. */
+int64_t string_append_list(int64_t xs) {
+    int64_t acc = kk_string_empty();
+    while (!kk_is_nil(xs)) {
+        int64_t h = kk_field(xs, 0);
+        int64_t t = kk_field(xs, 1);
+        acc = kk_str_concat(acc, h);
+        xs = t;
+    }
+    return acc;
+}
+
+/* string.join_list(Sep, Xs) — join with separator. */
+int64_t string_join_list(int64_t sep, int64_t xs) {
+    if (kk_is_nil(xs)) return kk_string_empty();
+    int64_t acc = kk_field(xs, 0);
+    int64_t rest = kk_field(xs, 1);
+    while (!kk_is_nil(rest)) {
+        acc = kk_str_concat(acc, sep);
+        acc = kk_str_concat(acc, kk_field(rest, 0));
+        rest = kk_field(rest, 1);
+    }
+    return acc;
+}
+
+/* Mercury heap-string layout: tag KK_STRING_TAG, field 0 = char*,
+ * field 1 = byte_len (i64).  Reuses the kk_field convention. */
+
+/* string.index(S, I) — return the codepoint at byte index I, or 0
+ * if out of range.  Trivial char-array indexing (ASCII fast path). */
+int64_t string_index(int64_t s, int64_t i) {
+    int64_t ptr_i = kk_field(s, 0);
+    int64_t len = kk_field(s, 1);
+    if (i < 0 || i >= len) return 0;
+    const char* p = (const char*)(uintptr_t)ptr_i;
+    return (int64_t)(unsigned char)p[i];
+}
+
+/* string.contains_char(S, C) — semidet: returns 1 if C appears in S. */
+int64_t string_contains_char(int64_t s, int64_t c) {
+    int64_t ptr_i = kk_field(s, 0);
+    int64_t len = kk_field(s, 1);
+    const char* p = (const char*)(uintptr_t)ptr_i;
+    for (int64_t i = 0; i < len; i++) {
+        if ((int64_t)(unsigned char)p[i] == c) return 1;
+    }
+    return 0;
+}
+
+/* string.duplicate_char(C, N) — string of N copies of char C. */
+int64_t string_duplicate_char(int64_t c, int64_t n) {
+    if (n <= 0) return kk_string_empty();
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) return kk_string_empty();
+    memset(buf, (int)c, (size_t)n);
+    buf[n] = 0;
+    int64_t r = kk_str_alloc_leaf_owned(buf, n);
+    free(buf);
+    return r;
+}
+
+/* string.to_int(S) — semidet: returns the parsed int, or 0 on failure.
+ * In Mercury, this returns Maybe(int); the bridge's semidet handling
+ * boxes the success value or returns a sentinel. */
+int64_t string_to_int(int64_t s) {
+    int64_t ptr_i = kk_field(s, 0);
+    int64_t len = kk_field(s, 1);
+    const char* p = (const char*)(uintptr_t)ptr_i;
+    char tmp[64];
+    int64_t n = len < 63 ? len : 63;
+    memcpy(tmp, p, (size_t)n);
+    tmp[n] = 0;
+    return (int64_t)strtoll(tmp, NULL, 10);
+}
+
+/* string.to_float(S) — semidet: same shape as to_int. */
+int64_t string_to_float(int64_t s) {
+    int64_t ptr_i = kk_field(s, 0);
+    int64_t len = kk_field(s, 1);
+    const char* p = (const char*)(uintptr_t)ptr_i;
+    char tmp[64];
+    int64_t n = len < 63 ? len : 63;
+    memcpy(tmp, p, (size_t)n);
+    tmp[n] = 0;
+    return kkf_box(strtod(tmp, NULL));
+}
+
+/* string.sub_string_search(Whole, Sub) → ByteIndex (semidet).
+ * Use memmem-style search; return -1 if not found (bridge will treat
+ * the semidet correctly via the failure path). */
+int64_t string_sub_string_search(int64_t whole, int64_t sub) {
+    int64_t wp_i = kk_field(whole, 0), wl = kk_field(whole, 1);
+    int64_t sp_i = kk_field(sub, 0),   sl = kk_field(sub, 1);
+    const char* wp = (const char*)(uintptr_t)wp_i;
+    const char* sp = (const char*)(uintptr_t)sp_i;
+    if (sl == 0) return 0;
+    if (sl > wl) return -1;
+    for (int64_t i = 0; i <= wl - sl; i++) {
+        if (memcmp(wp + i, sp, (size_t)sl) == 0) return i;
+    }
+    return -1;
+}
+
+/* Forward declaration for the static helper defined further below. */
+static int64_t kk_call_closure_1(int64_t closure, int64_t a);
+
+/* list.all_true(P, Xs) — semidet: P holds for every X in Xs. */
+int64_t list_all_true(int64_t p, int64_t xs) {
+    while (!kk_is_nil(xs)) {
+        int64_t h = kk_field(xs, 0);
+        int64_t r = kk_call_closure_1(p, h);
+        if (r == 0) return 0;
+        xs = kk_field(xs, 1);
+    }
+    return 1;
+}
+
+/* list.drop(N, Xs, Suffix) — det: bind Suffix to Xs with first N elems
+ * removed.  In our model returns the list directly. */
+int64_t list_drop(int64_t n, int64_t xs) {
+    while (n > 0 && !kk_is_nil(xs)) {
+        xs = kk_field(xs, 1);
+        n--;
+    }
+    return xs;
+}
+
 /* integer.divide_with_rem(A, B) — Mercury returns a 2-tuple {Q, R}.
  * In the bridge's i64 model, build a tuple cell.  The bridge uses
  * `tuple` as the ctor name (parseTupleLiteral), which the emitter

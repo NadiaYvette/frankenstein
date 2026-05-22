@@ -393,9 +393,6 @@ detToEffectRow CCNondet  = EffectRowExtend (QName "mercury" (Name "exn" 0))
 -- For a single comparison, returns the comparison result.
 translateGoalAsTest :: Set Text -> Set Text -> MercuryGoal -> Expr
 translateGoalAsTest knownCtors env (GoalCall predName' args)
-  | Just op <- T.stripPrefix "int." predName'
-  , [lhs, rhs] <- args =
-      EApp (EVar (Name op 0)) [argExpr lhs, argExpr rhs]
   -- If the call has an UNBOUND last arg, it's an output binding (Mercury
   -- HLDS lists every formal parameter, including outputs).  Reuse
   -- translateGoalK's output-binding heuristic so the output gets bound
@@ -580,9 +577,6 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
         | isStdlibPrefixed predName' = predName'
         | otherwise = predName' <> "__" <> T.pack (show (length callInputs))
       callExpr
-        | Just op <- stripIntOp predName'
-        , [lhs, rhs] <- args =
-            EApp (EVar (Name op 0)) [argExpr lhs, argExpr rhs]
         -- Mercury io stdlib calls: route through the Frankenstein
         -- runtime's string printer.  The trailing two args are the
         -- io::di/uo state variables — discarded since the runtime is
@@ -603,7 +597,6 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
         | otherwise =
             EApp (EVar (Name taggedName 0))
                  (map argExpr callInputs)
-      stripIntOp n = T.stripPrefix "int." n
       -- Mercury io.* predicates that have a direct runtime equivalent.
       -- Returns the Frankenstein runtime name when the call shape matches.
       ioCallRuntimeName n as = case (n, length as) of

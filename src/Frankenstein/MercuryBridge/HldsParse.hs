@@ -413,9 +413,12 @@ parseModeDecl line =
   -- Function form:   ":- mode name(in) = out is det."
   -- The function form has an extra return-mode after the closing paren
   -- and before " is ".  Pick it up by inspecting the gap.
-  let afterParen = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') line
-      paramModes = map parseMode $ T.splitOn "," afterParen
-      afterCloseParen = T.drop 1 $ T.dropWhile (/= ')') line
+  --
+  -- Higher-order modes like "in((pred(in) is semidet))" contain nested
+  -- parens, so naive ')'-as-terminator and ','-as-separator both fail.
+  -- Use paren-depth-aware extraction and splitting.
+  let (paramText, afterCloseParen) = takeParenBalanced (T.dropWhile (/= '(') line)
+      paramModes = map parseMode $ splitCommasOuter paramText
       (gapBeforeIs, _) = T.breakOn " is " afterCloseParen
       retModes = case T.stripPrefix "=" (T.strip gapBeforeIs) of
         Just rest -> [parseMode (T.strip rest)]
@@ -424,6 +427,41 @@ parseModeDecl line =
       afterIs = T.strip $ T.drop 4 $ snd $ T.breakOn " is " line
       det = parseDet $ T.takeWhile (/= '.') afterIs
   in (modes, det)
+  where
+    -- Given input starting with @'('@, return (inside, after) where
+    -- @inside@ is the content between the opening @'('@ and its
+    -- matching @')'@ (paren-depth-aware), and @after@ is everything
+    -- past the matching close paren.  If there's no opening paren, return
+    -- (empty, original).
+    takeParenBalanced t = case T.uncons t of
+      Just ('(', rest) -> goBal 1 0 rest
+      _                -> (T.empty, t)
+      where
+        goBal :: Int -> Int -> Text -> (Text, Text)
+        goBal d i s = case T.uncons (T.drop i s) of
+          Nothing      -> (T.take i s, T.empty)
+          Just ('(', _) -> goBal (d + 1) (i + 1) s
+          Just (')', _)
+            | d == 1   -> (T.take i s, T.drop (i + 1) s)
+            | otherwise -> goBal (d - 1) (i + 1) s
+          Just (_, _)  -> goBal d (i + 1) s
+
+    -- Split @t@ on commas that lie at paren depth zero.  Mode args
+    -- like "in((pred(in) is semidet))" contain inner commas at deeper
+    -- depths that must NOT split.
+    splitCommasOuter :: Text -> [Text]
+    splitCommasOuter t = go 0 0
+      where
+        n = T.length t
+        go :: Int -> Int -> [Text]
+        go d i
+          | i >= n = [T.strip t]
+          | otherwise = case T.index t i of
+              '(' -> go (d + 1) (i + 1)
+              ')' -> go (d - 1) (i + 1)
+              ',' | d == 0 ->
+                    T.strip (T.take i t) : splitCommasOuter (T.drop (i + 1) t)
+              _   -> go d (i + 1)
 
 parseMode :: Text -> MercuryMode
 parseMode t = case T.strip t of

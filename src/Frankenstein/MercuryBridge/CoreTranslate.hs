@@ -768,18 +768,57 @@ extendBindingsFor env g = case g of
   -- bindings to subsequent conjuncts so they don't leak as free
   -- EVar references at the emit stage.
   GoalIfThenElse _ t e ->
+    -- Variables bound by an error-only branch (e.g. `require.unexpected`
+    -- / `require.error` / `mercury_fail`) never flow out of the ITE —
+    -- the program either aborts or backtracks.  Treating such a branch
+    -- as "binds everything" lets the OTHER branch's bindings reach
+    -- subsequent conjuncts.  Without this, an ITE whose else-arm calls
+    -- @require.unexpected@ (the common dead-code marker in Mercury)
+    -- intersects to nothing and a variable that the then-arm bound
+    -- (like AN in factoring.candidates_from_int_coeffs) appears
+    -- unbound at the next conjunct.
     let thenE = extendBindingsFor env t
         elseE = extendBindingsFor env e
-    in Set.intersection thenE elseE
+        thenAborts = goalAlwaysAborts t
+        elseAborts = goalAlwaysAborts e
+    in case (thenAborts, elseAborts) of
+         (False, True) -> thenE   -- else aborts → then's bindings flow
+         (True, False) -> elseE   -- then aborts → else's bindings flow
+         _             -> Set.intersection thenE elseE
   GoalDisj gs -> case gs of
     []   -> env
     (g0:rest') ->
-      foldl (\acc g -> Set.intersection acc (extendBindingsFor env g))
-            (extendBindingsFor env g0) rest'
+      -- Same abort-propagation as for ITE: filter out disj arms that
+      -- always abort, then intersect the rest.  An "all arms abort"
+      -- disjunction is unreachable; keep env as-is in that case.
+      let arms = filter (not . goalAlwaysAborts) (g0 : rest')
+      in case arms of
+           []       -> env
+           (a0:as') ->
+             foldl (\acc g -> Set.intersection acc (extendBindingsFor env g))
+                   (extendBindingsFor env a0) as'
   _                -> env
   where
     isJust (Just _) = True
     isJust Nothing  = False
+
+-- | Conservative check: does this goal always abort or fail (never
+-- produces normal-return bindings)?  Recognises the standard Mercury
+-- error idioms surd-mercury uses for dead-code branches.
+goalAlwaysAborts :: MercuryGoal -> Bool
+goalAlwaysAborts g = case g of
+  GoalCall n _
+    | n == "require.unexpected"
+   || n == "require.error"
+   || n == "require.func_error"
+   || n == "exception.throw"
+   || n == "mercury_fail"
+   || n == "throw" -> True
+  GoalConj gs   -> any goalAlwaysAborts gs
+  GoalDisj gs
+    | not (null gs) -> all goalAlwaysAborts gs
+  GoalIfThenElse _ t e -> goalAlwaysAborts t && goalAlwaysAborts e
+  _ -> False
 
 -- | Find ctor names used in deconstruct contexts within a pred's
 -- body.  A deconstruct is a GoalConstruct where the LHS variable is

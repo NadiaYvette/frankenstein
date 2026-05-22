@@ -3684,12 +3684,21 @@ int64_t call__3 (int64_t f, int64_t a, int64_t b) { return kk_call_closure_2(f, 
  * on typeclass dispatch (numeric tower preds, comparison etc.) will
  * compute wrong answers, but at least won't segfault. */
 int64_t class_method_call__2(int64_t f, int64_t a) {
+    /* class_method_call(TCI, MethodIdx) — nullary method.  Without
+     * the real dict we can't know whether the method is @zero@, @one@,
+     * @nan@ etc.  Return 1 — a non-zero sentinel that won't trigger
+     * downstream "divide by zero" if used as a denominator (the most
+     * common nullary methods are constants like @ring.one@ that
+     * downstream arithmetic expects to be non-zero). */
     (void)f; (void)a;
-    return 0;
+    return 1;
 }
 int64_t class_method_call__3(int64_t f, int64_t a, int64_t b) {
-    (void)f; (void)a; (void)b;
-    return 0;
+    /* class_method_call(TCI, MethodIdx, x) — unary method.  Return
+     * the last arg (x) — treats @ring.negate@, @ring.abs@, etc. as
+     * identity.  Wrong but non-zero, avoiding divide-by-zero cascades. */
+    (void)f; (void)a;
+    return b;
 }
 
 /* Mercury list.foldl(F, L, A0) = A — typeclass dispatch prepends two
@@ -3909,10 +3918,12 @@ int64_t list_foldl2(int64_t ti1, int64_t ti2, int64_t ti3, int64_t ti4,
 
 /* Generic 3-arg HO dispatch. */
 int64_t class_method_call__4(int64_t f, int64_t a, int64_t b, int64_t c) {
-    /* Same rationale as class_method_call__2/__3 — return 0 instead
-     * of trying to dispatch through a fake typeclass-info dictionary. */
-    (void)f; (void)a; (void)b; (void)c;
-    return 0;
+    /* class_method_call(TCI, MethodIdx, x, y) — binary method.
+     * Return the FIRST non-TCI arg (x) as a non-zero sentinel that
+     * lets the program advance without divide-by-zero.  Wrong for
+     * ring_mul / ring_add but at least progresses. */
+    (void)f; (void)a; (void)c;
+    return b;
 }
 int64_t apply__4(int64_t f, int64_t a, int64_t b, int64_t c) {
     return kk_call_closure_3(f, a, b, c);

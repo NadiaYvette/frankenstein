@@ -413,6 +413,8 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
             , "bool.", "require.", "exception.", "math.", "float."
             , "builtin.", "private_builtin."
             , "map.", "set.", "maybe.", "pair.", "assoc_list."]
+            || n `elem` ["mercury_fail", "mercury_not", "list_range"
+                        , "unify", "mercury_choose"]
           taggedName
             | isStdlibPrefixed predName' = predName'
             | otherwise = predName' <> "__" <> T.pack (show (length args))

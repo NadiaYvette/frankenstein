@@ -2678,6 +2678,8 @@ int64_t int_zt(int64_t a, int64_t b) { return a * b; }
 int64_t int_zs(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 /* Mercury int.// (integer division, sanitises to "int___"). */
 int64_t int___(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+/* Mercury int./ (single-slash division, sanitises to "int__"). */
+int64_t int__(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 int64_t int_zl(int64_t a, int64_t b) { return a <  b ? 1 : 0; }
 int64_t int_zg(int64_t a, int64_t b) { return a >  b ? 1 : 0; }
 int64_t int_zezl(int64_t a, int64_t b){ return a <= b ? 1 : 0; }
@@ -2702,6 +2704,11 @@ int64_t float_zp(int64_t a, int64_t b) { return kkf_box(kkf_unbox(a) + kkf_unbox
 int64_t float_zm(int64_t a, int64_t b) { return kkf_box(kkf_unbox(a) - kkf_unbox(b)); }
 int64_t float_zt(int64_t a, int64_t b) { return kkf_box(kkf_unbox(a) * kkf_unbox(b)); }
 int64_t float_zs(int64_t a, int64_t b) {
+    double y = kkf_unbox(b);
+    return kkf_box(y == 0.0 ? 0.0 : kkf_unbox(a) / y);
+}
+/* Mercury float./ (single-slash division, sanitises to "float__"). */
+int64_t float__(int64_t a, int64_t b) {
     double y = kkf_unbox(b);
     return kkf_box(y == 0.0 ? 0.0 : kkf_unbox(a) / y);
 }

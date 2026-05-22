@@ -938,6 +938,7 @@ emitProgramText prog =
     , "  func.func private @int_zt(i64, i64) -> i64"
     , "  func.func private @int_zs(i64, i64) -> i64"
     , "  func.func private @int___(i64, i64) -> i64"
+    , "  func.func private @int__(i64, i64) -> i64"
     , "  func.func private @int_zl(i64, i64) -> i64"
     , "  func.func private @int_zg(i64, i64) -> i64"
     , "  func.func private @int_zezl(i64, i64) -> i64"
@@ -988,6 +989,7 @@ emitProgramText prog =
     , "  func.func private @float_zm(i64, i64) -> i64"
     , "  func.func private @float_zt(i64, i64) -> i64"
     , "  func.func private @float_zs(i64, i64) -> i64"
+    , "  func.func private @float__(i64, i64) -> i64"
     , "  func.func private @float_zl(i64, i64) -> i64"
     , "  func.func private @float_zg(i64, i64) -> i64"
     , "  func.func private @float_zezl(i64, i64) -> i64"
@@ -1541,6 +1543,7 @@ emitProgramWasm prog =
     , "  func.func private @int_zt(i64, i64) -> i64"
     , "  func.func private @int_zs(i64, i64) -> i64"
     , "  func.func private @int___(i64, i64) -> i64"
+    , "  func.func private @int__(i64, i64) -> i64"
     , "  func.func private @int_zl(i64, i64) -> i64"
     , "  func.func private @int_zg(i64, i64) -> i64"
     , "  func.func private @int_zezl(i64, i64) -> i64"
@@ -1591,6 +1594,7 @@ emitProgramWasm prog =
     , "  func.func private @float_zm(i64, i64) -> i64"
     , "  func.func private @float_zt(i64, i64) -> i64"
     , "  func.func private @float_zs(i64, i64) -> i64"
+    , "  func.func private @float__(i64, i64) -> i64"
     , "  func.func private @float_zl(i64, i64) -> i64"
     , "  func.func private @float_zg(i64, i64) -> i64"
     , "  func.func private @float_zezl(i64, i64) -> i64"
@@ -4543,7 +4547,7 @@ externalRuntimeFns = Set.fromList
   , "integer_neg"  -- unary integer negation (saturated counterpart to
                    -- the binary integer_zm)
   -- Mercury `int.<op>` aliases (i64 model — identical to integer.*)
-  , "int_zp", "int_zm", "int_zt", "int_zs", "int___"
+  , "int_zp", "int_zm", "int_zt", "int_zs", "int___", "int__"
   , "int_zl", "int_zg", "int_zezl", "int_zgze", "int_zezeze"
   , "int_rem", "int_mod", "int_max", "int_min", "int_abs", "int_neg"
   , "integer_divide_with_rem"
@@ -4566,7 +4570,7 @@ externalRuntimeFns = Set.fromList
   , "list_zpzp", "string_zpzp"
   , "char_det_from_int", "char_to_int"
   -- Mercury float arithmetic (IEEE-754 bit pattern in i64)
-  , "float_zp", "float_zm", "float_zt", "float_zs"
+  , "float_zp", "float_zm", "float_zt", "float_zs", "float__"
   , "float_zl", "float_zg", "float_zezl", "float_zgze", "float_zezeze"
   , "float_abs", "float_neg", "float_max", "float_min", "float_float"
   , "float_round", "float_truncate", "float_floor", "float_ceiling"
@@ -4674,7 +4678,7 @@ externalRuntimeArity = Map.fromList
   , ("integer_to_string", 1)
   , ("integer___", 2), ("integer_rem", 2), ("integer_mod", 2), ("integer_neg", 1)
   , ("int_zp", 2), ("int_zm", 2), ("int_zt", 2), ("int_zs", 2)
-  , ("int___", 2)
+  , ("int___", 2), ("int__", 2)
   , ("int_zl", 2), ("int_zg", 2), ("int_zezl", 2), ("int_zgze", 2), ("int_zezeze", 2)
   , ("int_rem", 2), ("int_mod", 2), ("int_max", 2), ("int_min", 2)
   , ("int_abs", 1), ("int_neg", 1)
@@ -4694,6 +4698,7 @@ externalRuntimeArity = Map.fromList
   , ("list_zpzp", 3), ("string_zpzp", 2)
   , ("char_det_from_int", 1), ("char_to_int", 1)
   , ("float_zp", 2), ("float_zm", 2), ("float_zt", 2), ("float_zs", 2)
+  , ("float__", 2)
   , ("float_zl", 2), ("float_zg", 2), ("float_zezl", 2), ("float_zgze", 2)
   , ("float_zezeze", 2)
   , ("float_abs", 1), ("float_neg", 1)

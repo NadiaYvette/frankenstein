@@ -851,6 +851,27 @@ collectCtorsFromPred pred' =
       inputIxs  = [i | (i, m) <- indexed, m == ModeIn || m == ModeDi]
       args      = predArgNames pred'
       inputArgs = Set.fromList [args !! i | i <- inputIxs, i < length args]
+      -- Mercury HLDS at the determinism stage strips the `:- type ...`
+      -- declarations, but every type that survives in the IR is
+      -- referenced via a @type_ctor_info(module, ctor_name, arity)@
+      -- pseudo-call.  Scan the body for these and collect the second
+      -- arg as a known ctor name — sufficient to disambiguate
+      -- @CTOR(args)@ from a user function call at translation time
+      -- even when the ctor only appears in CONSTRUCT contexts.
+      goTCI g = case g of
+        GoalConstruct _ ctor cargs
+          | ctor == "type_ctor_info" || ctor == "private_builtin.type_info_const"
+          , (modName : ctorName : _) <- cargs
+            -> [(modName <> "." <> ctorName, ctorName)]
+          | otherwise -> []
+        GoalCall _ _ -> []
+        GoalConj gs            -> concatMap goTCI gs
+        GoalDisj gs            -> concatMap goTCI gs
+        GoalIfThenElse c t e   -> goTCI c ++ goTCI t ++ goTCI e
+        GoalNot g'             -> goTCI g'
+        GoalSwitch _ cases     -> concatMap (\(_, b) -> goTCI b) cases
+        GoalLambda _ _ _ b     -> goTCI b
+        _                      -> []
       go env g = case g of
         GoalConstruct v ctor _
           | Set.member v env -> [splitCtor ctor]
@@ -869,7 +890,7 @@ collectCtorsFromPred pred' =
         ("", n) -> (c, n)         -- bare ctor (no module)
         (_,  n) -> (c, n)         -- qualified — keep full + bare name
   in case predGoal pred' of
-       Just goal -> go inputArgs goal
+       Just goal -> go inputArgs goal ++ goTCI goal
        Nothing   -> []
 
 -- | Mercury stdlib ctors the bridge must treat as real data

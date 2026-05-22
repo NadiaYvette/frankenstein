@@ -751,9 +751,9 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
         body
         secondaryOutputs
   in case outputBinding of
-       Nothing      -> ELet [[Bind (Name "_" 0) intTy callExpr DefVal]]
+       Nothing      -> ELet [[Bind (Name "_" 0) valueTy callExpr DefVal]]
                             (wrapSecondaries k)
-       Just outName -> ELet [[Bind (Name outName 0) intTy callExpr DefVal]]
+       Just outName -> ELet [[Bind (Name outName 0) valueTy callExpr DefVal]]
                             (wrapSecondaries k)
 
 translateGoalK kctors env (GoalConj goals) k =

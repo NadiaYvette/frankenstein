@@ -1049,15 +1049,31 @@ extractSwitchArms ls =
         (i:_) -> depthBefore !! i
       isArmBoundary (l, d) =
         "has functor" `T.isInfixOf` l && d == outerDepth
+      -- Strip the outer switch's `;` separators from an arm's collected
+      -- lines.  Without this the arm body still contains the trailing
+      -- `;` that originally separated this arm from the next; parseGoalLines
+      -- then sees a depth-0 `;` and splits the arm body into a GoalDisj
+      -- of (real-body | empty), the empty side falling to GoalUnparsed
+      -- and at runtime to a 0-yielding stub.  Switch arms are
+      -- mutually-exclusive ctor cases — they must not parse as disjunctions.
+      stripArmSeparators armLines =
+        let armDepths = scanl (+) 0 (map parenDelta armLines)
+            depthAt = init (armDepths ++ [0])
+        in [ l | (l, d) <- zip armLines depthAt
+               -- `;` at LOCAL depth 0 — the arm's inner `( % conjunction
+               -- ... )` opens and closes, leaving the trailing `;` (which
+               -- was the switch's arm separator) at depth 0 of this slice.
+               , not (T.strip l == ";" && d == 0)
+           ]
       walk acc curArm [] =
         reverse (case curArm of
-          Just (f, ls') -> (f, parseGoalLines (reverse ls')) : acc
+          Just (f, ls') -> (f, parseGoalLines (stripArmSeparators (reverse ls'))) : acc
           Nothing       -> acc)
       walk acc curArm ((l, d):rest)
         | isArmBoundary (l, d) =
             let functor = T.strip $ snd $ T.breakOnEnd "functor " l
                 acc' = case curArm of
-                  Just (f, ls') -> (f, parseGoalLines (reverse ls')) : acc
+                  Just (f, ls') -> (f, parseGoalLines (stripArmSeparators (reverse ls'))) : acc
                   Nothing       -> acc
             in walk acc' (Just (functor, [])) rest
         | otherwise =

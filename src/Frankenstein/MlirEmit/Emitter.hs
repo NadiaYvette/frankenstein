@@ -29,7 +29,7 @@ import Data.Word (Word8)
 import Data.IORef
 import System.Process (readProcessWithExitCode, readProcess)
 import System.Exit (ExitCode(..))
-import Control.Monad (forM_)
+import Control.Monad (forM, forM_)
 import Control.Monad.State
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -244,12 +244,27 @@ papCallTarget n
     stripDuplicateNames "str_show_int"  = "str_show_int"
     stripDuplicateNames other           = other
 
--- | Ensure a PAP wrapper function exists for (fnName, nSupplied). Emits the
--- wrapper lazily and returns its MLIR symbol name. The wrapper takes
--- (closure, remaining_args...) and dispatches to @fnName(captured..., remaining...).
+-- | Ensure a PAP wrapper function exists for (fnName, arity, nSupplied).
+-- Emits the wrapper lazily and returns its MLIR symbol name.  The
+-- wrapper takes (closure, remaining_args...) and dispatches to
+-- @fnName(captured..., remaining...).
+--
+-- The wrapper name encodes BOTH @nSupplied@ and @arity@.  Encoding
+-- arity in the symbol prevents the cross-arity-reuse bug: the
+-- wrapper's body is generated from the caller's @arity@, and its
+-- internal call to the wrapped fn uses @origParamTys = replicate
+-- arity "i64"@.  If a later caller asked for a different arity and
+-- got the cached wrapper (named only by @nSupplied@), its
+-- @func.constant @wrapperName : (...)@ declaration would use a
+-- different signature than the wrapper actually has — mlir-opt
+-- would then reject the call as "incorrect number of operands for
+-- callee".  Distinct names per arity sidestep the inconsistency at
+-- the cost of (rare) duplicate wrapper functions.
 ensurePapWrapper :: Text -> Int -> Int -> Emit Text
 ensurePapWrapper fnName arity nSupplied = do
-  let wrapperName = "pap_" <> fnName <> "_" <> T.pack (show nSupplied)
+  let wrapperName = "pap_" <> fnName
+                  <> "_a" <> T.pack (show arity)
+                  <> "_" <> T.pack (show nSupplied)
       nRemaining = arity - nSupplied
   existing <- gets esPapWrappers
   if Set.member wrapperName existing
@@ -3087,17 +3102,22 @@ emitLetBindings [binds] body = do
   modPfx <- gets esModulePrefix
   let (recBinds, plainBinds) = partition (isRecLetLambda modPfx) binds
   -- Pre-register the recursive binds in esTopFns/esTopFnArity/esPromotedFns.
-  forM_ recBinds $ \bnd -> do
-    let qualN = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
+  -- Track any deconfliction renames positionally so the captures-precompute
+  -- step and emitBindAsTopFn use the same renamed qualN.
+  recBindQualNs <- forM recBinds $ \bnd -> do
+    let qualN0 = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
         arity = countLamParams (bindExpr bnd)
         ssaKey = nameToSsa (Frankenstein.Core.Types.bindName bnd)
+    qualN <- dedupeQualN qualN0 arity
     modify (\s -> s { esTopFns      = Set.insert qualN (esTopFns s)
                     , esTopFnArity  = Map.insert qualN arity (esTopFnArity s)
                     , esPromotedFns = Map.insert ssaKey qualN (esPromotedFns s) })
+    pure qualN
   -- Pre-compute captures for all promoted binds (fixed-point iteration).
-  precomputeCaptures modPfx recBinds
+  precomputeCapturesWith modPfx recBindQualNs recBinds
   -- Emit recursive binds as top-level func.func definitions.
-  recOps <- concat <$> mapM (emitBindAsTopFn modPfx) recBinds
+  recOps <- concat <$> mapM (\(qn, bnd) -> emitBindAsTopFnWith modPfx qn bnd)
+                            (zip recBindQualNs recBinds)
   -- Emit remaining binds normally.
   plainOps <- concat <$> mapM emitBind plainBinds
   (bodyOps, bodyName) <- emitExpr body
@@ -3114,15 +3134,18 @@ emitLetBindings (bg:bgs) body = do
   savedCaptures <- gets esPromotedCaptures
   modPfx <- gets esModulePrefix
   let (recBinds, plainBinds) = partition (isRecLetLambda modPfx) bg
-  forM_ recBinds $ \bnd -> do
-    let qualN = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
+  recBindQualNs <- forM recBinds $ \bnd -> do
+    let qualN0 = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
         arity = countLamParams (bindExpr bnd)
         ssaKey = nameToSsa (Frankenstein.Core.Types.bindName bnd)
+    qualN <- dedupeQualN qualN0 arity
     modify (\s -> s { esTopFns      = Set.insert qualN (esTopFns s)
                     , esTopFnArity  = Map.insert qualN arity (esTopFnArity s)
                     , esPromotedFns = Map.insert ssaKey qualN (esPromotedFns s) })
-  precomputeCaptures modPfx recBinds
-  recOps <- concat <$> mapM (emitBindAsTopFn modPfx) recBinds
+    pure qualN
+  precomputeCapturesWith modPfx recBindQualNs recBinds
+  recOps <- concat <$> mapM (\(qn, bnd) -> emitBindAsTopFnWith modPfx qn bnd)
+                            (zip recBindQualNs recBinds)
   plainOps <- concat <$> mapM emitBind plainBinds
   (restOps, restName) <- emitLetBindings bgs body
   modify (\s -> s { esAliases = savedA, esTopFns = savedTopFns
@@ -3740,7 +3763,22 @@ emitBind bnd = do
 -- B's captures must also be A's captures) require multiple passes when
 -- the processing order doesn't match the dependency order.
 precomputeCaptures :: Text -> [Bind] -> Emit ()
-precomputeCaptures modPfx recBinds = do
+precomputeCaptures modPfx recBinds =
+  precomputeCapturesWith modPfx
+    [ qualifyBindName modPfx (Frankenstein.Core.Types.bindName b) | b <- recBinds ]
+    recBinds
+
+-- | Variant of precomputeCaptures that honours a per-bind list of
+-- deconflicted qualified names supplied by the caller.  The list is
+-- aligned positionally with @recBinds@: each element is the qualN that
+-- the caller already registered in @esTopFns@ / @esTopFnArity@.  Without
+-- this, when two binds in the same group would otherwise share a qualN
+-- (the Mercury bridge reuses synthetic names like @V_87@ within one
+-- predicate), the captures and arity overwrites land on the wrong
+-- registration — and the call-site's arity belief disagrees with the
+-- emitted function's signature.
+precomputeCapturesWith :: Text -> [Text] -> [Bind] -> Emit ()
+precomputeCapturesWith modPfx qualNs recBinds = do
   currentAliases <- gets esAliases
   topFns <- gets esTopFns
   promoted <- gets esPromotedFns
@@ -3760,10 +3798,14 @@ precomputeCaptures modPfx recBinds = do
                         || Map.member s promoted
                         || Set.member s allGroupParamSsas
       -- For each bind, compute direct captures (free vars that are in scope
-      -- but NOT top-level fns and NOT other promoted fns).
-      bindInfo = [ (qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd),
+      -- but NOT top-level fns and NOT other promoted fns).  The qualN is
+      -- positionally supplied by the caller (may differ from
+      -- @qualifyBindName modPfx (bindName bnd)@ when deconfliction renamed
+      -- this bind to avoid arity collisions with another bind sharing the
+      -- raw qualN).
+      bindInfo = [ (qualN,
                     bnd, directCaps, promotedRefs', paramSsaNames)
-                 | bnd <- recBinds
+                 | (qualN, bnd) <- zip qualNs recBinds
                  , let ELam params body = unwrapLambda (bindExpr bnd)
                        bodyFree = freeVarsExpr body
                        paramNames = Set.fromList (map fst params)
@@ -3813,8 +3855,18 @@ precomputeCaptures modPfx recBinds = do
 -- recursive self/mutual references resolve to direct func.call.
 -- Captures are pre-computed by precomputeCaptures.
 emitBindAsTopFn :: Text -> Bind -> Emit [Text]
-emitBindAsTopFn modPfx bnd = do
-  let qualN = qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)
+emitBindAsTopFn modPfx bnd =
+  emitBindAsTopFnWith modPfx
+    (qualifyBindName modPfx (Frankenstein.Core.Types.bindName bnd)) bnd
+
+-- | Variant of emitBindAsTopFn that takes an explicit deconflicted
+-- qualN supplied by the caller.  Used to ensure the emitted func.func
+-- symbol matches the same renamed name the caller registered in
+-- @esTopFns@ / @esTopFnArity@ — necessary when two binds in the same
+-- group share a raw qualN (Mercury bridge synthetic-name collisions)
+-- but have different arities or captures.
+emitBindAsTopFnWith :: Text -> Text -> Bind -> Emit [Text]
+emitBindAsTopFnWith _modPfx qualN bnd = do
   case unwrapLambda (bindExpr bnd) of
     ELam params body -> do
       -- Captures were pre-computed by precomputeCaptures.
@@ -4132,6 +4184,47 @@ countLamParams _               = 0
 -- reference through the normal lambda-lifting closure mechanism.
 isRecLetLambda :: Text -> Bind -> Bool
 isRecLetLambda _modPfx bnd = isLambda (bindExpr bnd)
+
+-- | Return a qualified name that's unique with respect to the
+-- already-registered top-fn set.  If the proposed @qualN@ is already
+-- present, append @_dupN@ suffixes until a fresh name is found.
+-- This addresses the Mercury bridge's reuse of synthetic variable
+-- names (e.g. @V_87@) for unrelated inner lambdas within one
+-- enclosing predicate.  Without deconfliction, addLiftedFnOnce's
+-- first-wins dedup silently merges the binds while the arity map's
+-- last-wins overwrite leaves callers disagreeing on the arity —
+-- callers using the wrong-arity wrapper crash mlir-opt with
+-- "incorrect number of operands for callee".  The @arity@ argument
+-- is currently unused but retained for callers that want to skip
+-- the rename when the existing registration matches; we always
+-- rename on collision because two binds with the same qualN
+-- normally have different BODIES (lexically shadowed lambdas) so
+-- the emitted func.func MUST stay separate.
+dedupeQualN :: Text -> Int -> Emit Text
+dedupeQualN qualN _arity = do
+  topFns <- gets esTopFns
+  lifted <- gets esLiftedNames
+  -- Check BOTH the current scope's top-fn set AND the cumulative
+  -- set of already-emitted lifted function names.  The latter
+  -- catches inter-branch collisions: when two sibling match arms
+  -- each contain a let-bound lambda with the same raw qualN, the
+  -- second arm's emitLetBindings has restored topFns to the outer
+  -- state (the first arm's registration is gone) so checking
+  -- topFns alone misses the collision.  But esLiftedNames is
+  -- global and never restored — it tracks every func.func ever
+  -- emitted, so it correctly flags the second arm's bind as a
+  -- collision against the first arm's already-emitted body.
+  if Set.notMember qualN topFns && Set.notMember qualN lifted
+    then pure qualN
+    else tryAlt (1 :: Int)
+  where
+    tryAlt n = do
+      tf <- gets esTopFns
+      lf <- gets esLiftedNames
+      let alt = qualN <> "_dup" <> T.pack (show n)
+      if Set.member alt tf || Set.member alt lf
+        then tryAlt (n + 1)
+        else pure alt
 
 -- | Compute the qualified name for a let-bound function being promoted
 -- to top-level. Uses module prefix + unique to avoid collisions between

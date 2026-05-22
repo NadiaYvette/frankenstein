@@ -573,15 +573,22 @@ translateGoalK kctors env (GoalNot goal) k =
        k
 
 translateGoalK kctors env (GoalIfThenElse cond then' else') k =
-  -- The cond must yield the boolean test result as the scrutinee.
-  -- translateGoalK threads the terminator (the value to leave in the
-  -- continuation), which would discard the actual test result and
-  -- always feed `1` back, hard-coding the then-branch.  Use the
-  -- test-form translator instead.
-  ECase (translateGoalAsTest kctors env cond)
-    [ Branch (PatLit (LitInt 1)) Nothing (translateGoalK kctors env then' k)
-    , Branch (PatWild boolTy)    Nothing (translateGoalK kctors env else' k)
-    ]
+  -- Mercury's if-then-else lets the cond's local bindings flow into
+  -- the then-branch.  Standard structure: ECase on the cond's
+  -- boolean test result.  THEN-side is the cond's CPS chain
+  -- wrapping the then-body so cond's pattern variables enter the
+  -- then-body's lexical scope.
+  let condEnv  = extendBindingsFor env cond
+      thenE    = translateGoalK kctors condEnv then' k
+      elseE    = translateGoalK kctors env else' k
+      -- Re-run cond's CPS chain wrapping thenE; cond's bindings
+      -- now reach thenE.  Safe to duplicate now that PAP wrappers
+      -- are named per-arity (no cross-arity wrapper-sharing bug).
+      thenWithCondBindings = translateGoalK kctors env cond thenE
+  in ECase (translateGoalAsTest kctors env cond)
+       [ Branch (PatLit (LitInt 1)) Nothing thenWithCondBindings
+       , Branch (PatWild boolTy)    Nothing elseE
+       ]
 
 translateGoalK kctors env (GoalSwitch var cases) k =
   ECase (EVar (Name var 0))

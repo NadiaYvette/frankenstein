@@ -966,6 +966,8 @@ emitProgramText prog =
     , "  func.func private @class_method_call__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_zpzp(i64, i64, i64) -> i64"
     , "  func.func private @string_zpzp(i64, i64) -> i64"
+    , "  func.func private @char_det_from_int(i64) -> i64"
+    , "  func.func private @char_to_int(i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1463,6 +1465,8 @@ emitProgramWasm prog =
     , "  func.func private @class_method_call__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_zpzp(i64, i64, i64) -> i64"
     , "  func.func private @string_zpzp(i64, i64) -> i64"
+    , "  func.func private @char_det_from_int(i64) -> i64"
+    , "  func.func private @char_to_int(i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4247,6 +4251,7 @@ externalRuntimeFns = Set.fromList
   , "list_filter_map", "list_sort", "list_foldl2"
   , "apply__4", "call__4", "class_method_call__4"
   , "list_zpzp", "string_zpzp"
+  , "char_det_from_int", "char_to_int"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4323,6 +4328,7 @@ externalRuntimeArity = Map.fromList
   , ("list_filter_map", 4), ("list_sort", 2), ("list_foldl2", 8)
   , ("apply__4", 4), ("call__4", 4), ("class_method_call__4", 4)
   , ("list_zpzp", 3), ("string_zpzp", 2)
+  , ("char_det_from_int", 1), ("char_to_int", 1)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

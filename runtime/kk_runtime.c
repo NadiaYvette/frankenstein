@@ -2974,6 +2974,11 @@ int64_t string_zpzp(int64_t s1, int64_t s2) {
     return kk_str_concat(s1, s2);
 }
 
+/* `char.det_from_int(N)` / `char.to_int(C)` — in the i64 model, both
+ * collapse to identity (chars are stored as their codepoint i64). */
+int64_t char_det_from_int(int64_t n) { return n; }
+int64_t char_to_int(int64_t c)        { return c; }
+
 /* Mercury require.error/1 — fatal error with a message.  Prints the
  * message (a kk_string_t pointer) to stderr with a trailing newline,
  * then exits with status 1.  Used by surd's rational_norm when the

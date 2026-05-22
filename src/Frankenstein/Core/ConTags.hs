@@ -63,10 +63,25 @@ assignProgramTags prog =
       -- under several qualifier forms (e.g. "list/Cons", "core/Cons",
       -- "(::)") depending on the call site.  Detect the bare ctor
       -- name at the tail so we hit them all without enumerating.
-      tagFor k
-        | endsWith "Cons" k || endsWith "(::)" k || endsWith "(:)" k || k == ":" = kkConsTag
-        | endsWith "Nil" k  || endsWith "[]" k                                    = kkNilTag
-        | otherwise                                                                = stableConTag k
+      -- Mercury HLDS encodes constructor tags as "name/Arity"
+      -- (@[]/0@, @./2@, @re_add/2@, @list_Cons/2@, etc.).  Strip the
+      -- @/<digits>@ suffix before pattern-matching against the Cons/Nil
+      -- specials so the bridge's switch arms hit the same fast-path
+      -- runtime tags (kk_nil / kk_cons) the constructor side allocates.
+      stripArity k = case T.breakOn "/" k of
+        (prefix, rest)
+          | not (T.null rest), T.all (\c -> c >= '0' && c <= '9') (T.drop 1 rest)
+            -> prefix
+        _ -> k
+      tagFor k =
+        let s = stripArity k
+        in if endsWith "Cons" s || endsWith "(::)" s || endsWith "(:)" s
+              || s == ":" || s == "."
+           then kkConsTag
+           else if endsWith "Nil" s || endsWith "[]" s
+                   || s == "[]"
+                then kkNilTag
+                else stableConTag k
       endsWith suf k =
         let n = T.length suf
         in T.length k >= n && T.takeEnd n k == suf

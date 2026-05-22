@@ -506,6 +506,15 @@ extractArgNames :: [Text] -> [Text]
 extractArgNames ls =
   -- Find the clause head: contains ":-" but doesn't start with ":-"
   case filter isClauseHead ls of
+    (clauseHead:_)
+      -- Nullary func form: "module.name = OutVar :-" has no @(args)@.
+      -- The output arg is everything between @=@ and @:-@.
+      | not (T.any (== '(') (T.takeWhile (/= ':') clauseHead))
+      , "=" `T.isInfixOf` clauseHead ->
+          let beforeColon = T.strip $ fst $ T.breakOn ":-" clauseHead
+              (_, afterEq) = T.breakOn "=" beforeColon
+              outName = T.strip (T.drop 1 afterEq)
+          in if T.null outName then [] else [outName]
     (clauseHead:_) ->
       let afterParen = T.takeWhile (/= ')') $ T.drop 1 $ T.dropWhile (/= '(') clauseHead
           commaArgs = map T.strip $ T.splitOn "," afterParen

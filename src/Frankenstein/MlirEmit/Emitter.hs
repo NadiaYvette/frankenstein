@@ -918,6 +918,22 @@ emitProgramText prog =
     , "  func.func private @integer_rem(i64, i64) -> i64"
     , "  func.func private @integer_mod(i64, i64) -> i64"
     , "  func.func private @integer_neg(i64) -> i64"
+    , "  func.func private @int_zp(i64, i64) -> i64"
+    , "  func.func private @int_zm(i64, i64) -> i64"
+    , "  func.func private @int_zt(i64, i64) -> i64"
+    , "  func.func private @int_zs(i64, i64) -> i64"
+    , "  func.func private @int_zl(i64, i64) -> i64"
+    , "  func.func private @int_zg(i64, i64) -> i64"
+    , "  func.func private @int_zezl(i64, i64) -> i64"
+    , "  func.func private @int_zgze(i64, i64) -> i64"
+    , "  func.func private @int_zezeze(i64, i64) -> i64"
+    , "  func.func private @int_rem(i64, i64) -> i64"
+    , "  func.func private @int_mod(i64, i64) -> i64"
+    , "  func.func private @int_max(i64, i64) -> i64"
+    , "  func.func private @int_min(i64, i64) -> i64"
+    , "  func.func private @int_abs(i64) -> i64"
+    , "  func.func private @int_neg(i64) -> i64"
+    , "  func.func private @integer_divide_with_rem(i64, i64, i64) -> i64"
     , "  func.func private @unify(i64, i64) -> i64"
     , "  func.func private @io_format(i64, i64, i64) -> i64"
     , "  func.func private @require_error(i64) -> i64"
@@ -934,6 +950,20 @@ emitProgramText prog =
     , "  func.func private @list_map(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_filter(i64, i64, i64) -> i64"
     , "  func.func private @list_length(i64, i64) -> i64"
+    , "  func.func private @list_append(i64, i64, i64) -> i64"
+    , "  func.func private @list_reverse(i64, i64) -> i64"
+    , "  func.func private @list_condense(i64, i64) -> i64"
+    , "  func.func private @list_duplicate(i64, i64, i64) -> i64"
+    , "  func.func private @list_last(i64, i64) -> i64"
+    , "  func.func private @list_member(i64, i64, i64) -> i64"
+    , "  func.func private @list_det_index0(i64, i64, i64) -> i64"
+    , "  func.func private @list_det_replace_nth(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_filter_map(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_sort(i64, i64) -> i64"
+    , "  func.func private @list_foldl2(i64, i64, i64, i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @apply__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @call__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @class_method_call__4(i64, i64, i64, i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1383,6 +1413,22 @@ emitProgramWasm prog =
     , "  func.func private @integer_rem(i64, i64) -> i64"
     , "  func.func private @integer_mod(i64, i64) -> i64"
     , "  func.func private @integer_neg(i64) -> i64"
+    , "  func.func private @int_zp(i64, i64) -> i64"
+    , "  func.func private @int_zm(i64, i64) -> i64"
+    , "  func.func private @int_zt(i64, i64) -> i64"
+    , "  func.func private @int_zs(i64, i64) -> i64"
+    , "  func.func private @int_zl(i64, i64) -> i64"
+    , "  func.func private @int_zg(i64, i64) -> i64"
+    , "  func.func private @int_zezl(i64, i64) -> i64"
+    , "  func.func private @int_zgze(i64, i64) -> i64"
+    , "  func.func private @int_zezeze(i64, i64) -> i64"
+    , "  func.func private @int_rem(i64, i64) -> i64"
+    , "  func.func private @int_mod(i64, i64) -> i64"
+    , "  func.func private @int_max(i64, i64) -> i64"
+    , "  func.func private @int_min(i64, i64) -> i64"
+    , "  func.func private @int_abs(i64) -> i64"
+    , "  func.func private @int_neg(i64) -> i64"
+    , "  func.func private @integer_divide_with_rem(i64, i64, i64) -> i64"
     , "  func.func private @unify(i64, i64) -> i64"
     , "  func.func private @io_format(i64, i64, i64) -> i64"
     , "  func.func private @require_error(i64) -> i64"
@@ -1399,6 +1445,20 @@ emitProgramWasm prog =
     , "  func.func private @list_map(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_filter(i64, i64, i64) -> i64"
     , "  func.func private @list_length(i64, i64) -> i64"
+    , "  func.func private @list_append(i64, i64, i64) -> i64"
+    , "  func.func private @list_reverse(i64, i64) -> i64"
+    , "  func.func private @list_condense(i64, i64) -> i64"
+    , "  func.func private @list_duplicate(i64, i64, i64) -> i64"
+    , "  func.func private @list_last(i64, i64) -> i64"
+    , "  func.func private @list_member(i64, i64, i64) -> i64"
+    , "  func.func private @list_det_index0(i64, i64, i64) -> i64"
+    , "  func.func private @list_det_replace_nth(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_filter_map(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_sort(i64, i64) -> i64"
+    , "  func.func private @list_foldl2(i64, i64, i64, i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @apply__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @call__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @class_method_call__4(i64, i64, i64, i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4161,6 +4221,11 @@ externalRuntimeFns = Set.fromList
   , "integer_mod"  -- integer.mod
   , "integer_neg"  -- unary integer negation (saturated counterpart to
                    -- the binary integer_zm)
+  -- Mercury `int.<op>` aliases (i64 model — identical to integer.*)
+  , "int_zp", "int_zm", "int_zt", "int_zs"
+  , "int_zl", "int_zg", "int_zezl", "int_zgze", "int_zezeze"
+  , "int_rem", "int_mod", "int_max", "int_min", "int_abs", "int_neg"
+  , "integer_divide_with_rem"
   , "unify"
   , "io_format"     -- io.format(fmt, args, io) — pretty-printer
   , "require_error"      -- require.error/1 — fatal with message
@@ -4173,6 +4238,10 @@ externalRuntimeFns = Set.fromList
   , "class_method_call__2", "class_method_call__3"
   -- Mercury list HO functions — typeclass dispatch prepends TypeInfo args
   , "list_foldl", "list_map", "list_filter", "list_length"
+  , "list_append", "list_reverse", "list_condense", "list_duplicate"
+  , "list_last", "list_member", "list_det_index0", "list_det_replace_nth"
+  , "list_filter_map", "list_sort", "list_foldl2"
+  , "apply__4", "call__4", "class_method_call__4"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4231,6 +4300,11 @@ externalRuntimeArity = Map.fromList
   , ("integer_abs", 1), ("integer_signum", 1), ("integer_float", 1)
   , ("integer_to_string", 1)
   , ("integer___", 2), ("integer_rem", 2), ("integer_mod", 2), ("integer_neg", 1)
+  , ("int_zp", 2), ("int_zm", 2), ("int_zt", 2), ("int_zs", 2)
+  , ("int_zl", 2), ("int_zg", 2), ("int_zezl", 2), ("int_zgze", 2), ("int_zezeze", 2)
+  , ("int_rem", 2), ("int_mod", 2), ("int_max", 2), ("int_min", 2)
+  , ("int_abs", 1), ("int_neg", 1)
+  , ("integer_divide_with_rem", 3)
   , ("unify", 2)
   , ("io_format", 3), ("require_error", 1), ("rational", 0)
   , ("require_func_error", 3), ("integer_integer", 1)
@@ -4238,6 +4312,11 @@ externalRuntimeArity = Map.fromList
   , ("call__2", 2),  ("call__3", 3)
   , ("class_method_call__2", 2), ("class_method_call__3", 3)
   , ("list_foldl", 5), ("list_map", 4), ("list_filter", 3), ("list_length", 2)
+  , ("list_append", 3), ("list_reverse", 2), ("list_condense", 2)
+  , ("list_duplicate", 3), ("list_last", 2), ("list_member", 3)
+  , ("list_det_index0", 3), ("list_det_replace_nth", 4)
+  , ("list_filter_map", 4), ("list_sort", 2), ("list_foldl2", 8)
+  , ("apply__4", 4), ("call__4", 4), ("class_method_call__4", 4)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

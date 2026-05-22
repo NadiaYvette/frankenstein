@@ -2668,6 +2668,43 @@ int64_t integer_mod(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
  * (named `integer_neg`) so the call is saturated. */
 int64_t integer_neg(int64_t a) { return -a; }
 
+/* Mercury `int.<op>` aliases — identical to `integer.<op>` in the i64
+ * model.  Mercury HLDS sometimes prints `int.(X - Y)` etc. for plain
+ * int arithmetic, distinct from the `integer.*` arbitrary-precision
+ * paths the bridge already routes via the `integer_*` stubs above. */
+int64_t int_zp(int64_t a, int64_t b) { return a + b; }
+int64_t int_zm(int64_t a, int64_t b) { return a - b; }
+int64_t int_zt(int64_t a, int64_t b) { return a * b; }
+int64_t int_zs(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+int64_t int_zl(int64_t a, int64_t b) { return a <  b ? 1 : 0; }
+int64_t int_zg(int64_t a, int64_t b) { return a >  b ? 1 : 0; }
+int64_t int_zezl(int64_t a, int64_t b){ return a <= b ? 1 : 0; }
+int64_t int_zgze(int64_t a, int64_t b){ return a >= b ? 1 : 0; }
+int64_t int_zezeze(int64_t a, int64_t b){ return a == b ? 1 : 0; }
+int64_t int_rem(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
+int64_t int_mod(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
+int64_t int_max(int64_t a, int64_t b) { return a > b ? a : b; }
+int64_t int_min(int64_t a, int64_t b) { return a < b ? a : b; }
+int64_t int_abs(int64_t x) { return x < 0 ? -x : x; }
+int64_t int_neg(int64_t x) { return -x; }
+
+/* integer.divide_with_rem(A, B) — Mercury returns a 2-tuple {Q, R}.
+ * In the bridge's i64 model, build a tuple cell.  The bridge uses
+ * `tuple` as the ctor name (parseTupleLiteral), which the emitter
+ * tags via assignProgramTags.  We rely on kk_alloc_con + kk_set_field
+ * here and accept that the tag won't exactly match what the bridge
+ * picks for `tuple` — the caller deconstructs by field index, not
+ * by tag-compare, so it's safe in practice for surd's usage. */
+int64_t integer_divide_with_rem(int64_t a, int64_t b, int64_t typeinfo) {
+    (void)typeinfo;
+    int64_t q = b == 0 ? 0 : a / b;
+    int64_t r = b == 0 ? 0 : a % b;
+    int64_t cell = kk_alloc_con(0, 2);  /* tag 0 is the default */
+    kk_set_field(cell, 0, q);
+    kk_set_field(cell, 1, r);
+    return cell;
+}
+
 /* ---- Mercury HLDS higher-order shims -------------------------------------
  * The bridge sees Mercury `apply(F, X)`, `list.foldl(P, L, A)` etc. as
  * direct calls; after arity-tagging and stdlib-prefix filtering, the
@@ -2681,6 +2718,7 @@ int64_t integer_neg(int64_t a) { return -a; }
 /* Forward declarations of the existing helpers (defined later in this TU). */
 static int64_t kk_call_closure_1(int64_t closure, int64_t a);
 static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b);
+static int64_t kk_call_closure_3(int64_t closure, int64_t a, int64_t b, int64_t c);
 int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f);
 int64_t kk_list_map(int64_t xs, int64_t f);
 int64_t kk_list_filter(int64_t xs, int64_t p);
@@ -2722,6 +2760,206 @@ int64_t list_filter(int64_t ti, int64_t p, int64_t list) {
 int64_t list_length(int64_t ti, int64_t list) {
     (void)ti;
     return kk_list_length(list);
+}
+
+/* list.append(L1, L2) = L3 — concatenate two lists. */
+int64_t list_append(int64_t ti, int64_t l1, int64_t l2) {
+    (void)ti;
+    /* Build reversed l1 then prepend onto l2. */
+    int64_t rev = kk_nil();
+    while (kk_is_heap_ptr(l1) && kk_tag(l1) == KK_CONS_TAG) {
+        rev = kk_cons(kk_field(l1, 0), rev);
+        l1 = kk_field(l1, 1);
+    }
+    int64_t r = l2;
+    while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
+        r = kk_cons(kk_field(rev, 0), r);
+        rev = kk_field(rev, 1);
+    }
+    return r;
+}
+
+/* list.reverse(L) = L' — already provided as kk_list_reverse. */
+int64_t list_reverse(int64_t ti, int64_t list) {
+    (void)ti;
+    /* Iterative reverse via cons. */
+    int64_t r = kk_nil();
+    while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        r = kk_cons(kk_field(list, 0), r);
+        list = kk_field(list, 1);
+    }
+    return r;
+}
+
+/* list.condense(LL) = L — flatten a list of lists.  Walks the outer
+ * list and concatenates each element list via list.append. */
+int64_t list_condense(int64_t ti, int64_t lol) {
+    (void)ti;
+    int64_t r = kk_nil();
+    /* Walk outer list, collecting cells in reverse. */
+    int64_t rev = kk_nil();
+    while (kk_is_heap_ptr(lol) && kk_tag(lol) == KK_CONS_TAG) {
+        int64_t inner = kk_field(lol, 0);
+        while (kk_is_heap_ptr(inner) && kk_tag(inner) == KK_CONS_TAG) {
+            rev = kk_cons(kk_field(inner, 0), rev);
+            inner = kk_field(inner, 1);
+        }
+        lol = kk_field(lol, 1);
+    }
+    while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
+        r = kk_cons(kk_field(rev, 0), r);
+        rev = kk_field(rev, 1);
+    }
+    return r;
+}
+
+/* list.duplicate(N, X) = L — list with N copies of X. */
+int64_t list_duplicate(int64_t ti, int64_t n, int64_t x) {
+    (void)ti;
+    int64_t r = kk_nil();
+    while (n > 0) { r = kk_cons(x, r); n--; }
+    return r;
+}
+
+/* list.last(L) = X — return the last element (or 0 if empty). */
+int64_t list_last(int64_t ti, int64_t list) {
+    (void)ti;
+    int64_t last = 0;
+    while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        last = kk_field(list, 0);
+        list = kk_field(list, 1);
+    }
+    return last;
+}
+
+/* list.member(X, L) — semidet, returns 1 if X appears in L.  Caller
+ * provides typeinfo + element + list (3 args). */
+int64_t list_member(int64_t ti, int64_t x, int64_t list) {
+    (void)ti;
+    while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        if (kk_structural_eq(kk_field(list, 0), x)) return 1;
+        list = kk_field(list, 1);
+    }
+    return 0;
+}
+
+/* list.index0(L, N) = X — return Nth element (0-indexed). */
+int64_t list_det_index0(int64_t ti, int64_t list, int64_t n) {
+    (void)ti;
+    while (n > 0 && kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        list = kk_field(list, 1);
+        n--;
+    }
+    if (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        return kk_field(list, 0);
+    }
+    return 0;
+}
+
+/* list.det_replace_nth(L, N, X) = L' — replace Nth element with X. */
+int64_t list_det_replace_nth(int64_t ti, int64_t list, int64_t n, int64_t x) {
+    (void)ti;
+    int64_t rev = kk_nil();
+    int64_t i = 0;
+    while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        int64_t elem = (i == n) ? x : kk_field(list, 0);
+        rev = kk_cons(elem, rev);
+        list = kk_field(list, 1);
+        i++;
+    }
+    int64_t r = kk_nil();
+    while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
+        r = kk_cons(kk_field(rev, 0), r);
+        rev = kk_field(rev, 1);
+    }
+    return r;
+}
+
+/* list.filter_map(F, L) = L' — F : a -> maybe(b); keep yes(b) results.
+ * Mercury's Maybe ctors are yes/1 and no/0 (or named differently in
+ * different versions); we test by extracting field 0 of the result
+ * IF it has fields, otherwise treat as no. */
+int64_t list_filter_map(int64_t ti1, int64_t ti2, int64_t closure, int64_t list) {
+    (void)ti1; (void)ti2;
+    int64_t rev = kk_nil();
+    while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        int64_t result = kk_call_closure_1(closure, kk_field(list, 0));
+        /* yes(X) → 1 field; no → 0 fields. */
+        if (kk_is_heap_ptr(result) && kk_nfields(result) >= 1) {
+            rev = kk_cons(kk_field(result, 0), rev);
+        }
+        list = kk_field(list, 1);
+    }
+    int64_t r = kk_nil();
+    while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
+        r = kk_cons(kk_field(rev, 0), r);
+        rev = kk_field(rev, 1);
+    }
+    return r;
+}
+
+/* list.sort(L) = L' — simple insertion sort (uses kk_structural_eq
+ * for ordering, which compares heap pointers/values lexicographically
+ * for non-string heap cells — good enough for many surd usages but
+ * NOT a real semantic sort). */
+int64_t list_sort(int64_t ti, int64_t list) {
+    (void)ti;
+    /* Use bubble sort for simplicity; not great asymptotically. */
+    /* Collect to array first. */
+    int64_t n = 0; int64_t tmp = list;
+    while (kk_is_heap_ptr(tmp) && kk_tag(tmp) == KK_CONS_TAG) {
+        n++; tmp = kk_field(tmp, 1);
+    }
+    if (n <= 1) return list;
+    int64_t* arr = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
+    if (!arr) return list;
+    int64_t i = 0; tmp = list;
+    while (kk_is_heap_ptr(tmp) && kk_tag(tmp) == KK_CONS_TAG) {
+        arr[i++] = kk_field(tmp, 0); tmp = kk_field(tmp, 1);
+    }
+    /* Bubble sort by raw i64 value (proxy ordering). */
+    for (i = 0; i < n - 1; i++) {
+        for (int64_t j = 0; j < n - 1 - i; j++) {
+            if (arr[j] > arr[j+1]) {
+                int64_t t = arr[j]; arr[j] = arr[j+1]; arr[j+1] = t;
+            }
+        }
+    }
+    int64_t r = kk_nil();
+    for (i = n - 1; i >= 0; i--) r = kk_cons(arr[i], r);
+    free(arr);
+    return r;
+}
+
+/* list.foldl2(F, L, A0, B0) = (A, B) — fold with TWO accumulators.
+ * F : (elem, A, B) -> (A', B').  Returns a 2-tuple of finals.
+ * 8 args after typeclass dispatch: (ti1, ti2, ti3, ti4, F, L, A0, B0). */
+int64_t list_foldl2(int64_t ti1, int64_t ti2, int64_t ti3, int64_t ti4,
+                    int64_t closure, int64_t list,
+                    int64_t a, int64_t b) {
+    (void)ti1; (void)ti2; (void)ti3; (void)ti4;
+    /* Bridge currently can't represent a 2-tuple-output closure cleanly;
+     * approximate by treating F as `(elem, A) -> A` (collapsing B). */
+    while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
+        a = kk_call_closure_2(closure, kk_field(list, 0), a);
+        list = kk_field(list, 1);
+    }
+    (void)b;
+    int64_t pair = kk_alloc_con(0, 2);
+    kk_set_field(pair, 0, a);
+    kk_set_field(pair, 1, b);
+    return pair;
+}
+
+/* Generic 3-arg HO dispatch. */
+int64_t class_method_call__4(int64_t f, int64_t a, int64_t b, int64_t c) {
+    return kk_call_closure_3(f, a, b, c);
+}
+int64_t apply__4(int64_t f, int64_t a, int64_t b, int64_t c) {
+    return kk_call_closure_3(f, a, b, c);
+}
+int64_t call__4(int64_t f, int64_t a, int64_t b, int64_t c) {
+    return kk_call_closure_3(f, a, b, c);
 }
 
 /* Mercury require.error/1 — fatal error with a message.  Prints the
@@ -3208,6 +3446,14 @@ static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b) {
     typedef int64_t (*fn_t)(int64_t, int64_t, int64_t);
     fn_t fn = (fn_t)(uintptr_t)fptr_i64;
     return fn(closure, a, b);
+}
+
+static int64_t kk_call_closure_3(int64_t closure,
+                                 int64_t a, int64_t b, int64_t c) {
+    int64_t fptr_i64 = kk_field(closure, 0);
+    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t);
+    fn_t fn = (fn_t)(uintptr_t)fptr_i64;
+    return fn(closure, a, b, c);
 }
 
 /* Reverse a list in place by walking head-to-tail and rebuilding

@@ -774,9 +774,11 @@ stdlibCtorNames = Set.fromList
 
 -- | Lift a Mercury HLDS atom into the right Core expression: int
 -- literal → ELit (LitInt); double-quoted string → ELit (LitString);
--- single-quoted char → ELit (LitInt codepoint); anything else falls
--- back to an EVar reference (which resolves against the binding env
--- or escapes as a free name downstream).
+-- single-quoted char → ELit (LitInt codepoint); bare lowercase atom
+-- → 0-arg ctor allocation (mercury module names and enum tags pass
+-- through as ARGS to ctors like `type_ctor_info(rational, rational,
+-- 0)` — without this they'd leak as free EVar refs at link time).
+-- Anything else falls back to an EVar reference.
 argExpr :: Text -> Expr
 argExpr a =
   case readMaybe (T.unpack a) :: Maybe Integer of
@@ -785,7 +787,21 @@ argExpr a =
       Just s  -> ELit (LitString s)
       Nothing -> case parseMercuryCharLit a of
         Just cp -> ELit (LitInt cp)
-        Nothing -> EVar (Name a 0)
+        Nothing
+          -- Mercury naming convention: variables start with uppercase
+          -- or `_`, atoms start with lowercase.  Treat bare-lowercase
+          -- alphanumeric-plus-underscore tokens as 0-arg ctors.
+          | isMercuryAtom a -> EApp (ECon (QName "" (Name a 0))) []
+          | otherwise -> EVar (Name a 0)
+  where
+    isMercuryAtom t = case T.uncons t of
+      Just (c, rest)
+        | c >= 'a' && c <= 'z'
+        , T.all (\ch -> ch == '_' || (ch >= 'a' && ch <= 'z')
+                                  || (ch >= 'A' && ch <= 'Z')
+                                  || (ch >= '0' && ch <= '9')) rest
+        -> True
+      _ -> False
 
 -- | Recognise Mercury's @'c'@ char literal form (also accepts the
 -- parenthesised @('c')@ form HLDS prints) and return the codepoint

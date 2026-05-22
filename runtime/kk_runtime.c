@@ -4486,7 +4486,15 @@ int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f) {
     int64_t acc = z;
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        acc = kk_call_closure_2(f, acc, h);
+        /* Mercury's list.foldl convention: F is @pred(X, A0, A)@ —
+         * the closure expects (element, accumulator), not
+         * (accumulator, element).  The previous arg order tripped up
+         * surd's @list.foldl(render_example("text"), examples, !IO)@
+         * by passing (IO_state, Example) where render_example
+         * expected (Example, IO_state); the example deconstruct then
+         * read fields from the IO state and the whole rational/poly
+         * chain inherited @0@ instead of real values. */
+        acc = kk_call_closure_2(f, h, acc);
         xs = kk_field(xs, 1);
     }
     return acc;

@@ -1173,7 +1173,7 @@ parseMercuryBuiltin txt
     -- of ">", etc.; otherwise the prefix wins and the remainder gets
     -- mis-split.
     parseInfixExpr e =
-      let ops = [ " // ", " >= ", " =< ", " == ", " mod ", " rem "
+      let ops = [ " // ", " ++ ", " >= ", " =< ", " == ", " mod ", " rem "
                 , " > ", " < ", " + ", " - ", " * ", " / " ]
           tryOp [] = Nothing
           tryOp (op:rest') =

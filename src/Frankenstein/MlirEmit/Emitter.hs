@@ -964,6 +964,8 @@ emitProgramText prog =
     , "  func.func private @apply__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @call__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @class_method_call__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_zpzp(i64, i64, i64) -> i64"
+    , "  func.func private @string_zpzp(i64, i64) -> i64"
     , ""
     , externDeclText
     , kokaBuiltinText
@@ -1459,6 +1461,8 @@ emitProgramWasm prog =
     , "  func.func private @apply__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @call__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @class_method_call__4(i64, i64, i64, i64) -> i64"
+    , "  func.func private @list_zpzp(i64, i64, i64) -> i64"
+    , "  func.func private @string_zpzp(i64, i64) -> i64"
     , ""
     , externDeclText
     , "  // Lifted functions"
@@ -4242,6 +4246,7 @@ externalRuntimeFns = Set.fromList
   , "list_last", "list_member", "list_det_index0", "list_det_replace_nth"
   , "list_filter_map", "list_sort", "list_foldl2"
   , "apply__4", "call__4", "class_method_call__4"
+  , "list_zpzp", "string_zpzp"
   ]
 
 externalRuntimeArity :: Map Text Int
@@ -4317,6 +4322,7 @@ externalRuntimeArity = Map.fromList
   , ("list_det_index0", 3), ("list_det_replace_nth", 4)
   , ("list_filter_map", 4), ("list_sort", 2), ("list_foldl2", 8)
   , ("apply__4", 4), ("call__4", 4), ("class_method_call__4", 4)
+  , ("list_zpzp", 3), ("string_zpzp", 2)
   ]
 
 -- | Convert a Name to a unique MLIR SSA name.

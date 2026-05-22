@@ -2962,6 +2962,18 @@ int64_t call__4(int64_t f, int64_t a, int64_t b, int64_t c) {
     return kk_call_closure_3(f, a, b, c);
 }
 
+/* `list.(L1 ++ L2)` — sanitises to `list_zpzp` (`+` → `zp`, twice).
+ * Same semantics as `list.append`; route through list_append. */
+int64_t list_zpzp(int64_t ti, int64_t l1, int64_t l2) {
+    return list_append(ti, l1, l2);
+}
+
+/* `string.(S1 ++ S2)` — string concat.  Build a CONCAT rope. */
+extern int64_t kk_str_concat(int64_t a, int64_t b);
+int64_t string_zpzp(int64_t s1, int64_t s2) {
+    return kk_str_concat(s1, s2);
+}
+
 /* Mercury require.error/1 — fatal error with a message.  Prints the
  * message (a kk_string_t pointer) to stderr with a trailing newline,
  * then exits with status 1.  Used by surd's rational_norm when the

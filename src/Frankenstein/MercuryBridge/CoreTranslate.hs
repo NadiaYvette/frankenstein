@@ -458,6 +458,30 @@ translateGoalAsTest knownCtors env (GoalIfThenElse cond then' else') =
     , Branch (PatWild boolTy)    Nothing (translateGoalAsTest knownCtors env else')
     ]
   where boolTy = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
+-- Deconstruct in test position: a semidet pattern match.  The ECase
+-- produced by translateGoalK is exhaustive (single branch), so the
+-- body always runs even when the tag doesn't match — the test would
+-- then erroneously succeed.  Emit a tag-check explicitly: return 1
+-- when the scrutinee matches the ctor (binding the pattern vars in
+-- the body), and 0 when it doesn't (fall through to a PatWild arm).
+translateGoalAsTest _kctors env (GoalConstruct var ctor args)
+  | Set.member var env =
+      let bareCtor = case T.breakOnEnd "." ctor of
+            ("", n) -> n
+            (_,  n) -> n
+      in ECase (EVar (Name var 0))
+        [ Branch (PatCon (QName "" (Name bareCtor 0))
+                   [PatVar (Name a 0) anyTy | a <- args])
+                 Nothing (ELit (LitInt 1))
+        , Branch (PatWild anyTy) Nothing (ELit (LitInt 0))
+        ]
+translateGoalAsTest _kctors _env (GoalDeconstruct var ctor args) =
+  ECase (EVar (Name var 0))
+    [ Branch (PatCon (QName "" (Name ctor 0))
+               [PatVar (Name a 0) anyTy | a <- args])
+             Nothing (ELit (LitInt 1))
+    , Branch (PatWild anyTy) Nothing (ELit (LitInt 0))
+    ]
 translateGoalAsTest knownCtors env goal =
   -- Fallback: use CPS with the result as terminator — this handles
   -- unification and other goal types correctly.

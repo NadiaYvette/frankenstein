@@ -488,27 +488,37 @@ translateGoalK _kctors env (GoalUnify x y) k =
       -- leaves X unbound and surfaces as a free-EVar leak).
       lhsChar = parseMercuryCharLit x
       rhsChar = parseMercuryCharLit y
+      lhsFloat = parseMercuryFloatLit x
+      rhsFloat = parseMercuryFloatLit y
       bindLhs = not (Set.member x env)
       bindRhs = not (Set.member y env)
-  in case (lhsLit <|> lhsChar, rhsLit <|> rhsChar, lhsStr, rhsStr) of
+  in case (lhsLit <|> lhsChar, rhsLit <|> rhsChar, lhsStr, rhsStr, lhsFloat, rhsFloat) of
        -- Both Int literals: no binding; just continue.
-       (Just _, Just _, _, _) -> k
+       (Just _, Just _, _, _, _, _) -> k
        -- X = <int literal>: bind X to the literal if not yet bound.
-       (_, Just n, _, _) | bindLhs ->
+       (_, Just n, _, _, _, _) | bindLhs ->
          ELet [[Bind (Name x 0) intTy (ELit (LitInt n)) DefVal]] k
        -- <int literal> = Y: bind Y to the literal if not yet bound.
-       (Just n, _, _, _) | bindRhs ->
+       (Just n, _, _, _, _, _) | bindRhs ->
          ELet [[Bind (Name y 0) intTy (ELit (LitInt n)) DefVal]] k
+       -- X = <float literal>: bind X to the LitFloat.  Crucial for
+       -- Mercury programs that unify a fresh var with a float
+       -- constant; without this the var leaks as a free EVar ref.
+       (_, _, _, _, _, Just d) | bindLhs ->
+         ELet [[Bind (Name x 0) intTy (ELit (LitFloat d)) DefVal]] k
+       -- <float literal> = Y: bind Y to the LitFloat.
+       (_, _, _, _, Just d, _) | bindRhs ->
+         ELet [[Bind (Name y 0) intTy (ELit (LitFloat d)) DefVal]] k
        -- X = "string literal": bind X to the LitString.
-       (_, _, _, Just s) | bindLhs ->
+       (_, _, _, Just s, _, _) | bindLhs ->
          ELet [[Bind (Name x 0) stringTy (ELit (LitString s)) DefVal]] k
        -- "string literal" = Y: bind Y to the LitString.
-       (_, _, Just s, _) | bindRhs ->
+       (_, _, Just s, _, _, _) | bindRhs ->
          ELet [[Bind (Name y 0) stringTy (ELit (LitString s)) DefVal]] k
        -- X = Y, one side bound: bind the other as an alias.
-       (Nothing, Nothing, Nothing, Nothing) | bindLhs && not bindRhs ->
+       (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) | bindLhs && not bindRhs ->
          ELet [[Bind (Name x 0) intTy (EVar (Name y 0)) DefVal]] k
-       (Nothing, Nothing, Nothing, Nothing) | bindRhs && not bindLhs ->
+       (Nothing, Nothing, Nothing, Nothing, Nothing, Nothing) | bindRhs && not bindLhs ->
          ELet [[Bind (Name y 0) intTy (EVar (Name x 0)) DefVal]] k
        -- Fallback: emit a stub unify call.  Use argExpr so literal
        -- ints / chars / strings don't leak as bogus free EVar refs
@@ -538,6 +548,7 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       isLitArg t = isJust (readMaybe (T.unpack t) :: Maybe Integer)
                 || isJust (parseMercuryStringLit t)
                 || isJust (parseMercuryCharLit t)
+                || isJust (parseMercuryFloatLit t)
       isBound t = Set.member t env || isLitArg t
       -- Walk args from the right, dropping a contiguous run of unbound
       -- variable names.  Anything else stays in callInputs.
@@ -843,16 +854,18 @@ argExpr :: Text -> Expr
 argExpr a =
   case readMaybe (T.unpack a) :: Maybe Integer of
     Just n  -> ELit (LitInt n)
-    Nothing -> case parseMercuryStringLit a of
-      Just s  -> ELit (LitString s)
-      Nothing -> case parseMercuryCharLit a of
-        Just cp -> ELit (LitInt cp)
-        Nothing
-          -- Mercury naming convention: variables start with uppercase
-          -- or `_`, atoms start with lowercase.  Treat bare-lowercase
-          -- alphanumeric-plus-underscore tokens as 0-arg ctors.
-          | isMercuryAtom a -> EApp (ECon (QName "" (Name a 0))) []
-          | otherwise -> EVar (Name a 0)
+    Nothing -> case parseMercuryFloatLit a of
+      Just d  -> ELit (LitFloat d)
+      Nothing -> case parseMercuryStringLit a of
+        Just s  -> ELit (LitString s)
+        Nothing -> case parseMercuryCharLit a of
+          Just cp -> ELit (LitInt cp)
+          Nothing
+            -- Mercury naming convention: variables start with uppercase
+            -- or `_`, atoms start with lowercase.  Treat bare-lowercase
+            -- alphanumeric-plus-underscore tokens as 0-arg ctors.
+            | isMercuryAtom a -> EApp (ECon (QName "" (Name a 0))) []
+            | otherwise -> EVar (Name a 0)
   where
     isMercuryAtom t = case T.uncons t of
       Just (c, rest)
@@ -862,6 +875,21 @@ argExpr a =
                                   || (ch >= '0' && ch <= '9')) rest
         -> True
       _ -> False
+
+-- | Recognise a Mercury HLDS float literal.  Mercury prints these in
+-- standard decimal form (`0.5`, `1.0`, `-2.3`) or scientific notation
+-- (`1e-06`, `1.5e10`, `1e300`).  We require either a decimal point
+-- OR an exponent marker to distinguish from plain integers (which
+-- argExpr already handles via 'readMaybe \@Integer' BEFORE this).
+-- Returns the parsed Double, leaving the bit-pattern conversion to
+-- 'emitExpr (ELit (LitFloat _))'.
+parseMercuryFloatLit :: Text -> Maybe Double
+parseMercuryFloatLit t =
+  let s = T.unpack (T.strip t)
+  in if any (\c -> c == '.' || c == 'e' || c == 'E') s
+        && not (T.any (== ' ') (T.strip t))
+     then readMaybe s
+     else Nothing
 
 -- | Recognise Mercury's @'c'@ char literal form (also accepts the
 -- parenthesised @('c')@ form HLDS prints) and return the codepoint

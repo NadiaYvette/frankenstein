@@ -52,10 +52,14 @@ import Data.Maybe (isJust)
 --     into all output positions (instead of binding only the first
 --     and defaulting the rest to 0, which loses Rest in
 --     @partition_lits@, Remainder in @extract_nth_power@, etc.).
--- Semidet preds are excluded because their failure path returns the
--- 0 sentinel (not a tuple); the caller's tuple-deconstruct would
--- mishandle the failure case.  Semidet multi-output preds continue
--- to use the existing per-pred shim pattern.
+-- Semidet preds are excluded: an attempt to extend the convention to
+-- semidet multi-output preds caused a regression in euler example 6
+-- (sign-flipped log-arg without helping the elliptic reduction path).
+-- The elliptic "cannot reduce" fallback traces to a deeper
+-- type-confusion issue (numer/abs/int_divisors chain producing 0
+-- where it should produce 1) that's independent of multi-output
+-- handling.  Targeted shims continue to handle the few semidet
+-- multi-output preds that need them.
 multiOutputMarkers :: Text -> [MercuryPred] -> Set Text
 multiOutputMarkers srcModule preds = Set.fromList
   [ "MULTIOUT:" <> srcModule <> "." <> predName p
@@ -352,10 +356,9 @@ translatePred knownCtors srcModule pred' = do
       -- Det multi-output preds (gated via the @MULTIOUT:@ marker that
       -- @multiOutputMarkers@ added to @knownCtors@) build a @tuple@
       -- of all outputs.  Single-output preds keep the existing
-      -- @EVar outputName@ form, and semidet preds (including
-      -- multi-output ones) also keep the existing form because their
-      -- failure path returns the 0 sentinel which can't be
-      -- tuple-deconstructed cleanly by the caller.
+      -- @EVar outputName@ form.  Semidet preds (including multi-output
+      -- ones) also keep the existing form — see @multiOutputMarkers@
+      -- for the rationale.
       multiOutputMarker = "MULTIOUT:" <> srcModule <> "." <> effectiveName
       isMultiOutputDet = predDet pred' == Det
                       && length outputNames >= 2

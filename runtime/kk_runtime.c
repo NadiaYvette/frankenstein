@@ -2907,12 +2907,21 @@ int64_t string_to_int(int64_t s) {
 
 /* string.to_float(S) — semidet: same shape as to_int. */
 int64_t string_to_float(int64_t s) {
-    int64_t ptr_i = kk_field(s, 0);
-    int64_t len = kk_field(s, 1);
-    const char* p = (const char*)(uintptr_t)ptr_i;
+    /* @s@ is a @kk_string_t*@, NOT a ctor cell.  The previous version
+     * indexed it as if @kk_field(s, 0)@ would yield the byte pointer,
+     * but on a real string struct that offset is @rc@ (refcount).
+     * memcpy from a refcount-as-pointer crashes.  Use the kk_string_t
+     * accessors: @byte_len@ and @kk_str_bytes@ via flatten so any
+     * concat/slice rope is materialised contiguously. */
+    if (!s) return kkf_box(0.0);
+    int64_t flat = kk_str_flatten(s);
+    kk_string_t* str = (kk_string_t*)flat;
+    if (!str) return kkf_box(0.0);
+    int64_t len = str->byte_len;
+    const char* p = kk_str_bytes(str);
     char tmp[64];
     int64_t n = len < 63 ? len : 63;
-    memcpy(tmp, p, (size_t)n);
+    if (n > 0 && p) memcpy(tmp, p, (size_t)n);
     tmp[n] = 0;
     return kkf_box(strtod(tmp, NULL));
 }

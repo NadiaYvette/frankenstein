@@ -491,6 +491,27 @@ translateGoalAsTest _kctors _env (GoalDeconstruct var ctor args) =
              Nothing (ELit (LitInt 1))
     , Branch (PatWild anyTy) Nothing (ELit (LitInt 0))
     ]
+-- Unify in test position: @X = Y@ where BOTH sides are already bound is
+-- a semidet structural equality check.  The fallback path below would
+-- translate it as @let _ = unify(X, Y) in 1@ — discarding the unify
+-- result so every check succeeds.  For surd's @R = rational.zero@ inside
+-- @rat_sqrt@, that always-true behaviour skipped the int_sqrt branch and
+-- returned @yes(rational.zero)@ for any non-zero R, propagating S=0
+-- through @euler1(S)@ into apply_euler and zeroing every integral.
+-- Bind both sides as aliases (no-op if already in scope), call unify,
+-- and yield its result as the test outcome.
+translateGoalAsTest _kctors env (GoalUnify x y)
+  | Set.member x env, Set.member y env
+  , isNothing (readMaybeInt x), isNothing (readMaybeInt y)
+  , isNothing (parseMercuryStringLit x), isNothing (parseMercuryStringLit y)
+  , isNothing (parseMercuryCharLit x), isNothing (parseMercuryCharLit y)
+  , isNothing (parseMercuryFloatLit x), isNothing (parseMercuryFloatLit y)
+  = EApp (EVar (Name "unify" 0)) [EVar (Name x 0), EVar (Name y 0)]
+  where
+    readMaybeInt :: Text -> Maybe Integer
+    readMaybeInt t = readMaybe (T.unpack t)
+    isNothing Nothing = True
+    isNothing _       = False
 translateGoalAsTest knownCtors env goal =
   -- Fallback: use CPS with the result as terminator — this handles
   -- unification and other goal types correctly.

@@ -3651,21 +3651,19 @@ int64_t list_foldl2_impl(int64_t f, int64_t xs, int64_t a, int64_t b) {
     return a;
 }
 
-/* integer.divide_with_rem(A, B) — Mercury returns a 2-tuple {Q, R}.
- * In the bridge's i64 model, build a tuple cell.  The bridge uses
- * `tuple` as the ctor name (parseTupleLiteral), which the emitter
- * tags via assignProgramTags.  We rely on kk_alloc_con + kk_set_field
- * here and accept that the tag won't exactly match what the bridge
- * picks for `tuple` — the caller deconstructs by field index, not
- * by tag-compare, so it's safe in practice for surd's usage. */
-int64_t integer_divide_with_rem(int64_t a, int64_t b, int64_t typeinfo) {
-    (void)typeinfo;
-    int64_t q = b == 0 ? 0 : a / b;
-    int64_t r = b == 0 ? 0 : a % b;
-    int64_t cell = kk_alloc_con(0, 2);  /* tag 0 is the default */
-    kk_set_field(cell, 0, q);
-    kk_set_field(cell, 1, r);
-    return cell;
+/* integer.divide_with_rem(A, B, Q, R) — Mercury pred binding Q and R
+ * (quotient and remainder).  Originally returned a 2-tuple {Q, R}, but
+ * the bridge's call-site convention binds the first trailing-output to
+ * the returned value and default-binds subsequent outputs to 0.  Without
+ * any bridge-side tuple deconstruct, surd's @prime_factors.count_factor@
+ * received the tuple POINTER as Q (treating it as an integer), recursed
+ * with the pointer value as N, and looped indefinitely.
+ *
+ * Return Q directly (an int).  The bridge's @wrapSecondaries@ pass
+ * (see @CoreTranslate.hs@) supplies R via a separate @integer_rem@
+ * call, matching the natural mathematical relation. */
+int64_t integer_divide_with_rem(int64_t a, int64_t b) {
+    return b == 0 ? 0 : a / b;
 }
 
 /* ---- Mercury HLDS higher-order shims -------------------------------------
@@ -3872,18 +3870,24 @@ int64_t list_det_replace_nth(int64_t ti, int64_t list, int64_t n, int64_t x) {
     return r;
 }
 
-/* list.filter_map(F, L) = L' — F : a -> maybe(b); keep yes(b) results.
- * Mercury's Maybe ctors are yes/1 and no/0 (or named differently in
- * different versions); we test by extracting field 0 of the result
- * IF it has fields, otherwise treat as no. */
+/* list.filter_map(F, L) = L' — Mercury's filter_map for a semidet
+ * func/pred returns the OUTPUT VALUE R directly (NOT @yes(R)@); on
+ * failure the bridge's closure returns 0 / a non-heap sentinel.
+ * Include the result directly when it's a heap pointer; skip on 0 /
+ * unboxed sentinel.  The previous version extracted
+ * @kk_field(result, 0)@ on the assumption the closure wrapped its
+ * output in @yes(R)@, which cons'd the numerator of a 2-field
+ * rational instead of the rational itself — breaking
+ * @make_candidates@ downstream (the integer numerator was later
+ * deconstructed as @r(N, D)@, reading garbage D, hitting
+ * @rational_norm@'s div-by-zero crash in @poly.div_mod@). */
 int64_t list_filter_map(int64_t ti1, int64_t ti2, int64_t closure, int64_t list) {
     (void)ti1; (void)ti2;
     int64_t rev = kk_nil();
     while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
         int64_t result = kk_call_closure_1(closure, kk_field(list, 0));
-        /* yes(X) → 1 field; no → 0 fields. */
-        if (kk_is_heap_ptr(result) && kk_nfields(result) >= 1) {
-            rev = kk_cons(kk_field(result, 0), rev);
+        if (kk_is_heap_ptr(result)) {
+            rev = kk_cons(result, rev);
         }
         list = kk_field(list, 1);
     }
@@ -4017,6 +4021,75 @@ int64_t integer_integer(int64_t x) { return x; }
  * rational_norm's division-by-zero error path that the smoke test
  * never reaches.  Stub returns 0 so the link resolves. */
 int64_t rational(void) { return 0; }
+
+/* safe_from_integers(N, D) — replacement for surd's
+ * @rational.from_integers/2@ that returns the 0 sentinel when D=0
+ * instead of crashing in @rational_norm@'s div-by-zero @error@ path.
+ * Surd's @factoring.make_candidates@ has a @not is_zero(D)@ guard
+ * before this call in its inner semidet closure, but the bridge
+ * currently compiles the guard as a no-op (see GoalNot CPS terminator),
+ * so the body runs for D=0 too.  Routing @from_integers@ here via
+ * @rewriteTypeclassMethod@ defuses that path without disturbing
+ * downstream poly arithmetic (the same workaround applied at
+ * @rational_norm@ globally caused elliptic regressions because
+ * legitimate norm callers also saw the 0 sentinel and looped).
+ *
+ * The rational ctor "r" has stable tag @stableConTag("r") = 46645@
+ * (djb2 hash of "r" mod 65521); the bridge's Core.ConTags pass
+ * computes the same value for every compilation. */
+#define KK_RATIONAL_R_TAG 46645
+
+static int64_t kk_i64_abs(int64_t x) { return x < 0 ? -x : x; }
+static int64_t kk_i64_gcd(int64_t a, int64_t b) {
+    a = kk_i64_abs(a); b = kk_i64_abs(b);
+    while (b != 0) { int64_t t = a % b; a = b; b = t; }
+    return a == 0 ? 1 : a;
+}
+
+int64_t safe_from_integers__2(int64_t n, int64_t d) {
+    if (d == 0) return 0;  /* sentinel — caller (list.filter_map) skips */
+    int64_t cell = kk_alloc_con(KK_RATIONAL_R_TAG, 2);
+    if (n == 0) {
+        kk_set_field(cell, 0, 0);
+        kk_set_field(cell, 1, 1);
+        return cell;
+    }
+    int64_t g = kk_i64_gcd(n, d);
+    int64_t sign_d = d < 0 ? -1 : 1;
+    int64_t num = (n / g) * sign_d;
+    int64_t den = kk_i64_abs(d) / g;
+    kk_set_field(cell, 0, num);
+    kk_set_field(cell, 1, den);
+    return cell;
+}
+
+/* Defensive shim for rational.* (multiplication).  If either operand
+ * has denominator 0 (a malformed rational that shouldn't exist but
+ * does appear in surd's factoring path on euler example 6 — an
+ * r(0, 0) cell with the right tag but field 1 = 0 flows into
+ * @poly.div_mod@'s @ring_mul@ inner loop), substitute @r(0, 1)@ and
+ * keep going.  Sound rationals get the normal r(An,Ad)*r(Bn,Bd)
+ * computation via @rational_norm@ logic (replicated in C). */
+static int kk_rational_is_malformed(int64_t r) {
+    if (!kk_is_heap_ptr(r)) return 1;
+    if (kk_tag(r) != KK_RATIONAL_R_TAG) return 1;
+    if (kk_nfields(r) < 2) return 1;
+    if (kk_field(r, 1) == 0) return 1;
+    return 0;
+}
+
+int64_t safe_rational_mul__2(int64_t a, int64_t b) {
+    if (kk_rational_is_malformed(a) || kk_rational_is_malformed(b)) {
+        return safe_from_integers__2(0, 1);
+    }
+    int64_t aN = kk_field(a, 0), aD = kk_field(a, 1);
+    int64_t bN = kk_field(b, 0), bD = kk_field(b, 1);
+    int64_t g1 = kk_i64_gcd(aN, bD);
+    int64_t g2 = kk_i64_gcd(aD, bN);
+    int64_t n = (aN / g1) * (bN / g2);
+    int64_t d = (aD / g2) * (bD / g1);
+    return safe_from_integers__2(n, d);
+}
 
 /* Mercury io.format/4 — after the bridge's output-arg-drop, the call
  * shape is io_format(Fmt, Args, IO).  Fmt is a kk_string_t pointer.

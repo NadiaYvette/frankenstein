@@ -363,6 +363,25 @@ translatePred knownCtors srcModule pred' = do
                    , Branch (PatWild boolType) Nothing
                        (EPerform (QName "mercury" (Name "fail" 0)) [])
                    ]
+            -- Semidet with output: the body's last conjunct is the
+            -- test gate (e.g. @positive.positive(N, _) :- ..., N > 0@).
+            -- @rawGoalBody@ alone discards the test and always returns
+            -- the bound output, so @positive(0, _)@ "succeeded" with
+            -- Pos = positive(0), causing @int_divisors → factorise →
+            -- trial_divide(0, 2, ...) → count_factor@ infinite recursion
+            -- in surd's example 6 path.  Wrap: compute the body for its
+            -- side-effects (binding outputName via ELet) AND check the
+            -- TEST status separately; on test=0, return the bridge's
+            -- semidet-failure sentinel (literal 0), which the CALLER's
+            -- @output == 0 → 0; _ → 1@ check correctly interprets as
+            -- failure.
+            (Just oName, Just goal) ->
+              let valueBody = bodyExpr goal
+                  testBody  = translateGoalAsTest knownCtors initialEnv goal
+              in ECase testBody
+                   [ Branch (PatLit (LitInt 1)) Nothing valueBody
+                   , Branch (PatWild boolType) Nothing (ELit (LitInt 0))
+                   ]
             _ -> rawGoalBody
         _ -> rawGoalBody
       boolType = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
@@ -574,6 +593,19 @@ translateGoalAsTest _kctors env (GoalUnify x y)
       [ Branch (PatLit (LitInt n)) Nothing (ELit (LitInt 1))
       , Branch (PatWild anyTy)     Nothing (ELit (LitInt 0))
       ]
+  -- Bound var = string literal: call the runtime's @unify@ (which uses
+  -- @kk_structural_eq@ → @kk_str_compare@ for strings) and return its
+  -- 0/1 result directly.  Without this case the fallback emits
+  -- @let _ = unify(S, "lit") in 1@ — discarding the comparison result —
+  -- so every test @S = ""@ inside a @not(...)@ closure (e.g.
+  -- @latex_quad@'s @list.filter ((pred(S) is semidet :- S \\= ""))@)
+  -- always succeeded, making the surrounding negation always fail.
+  | Set.member x env, Just s <- parseMercuryStringLit y
+  = EApp (EVar (Name "unify" 0))
+      [EVar (Name x 0), ELit (LitString s)]
+  | Set.member y env, Just s <- parseMercuryStringLit x
+  = EApp (EVar (Name "unify" 0))
+      [EVar (Name y 0), ELit (LitString s)]
   where
     readMaybeInt :: Text -> Maybe Integer
     readMaybeInt t = readMaybe (T.unpack t)
@@ -637,6 +669,16 @@ rewriteTypeclassMethod predName' args = case (predName', args) of
   ("poly.ord_le",        [_tci, a, b])     -> Just ("rational.=<",    [a, b])
   ("poly.ord_gt",        [_tci, a, b])     -> Just ("rational.>",     [a, b])
   ("poly.ord_ge",        [_tci, a, b])     -> Just ("rational.>=",    [a, b])
+  -- Surd's @rational.from_integers(N, D)@ crashes in @rational_norm@
+  -- when D=0.  Route to a runtime stub that returns the 0 sentinel
+  -- in that case so semidet closures like
+  -- @make_candidates@'s @func(D) = R is semidet :- not is_zero(D),
+  -- R = from_integers(N, D)@ can skip the bad element via
+  -- @list_filter_map@'s heap-ptr check, even though the bridge's
+  -- GoalNot still doesn't propagate failure to the surrounding
+  -- conjunction.  The stub replicates rational_norm's logic in C.
+  ("rational.from_integers", [a, b])       -> Just ("safe_from_integers", [a, b])
+  ("rational.from_integers", [a, b, o])    -> Just ("safe_from_integers", [a, b, o])
   _ -> Nothing
 
 -- | Names that share their bare-form with a known stdlib TYPE but are
@@ -855,6 +897,7 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       -- R = 0 (literal int, defaulted from secondary-output placeholder)
       -- and the next div_mod gets G=NULL → reciprocal(NULL) crash.
       isDivMod = predName' `elem` ["poly.div_mod", "div_mod"]
+      isIntDivWithRem = predName' == "integer.divide_with_rem"
       divModRemainderExpr fVar gVar qName tciVar =
         EApp (EVar (Name "poly_sub__3" 0))
           [ EVar (Name tciVar 0)
@@ -865,6 +908,14 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
               , EVar (Name gVar 0)
               ]
           ]
+      -- integer.divide_with_rem(N, P, Q, R): R = N rem P.  The runtime
+      -- stub now returns Q directly (not a tuple), so the bridge
+      -- supplies R via @integer_rem@.  Without this, surd's
+      -- @prime_factors.count_factor@ saw R=0 always and looped on
+      -- factoring 8 → 4 → 2 → 1 → 0 → 0 → … (infinite recursion).
+      intDivRemainderExpr nVar pVar =
+        EApp (EVar (Name "integer_rem" 0))
+          [EVar (Name nVar 0), EVar (Name pVar 0)]
       wrapSecondaries body = foldr
         (\n acc ->
            let defaultExpr
@@ -873,6 +924,10 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
                  , [tciV, fV, gV] <- take 3 args
                  , Just qV <- outputBinding
                  = divModRemainderExpr fV gV qV tciV
+                 -- integer.divide_with_rem(N, P, Q, R): R = N rem P.
+                 | isIntDivWithRem, length args == 4
+                 , [nV, pV] <- take 2 args
+                 = intDivRemainderExpr nV pV
                  | otherwise = ELit (LitInt 0)
            in ELet [[Bind (Name n 0) valueTy defaultExpr DefVal]] acc)
         body
@@ -906,6 +961,14 @@ translateGoalK kctors env (GoalNot goal) k =
   -- @translateGoalK env goal (ELit 0)@ which always yielded 0 —
   -- so mercury_not always returned 1 and @not(...)@ was a no-op.
   -- Use translateGoalAsTest so the goal's truth value flows out.
+  --
+  -- The result is currently DISCARDED — short-circuiting via ECase
+  -- caused a regression in elliptic (rational_norm: division by zero
+  -- via factor → find_linear_factor → div_mod with type-confused
+  -- rational coefficients).  Until the bridge tracks det vs semidet
+  -- context — or polynomial coefficient typing is hardened so a
+  -- short-circuited closure can return 0 without nulling downstream
+  -- computations — keep the weaker (no-op) semantics.
   ELet [[Bind (Name "_" 0) intTy
            (EApp (EVar (Name "mercury_not" 0))
                  [ELam [] (translateGoalAsTest kctors env goal)])
@@ -954,15 +1017,35 @@ translateGoalK kctors env (GoalConstruct var ctor args) k
   | Set.member var env =
       -- Deconstruct: match scrutinee against the ctor.  Use the bare
       -- ctor name (post-strip) so the pattern matches the data-decl's
-      -- ECon, which is also emitted bare.
+      -- ECon, which is also emitted bare.  For known multi-ctor types
+      -- (Cons/Nil, yes/no, etc.) emit a PatWild fallback that performs
+      -- @mercury.fail@, so a tag-mismatch in a semidet predicate's
+      -- body propagates failure to the caller.  Without it the
+      -- emitter's "unhandled case" returns integer 0 — surd's
+      -- @find_linear_factor@ then proceeds with Root=0, producing
+      -- garbage LinPoly and crashing in @rational_norm@ down inside
+      -- @poly.div_mod@.  Single-ctor types (poly/1, r/2, the s_*
+      -- ctors, etc.) keep the 1-branch form because their
+      -- deconstruct is total.
       let bareCtor = case T.breakOnEnd "." ctor of
             ("", n) -> n
             (_,  n) -> n
-      in ECase (EVar (Name var 0))
-        [ Branch (PatCon (QName "" (Name bareCtor 0))
-                   [PatVar (Name a 0) anyTy | a <- args])
-                 Nothing k
-        ]
+          multiCtorNames = Set.fromList
+            [ "Cons", "[|]", "list_Cons", "list_Nil", "Nil", "[]"
+            , "yes", "no"
+            ]
+          baseBranch =
+            Branch (PatCon (QName "" (Name bareCtor 0))
+                     [PatVar (Name a 0) anyTy | a <- args])
+                   Nothing k
+          branches
+            | Set.member bareCtor multiCtorNames =
+                [ baseBranch
+                , Branch (PatWild anyTy) Nothing
+                         (EPerform (QName "mercury" (Name "fail" 0)) [])
+                ]
+            | otherwise = [baseBranch]
+      in ECase (EVar (Name var 0)) branches
   | Set.member ctor kctors || Set.member bareCtor kctors
   , not (isKnownStdlibFunction ctor) =
       -- Real ctor allocation.  ECon name is bare (the data-decl form).

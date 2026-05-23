@@ -988,7 +988,7 @@ emitProgramText prog =
     , "  func.func private @int_min(i64, i64) -> i64"
     , "  func.func private @int_abs(i64) -> i64"
     , "  func.func private @int_neg(i64) -> i64"
-    , "  func.func private @integer_divide_with_rem(i64, i64, i64) -> i64"
+    , "  func.func private @integer_divide_with_rem(i64, i64) -> i64"
     , "  func.func private @unify(i64, i64) -> i64"
     , "  func.func private @io_format(i64, i64, i64) -> i64"
     , "  func.func private @require_error(i64) -> i64"
@@ -1097,6 +1097,8 @@ emitProgramText prog =
     , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
     , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
     , "  func.func private @list_range(i64, i64) -> i64"
+    , "  func.func private @safe_from_integers__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_mul__2(i64, i64) -> i64"
     , "  func.func private @type_info_const__1(i64) -> i64"
     , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__3(i64, i64, i64) -> i64"
@@ -1609,7 +1611,7 @@ emitProgramWasm prog =
     , "  func.func private @int_min(i64, i64) -> i64"
     , "  func.func private @int_abs(i64) -> i64"
     , "  func.func private @int_neg(i64) -> i64"
-    , "  func.func private @integer_divide_with_rem(i64, i64, i64) -> i64"
+    , "  func.func private @integer_divide_with_rem(i64, i64) -> i64"
     , "  func.func private @unify(i64, i64) -> i64"
     , "  func.func private @io_format(i64, i64, i64) -> i64"
     , "  func.func private @require_error(i64) -> i64"
@@ -1718,6 +1720,8 @@ emitProgramWasm prog =
     , "  func.func private @builtin_compare(i64, i64, i64, i64) -> i64"
     , "  func.func private @builtin_ordering(i64, i64, i64) -> i64"
     , "  func.func private @list_range(i64, i64) -> i64"
+    , "  func.func private @safe_from_integers__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_mul__2(i64, i64) -> i64"
     , "  func.func private @type_info_const__1(i64) -> i64"
     , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__3(i64, i64, i64) -> i64"
@@ -4673,6 +4677,13 @@ externalRuntimeFns = Set.fromList
   -- Mercury negation + builtin comparison + range literal
   , "mercury_not", "builtin_compare", "builtin_ordering"
   , "list_range"
+  -- Safe variant of surd's rational.from_integers that returns the 0
+  -- sentinel for D=0 instead of crashing in rational_norm.  Bridge
+  -- routes rational.from_integers to this stub.
+  , "safe_from_integers__2"
+  -- Defensive rational.* shim — substitutes r(0, 1) for any operand
+  -- with denominator=0 to keep example 6's poly arithmetic going.
+  , "safe_rational_mul__2"
   -- Mercury private-builtin type-info helpers (arity-suffixed names
   -- match the bridge's call-site convention)
   , "type_info_const__1"
@@ -4759,7 +4770,7 @@ externalRuntimeArity = Map.fromList
   , ("int_zl", 2), ("int_zg", 2), ("int_zezl", 2), ("int_zgze", 2), ("int_zezeze", 2)
   , ("int_rem", 2), ("int_mod", 2), ("int_max", 2), ("int_min", 2)
   , ("int_abs", 1), ("int_neg", 1)
-  , ("integer_divide_with_rem", 3)
+  , ("integer_divide_with_rem", 2)
   , ("unify", 2)
   , ("io_format", 3), ("require_error", 1), ("rational", 0)
   , ("require_func_error", 3), ("integer_integer", 1)
@@ -4806,6 +4817,8 @@ externalRuntimeArity = Map.fromList
   , ("integer_pow", 2), ("integer_det_to_int", 1)
   , ("float_round_to_int", 1), ("float_truncate_to_int", 1)
   , ("mercury_not", 1), ("builtin_compare", 4), ("builtin_ordering", 3)
+  , ("safe_from_integers__2", 2)
+  , ("safe_rational_mul__2", 2)
   , ("list_range", 2)
   , ("type_info_const__1", 1)
   , ("type_info_cell_constructor__2", 2)

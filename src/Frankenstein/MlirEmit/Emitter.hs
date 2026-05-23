@@ -1070,6 +1070,7 @@ emitProgramText prog =
     , "  func.func private @string_append(i64, i64) -> i64"
     , "  func.func private @string_from_char(i64) -> i64"
     , "  func.func private @string_int_to_string(i64) -> i64"
+    , "  func.func private @string_from_int(i64) -> i64"
     , "  func.func private @string_append_list(i64) -> i64"
     , "  func.func private @string_join_list(i64, i64) -> i64"
     , "  func.func private @string_index(i64, i64) -> i64"
@@ -1690,6 +1691,7 @@ emitProgramWasm prog =
     , "  func.func private @string_append(i64, i64) -> i64"
     , "  func.func private @string_from_char(i64) -> i64"
     , "  func.func private @string_int_to_string(i64) -> i64"
+    , "  func.func private @string_from_int(i64) -> i64"
     , "  func.func private @string_append_list(i64) -> i64"
     , "  func.func private @string_join_list(i64, i64) -> i64"
     , "  func.func private @string_index(i64, i64) -> i64"
@@ -3274,7 +3276,14 @@ emitAppVarGeneral fn args = do
             Nothing -> do
               -- Unresolved external — emit direct func.call as a real
               -- linker symbol so C shims or GHC library objects can satisfy it.
-              let callName = externMangled qualSanitized nArgs
+              -- If the unmangled name is in our runtime set, use it directly so
+              -- the linker can resolve it against kk_runtime.o.  Otherwise mangle
+              -- with @$<arity>@ so multiple call sites with different arities
+              -- don't collide (and the symbol falls into the leak-stub set).
+              let useRuntimeName = Set.member qualSanitized externalRuntimeFns
+                  callName = if useRuntimeName
+                             then qualSanitized
+                             else externMangled qualSanitized nArgs
               addExternDecl callName nArgs
               resultName <- freshName "v"
               let callOp = "%" <> resultName <> " = func.call @" <> callName
@@ -4649,7 +4658,7 @@ externalRuntimeFns = Set.fromList
   , "private_builtin_instance_constructor_from_typeclass_info"
   -- Mercury string.* aliases (forward to kk_str_* helpers)
   , "string_length", "string_append", "string_from_char"
-  , "string_int_to_string", "string_append_list", "string_join_list"
+  , "string_int_to_string", "string_from_int", "string_append_list", "string_join_list"
   , "string_index", "string_contains_char", "string_duplicate_char"
   , "string_to_int", "string_to_float", "string_sub_string_search"
   , "string_float_to_string", "string_prefix"
@@ -4783,7 +4792,7 @@ externalRuntimeArity = Map.fromList
   , ("private_builtin_superclass_from_typeclass_info", 2)
   , ("private_builtin_instance_constructor_from_typeclass_info", 2)
   , ("string_length", 1), ("string_append", 2), ("string_from_char", 1)
-  , ("string_int_to_string", 1), ("string_append_list", 1)
+  , ("string_int_to_string", 1), ("string_from_int", 1), ("string_append_list", 1)
   , ("string_join_list", 2), ("string_index", 2)
   , ("string_contains_char", 2), ("string_duplicate_char", 2)
   , ("string_to_int", 1), ("string_to_float", 1)

@@ -2829,6 +2829,14 @@ int64_t string_length(int64_t s)                  { return kk_str_char_len(s); }
 int64_t string_append(int64_t a, int64_t b)       { return kk_str_concat(a, b); }
 int64_t string_from_char(int64_t c)               { return kk_string_from_char(c); }
 int64_t string_int_to_string(int64_t i)           { return kk_str_show_int(i); }
+/* Mercury @string.from_int(I) = string@ — same semantics as
+ * @string.int_to_string@.  surd's @euler_integrate.int_sqrt@ uses this
+ * to bridge an integer through @math.sqrt@ via the string round-trip;
+ * without an actual implementation the bridge's link-time leak stub
+ * returned 0, downstream @integer.det_from_string(0)@ also returned 0,
+ * and @sqrt(4)@ silently became 0 in rat_sqrt — triggering a
+ * divide-by-zero in @inv_hyp_arg@ during inverse-trig detection. */
+int64_t string_from_int(int64_t i)                { return kk_str_show_int(i); }
 
 /* string.append_list(Xs) — concatenate a list of strings. */
 int64_t string_append_list(int64_t xs) {
@@ -3514,12 +3522,20 @@ int64_t set_difference(int64_t tinfo, int64_t a, int64_t b) {
 /* Mercury integer.div / integer.det_from_string / etc. */
 int64_t integer_div(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 int64_t integer_det_from_string(int64_t s) {
-    int64_t ptr_i = kk_field(s, 0);
-    int64_t len = kk_field(s, 1);
-    const char* p = (const char*)(uintptr_t)ptr_i;
+    /* @s@ is a @kk_string_t*@, not a ctor cell.  The earlier
+     * @kk_field(s, 0)@ shape was reading the string's @rc@ slot as a
+     * byte pointer — memcpy then dereferenced a refcount-as-address and
+     * crashed in __memmove_avx_unaligned_erms.  Use kk_str_flatten +
+     * kk_str_bytes + byte_len. */
+    if (!s) return 0;
+    int64_t flat = kk_str_flatten(s);
+    kk_string_t* str = (kk_string_t*)flat;
+    if (!str) return 0;
+    int64_t len = str->byte_len;
+    const char* p = kk_str_bytes(str);
     char tmp[64];
     int64_t n = len < 63 ? len : 63;
-    memcpy(tmp, p, (size_t)n);
+    if (n > 0 && p) memcpy(tmp, p, (size_t)n);
     tmp[n] = 0;
     return (int64_t)strtoll(tmp, NULL, 10);
 }

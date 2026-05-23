@@ -524,12 +524,29 @@ translateGoalAsTest _kctors _env (GoalDeconstruct var ctor args) =
 -- Bind both sides as aliases (no-op if already in scope), call unify,
 -- and yield its result as the test outcome.
 translateGoalAsTest _kctors env (GoalUnify x y)
+  -- Both bound, non-literal: structural equality via unify runtime.
   | Set.member x env, Set.member y env
   , isNothing (readMaybeInt x), isNothing (readMaybeInt y)
   , isNothing (parseMercuryStringLit x), isNothing (parseMercuryStringLit y)
   , isNothing (parseMercuryCharLit x), isNothing (parseMercuryCharLit y)
   , isNothing (parseMercuryFloatLit x), isNothing (parseMercuryFloatLit y)
   = EApp (EVar (Name "unify" 0)) [EVar (Name x 0), EVar (Name y 0)]
+  -- Bound var = integer literal: emit cmpi-eq directly.  HLDS uses this
+  -- shape pervasively to check function results against constants, e.g.
+  -- @V_17 = degree(W), V_17 = 0@ inside yun_loop's cond — without an
+  -- explicit equality test the fallback @let _ = unify(V, lit) in 1@
+  -- always yielded 1 and every such cond fired its then-branch,
+  -- collapsing factor's square_free result to [] (no factors added).
+  | Set.member x env, Just n <- readMaybeInt y
+  = ECase (EVar (Name x 0))
+      [ Branch (PatLit (LitInt n)) Nothing (ELit (LitInt 1))
+      , Branch (PatWild anyTy)     Nothing (ELit (LitInt 0))
+      ]
+  | Set.member y env, Just n <- readMaybeInt x
+  = ECase (EVar (Name y 0))
+      [ Branch (PatLit (LitInt n)) Nothing (ELit (LitInt 1))
+      , Branch (PatWild anyTy)     Nothing (ELit (LitInt 0))
+      ]
   where
     readMaybeInt :: Text -> Maybe Integer
     readMaybeInt t = readMaybe (T.unpack t)

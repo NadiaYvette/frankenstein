@@ -516,25 +516,39 @@ translateGoal g = translateGoalK Set.empty Set.empty g (ELit (LitInt 0))
 rewriteTypeclassMethod :: Text -> [Text] -> Maybe (Text, [Text])
 rewriteTypeclassMethod predName' args = case (predName', args) of
   -- ring(K) methods: drop the leading TypeClassInfo arg, dispatch
-  -- to the rational instance.
-  ("poly.ring_zero",     [_tci])          -> Just ("rational.zero",  [])
-  ("poly.ring_one",      [_tci])          -> Just ("rational.one",   [])
-  ("poly.ring_add",      [_tci, a, b])    -> Just ("rational.+",     [a, b])
-  ("poly.ring_sub",      [_tci, a, b])    -> Just ("rational.-",     [a, b])
-  ("poly.ring_mul",      [_tci, a, b])    -> Just ("rational.*",     [a, b])
-  ("poly.ring_negate",   [_tci, a])       -> Just ("rational.-",     [a])
-  ("poly.ring_is_zero",  [_tci, a])       -> Just ("rational.is_zero", [a])
-  ("poly.ring_from_int", [_tci, a])       -> Just ("rational.rational", [a])
-  ("poly.ring_equal",    [_tci, a, b])    -> Just ("rational.equal", [a, b])
+  -- to the rational instance.  The HLDS emits these in two forms:
+  --   * function form @V = poly.ring_zero(TCI)@ — bridge appends V as
+  --     trailing output arg, so we see @[TCI, V]@ at this point.
+  --   * predicate form @poly.ring_add(TCI, A, B, V)@ — already 4 args.
+  -- Match both: the bare wrapper-arity pattern AND the +1 output arg.
+  ("poly.ring_zero",     [_tci])           -> Just ("rational.zero",  [])
+  ("poly.ring_zero",     [_tci, o])        -> Just ("rational.zero",  [o])
+  ("poly.ring_one",      [_tci])           -> Just ("rational.one",   [])
+  ("poly.ring_one",      [_tci, o])        -> Just ("rational.one",   [o])
+  ("poly.ring_add",      [_tci, a, b])     -> Just ("rational.+",     [a, b])
+  ("poly.ring_add",      [_tci, a, b, o])  -> Just ("rational.+",     [a, b, o])
+  ("poly.ring_sub",      [_tci, a, b])     -> Just ("rational.-",     [a, b])
+  ("poly.ring_sub",      [_tci, a, b, o])  -> Just ("rational.-",     [a, b, o])
+  ("poly.ring_mul",      [_tci, a, b])     -> Just ("rational.*",     [a, b])
+  ("poly.ring_mul",      [_tci, a, b, o])  -> Just ("rational.*",     [a, b, o])
+  ("poly.ring_negate",   [_tci, a])        -> Just ("rational.-",     [a])
+  ("poly.ring_negate",   [_tci, a, o])     -> Just ("rational.-",     [a, o])
+  ("poly.ring_is_zero",  [_tci, a])        -> Just ("rational.is_zero", [a])
+  ("poly.ring_from_int", [_tci, a])        -> Just ("rational.rational", [a])
+  ("poly.ring_from_int", [_tci, a, o])     -> Just ("rational.rational", [a, o])
+  ("poly.ring_equal",    [_tci, a, b])     -> Just ("rational.equal", [a, b])
   -- field(K) methods.
-  ("poly.field_div",     [_tci, a, b])    -> Just ("rational./",     [a, b])
-  ("poly.field_recip",   [_tci, a])       -> Just ("rational.recip", [a])
+  ("poly.field_div",     [_tci, a, b])     -> Just ("rational./",     [a, b])
+  ("poly.field_div",     [_tci, a, b, o])  -> Just ("rational./",     [a, b, o])
+  ("poly.field_recip",   [_tci, a])        -> Just ("rational.recip", [a])
+  ("poly.field_recip",   [_tci, a, o])     -> Just ("rational.recip", [a, o])
   -- ord(K) methods.
-  ("poly.ord_cmp",       [_tci, a, b])    -> Just ("rational.cmp",   [a, b])
-  ("poly.ord_lt",        [_tci, a, b])    -> Just ("rational.<",     [a, b])
-  ("poly.ord_le",        [_tci, a, b])    -> Just ("rational.=<",    [a, b])
-  ("poly.ord_gt",        [_tci, a, b])    -> Just ("rational.>",     [a, b])
-  ("poly.ord_ge",        [_tci, a, b])    -> Just ("rational.>=",    [a, b])
+  ("poly.ord_cmp",       [_tci, a, b])     -> Just ("rational.cmp",   [a, b])
+  ("poly.ord_cmp",       [_tci, a, b, o])  -> Just ("rational.cmp",   [a, b, o])
+  ("poly.ord_lt",        [_tci, a, b])     -> Just ("rational.<",     [a, b])
+  ("poly.ord_le",        [_tci, a, b])     -> Just ("rational.=<",    [a, b])
+  ("poly.ord_gt",        [_tci, a, b])     -> Just ("rational.>",     [a, b])
+  ("poly.ord_ge",        [_tci, a, b])     -> Just ("rational.>=",    [a, b])
   _ -> Nothing
 
 -- | Names that share their bare-form with a known stdlib TYPE but are

@@ -690,6 +690,12 @@ rewriteTypeclassMethod predName' args = case (predName', args) of
   -- wrapSecondaries supplies Remainder via the @_remainder@ stub.
   ("rad_normalize.extract_nth_power", [n, m, ext, rem])
     -> Just ("extract_nth_power_extracted", [n, m, ext, rem])
+  -- @rad_normalize.partition_lits(L, Lits, Rest)@ → same multi-output
+  -- problem as extract_nth_power.  Route to a runtime stub that
+  -- returns Lits; wrapSecondaries supplies Rest.  Fixes surd-euler
+  -- example 6's @?@ rendering for @√2@ (NULL field 1 in re_mul).
+  ("rad_normalize.partition_lits", [l, lits, rest])
+    -> Just ("partition_lits_lits", [l, lits, rest])
   _ -> Nothing
 
 -- | Names that share their bare-form with a known stdlib TYPE but are
@@ -910,6 +916,7 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       isDivMod = predName' `elem` ["poly.div_mod", "div_mod"]
       isIntDivWithRem = predName' == "integer.divide_with_rem"
       isExtractNthPower = predName' == "extract_nth_power_extracted"
+      isPartitionLits = predName' == "partition_lits_lits"
       divModRemainderExpr fVar gVar qName tciVar =
         EApp (EVar (Name "poly_sub__3" 0))
           [ EVar (Name tciVar 0)
@@ -939,6 +946,10 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       extractNthRemainderExpr nVar mVar =
         EApp (EVar (Name "extract_nth_power_remainder__2" 0))
           [EVar (Name nVar 0), EVar (Name mVar 0)]
+      -- partition_lits(L, Lits, Rest): Rest supplied by _rest stub.
+      partitionLitsRestExpr lVar =
+        EApp (EVar (Name "partition_lits_rest__1" 0))
+          [EVar (Name lVar 0)]
       wrapSecondaries body = foldr
         (\n acc ->
            let defaultExpr
@@ -956,6 +967,11 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
                  | isExtractNthPower, length args == 4
                  , [nV, mV] <- take 2 args
                  = extractNthRemainderExpr nV mV
+                 -- rad_normalize.partition_lits(L, Lits, Rest): Rest
+                 -- supplied by the dedicated runtime stub.
+                 | isPartitionLits, length args == 3
+                 , [lV] <- take 1 args
+                 = partitionLitsRestExpr lV
                  | otherwise = ELit (LitInt 0)
            in ELet [[Bind (Name n 0) valueTy defaultExpr DefVal]] acc)
         body

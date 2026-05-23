@@ -4163,6 +4163,128 @@ int64_t extract_nth_power_remainder__2(int64_t n, int64_t m) {
     return safe_from_integers__2(rem, 1);
 }
 
+/* surd's @rad_normalize.partition_lits(L, Lits, Rest)@ splits a list
+ * of rad_exprs into two lists: rational literals extracted from
+ * @re_lit(R)@ / @re_inv(re_lit(R))@ cells (collected as a list of
+ * rationals), and the remaining non-literal rad_exprs.  It's a det
+ * pred with TWO output positions; the bridge's call-site
+ * trailing-output-drop heuristic only binds the FIRST output to the
+ * call result, default-binding subsequent outputs to 0.  The Rest
+ * list surfaced as NULL, then @build_mul(NULL)@ returned NULL,
+ * @apply_coeff(C, NULL)@ produced @re_mul(re_lit(C), NULL)@, and
+ * @pretty.pretty_prec@ rendered the NULL field as "?" — visible
+ * in surd-euler example 6's @1/?·ln|…2·?…|@ output where the `?`
+ * should be @√2@.
+ *
+ * Provide both outputs via two runtime stubs: the primary call
+ * binds Lits; the bridge's @wrapSecondaries@ supplies Rest via the
+ * @_rest@ stub.  Implementation iterates the input list once and
+ * partitions; both stubs share the same logic but only return the
+ * relevant half.  Refcount-naive: the input list is read twice
+ * (once per stub).  Acceptable for surd's usage. */
+#define KK_RE_LIT_TAG 31636   /* djb2("re_lit") mod 65521 — runtime
+                                  needs to know this to deconstruct */
+#define KK_RE_INV_TAG 28701   /* djb2("re_inv") */
+
+static int kk_compute_tag(const char* name) {
+    int64_t acc = 5381;
+    while (*name) acc = acc * 33 + (unsigned char)*name++;
+    if (acc < 0) acc = -acc;
+    return (int)(acc % 65521);
+}
+
+static int kk_re_lit_tag(void) {
+    static int tag = -1;
+    if (tag < 0) tag = kk_compute_tag("re_lit");
+    return tag;
+}
+
+static int kk_re_inv_tag(void) {
+    static int tag = -1;
+    if (tag < 0) tag = kk_compute_tag("re_inv");
+    return tag;
+}
+
+/* Returns 1 if E is re_lit(R) and writes R to *out_r.
+ * Returns 2 if E is re_inv(re_lit(R)) and writes R to *out_r (caller
+ *   should compute 1/R if needed; we set out_r to the inner R only).
+ * Returns 0 otherwise. */
+static int kk_classify_rad_lit(int64_t e, int64_t *out_r) {
+    if (!kk_is_heap_ptr(e)) return 0;
+    int64_t t = kk_tag(e);
+    if (t == kk_re_lit_tag()) {
+        *out_r = kk_field(e, 0);
+        return 1;
+    }
+    if (t == kk_re_inv_tag()) {
+        int64_t inner = kk_field(e, 0);
+        if (kk_is_heap_ptr(inner) && kk_tag(inner) == kk_re_lit_tag()) {
+            *out_r = kk_field(inner, 0);
+            return 2;
+        }
+    }
+    return 0;
+}
+
+/* Build the Lits list (list of rationals) from L. */
+int64_t partition_lits_lits__1(int64_t list) {
+    /* Reverse-accumulate into rev, then reverse to preserve order. */
+    int64_t rev = kk_nil();
+    int64_t cur = list;
+    while (kk_is_heap_ptr(cur) && kk_tag(cur) == KK_CONS_TAG) {
+        int64_t h = kk_field(cur, 0);
+        int64_t r;
+        int klass = kk_classify_rad_lit(h, &r);
+        if (klass == 1) {
+            rev = kk_cons(r, rev);
+        } else if (klass == 2) {
+            /* re_inv(re_lit(R)) — Lits adds 1/R.  Need rational division;
+             * use safe_from_integers__2 to construct 1/R = r(D, N) for
+             * R = r(N, D) (assuming R is non-zero; surd's partition_lits
+             * guards with `not R = rational.zero`, but for D=0 in the
+             * stored rational we just skip to avoid div-by-zero). */
+            int64_t rN = kk_field(r, 0);
+            int64_t rD = kk_field(r, 1);
+            if (rN != 0) {
+                int64_t inv = safe_from_integers__2(rD, rN);
+                rev = kk_cons(inv, rev);
+            }
+        }
+        cur = kk_field(cur, 1);
+    }
+    /* Reverse rev to preserve original order. */
+    int64_t out = kk_nil();
+    while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
+        out = kk_cons(kk_field(rev, 0), out);
+        rev = kk_field(rev, 1);
+    }
+    return out;
+}
+
+/* Build the Rest list (list of non-literal rad_exprs) from L. */
+int64_t partition_lits_rest__1(int64_t list) {
+    int64_t rev = kk_nil();
+    int64_t cur = list;
+    while (kk_is_heap_ptr(cur) && kk_tag(cur) == KK_CONS_TAG) {
+        int64_t h = kk_field(cur, 0);
+        int64_t r;
+        int klass = kk_classify_rad_lit(h, &r);
+        if (klass == 0) {
+            rev = kk_cons(h, rev);
+        }
+        /* For re_inv(re_lit(zero)) we'd want to keep it in Rest too;
+         * approximate by always treating klass != 0 as "literal" and
+         * dropping.  Surd guards inv(re_lit(0)) so it doesn't appear. */
+        cur = kk_field(cur, 1);
+    }
+    int64_t out = kk_nil();
+    while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
+        out = kk_cons(kk_field(rev, 0), out);
+        rev = kk_field(rev, 1);
+    }
+    return out;
+}
+
 /* Mercury io.format/4 — after the bridge's output-arg-drop, the call
  * shape is io_format(Fmt, Args, IO).  Fmt is a kk_string_t pointer.
  * Args is the head of a list built from list_cons cells with

@@ -1101,6 +1101,8 @@ emitProgramText prog =
     , "  func.func private @safe_rational_mul__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_extracted__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_remainder__2(i64, i64) -> i64"
+    , "  func.func private @partition_lits_lits__1(i64) -> i64"
+    , "  func.func private @partition_lits_rest__1(i64) -> i64"
     , "  func.func private @type_info_const__1(i64) -> i64"
     , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__3(i64, i64, i64) -> i64"
@@ -1726,6 +1728,8 @@ emitProgramWasm prog =
     , "  func.func private @safe_rational_mul__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_extracted__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_remainder__2(i64, i64) -> i64"
+    , "  func.func private @partition_lits_lits__1(i64) -> i64"
+    , "  func.func private @partition_lits_rest__1(i64) -> i64"
     , "  func.func private @type_info_const__1(i64) -> i64"
     , "  func.func private @type_info_cell_constructor__2(i64, i64) -> i64"
     , "  func.func private @type_info_cell_constructor__3(i64, i64, i64) -> i64"
@@ -4692,6 +4696,10 @@ externalRuntimeFns = Set.fromList
   -- avoids the broken list.foldl2 multi-output closure path.
   , "extract_nth_power_extracted__2"
   , "extract_nth_power_remainder__2"
+  -- Replacement for surd's rad_normalize.partition_lits (multi-output
+  -- pred whose Rest output the bridge default-binds to 0).
+  , "partition_lits_lits__1"
+  , "partition_lits_rest__1"
   -- Mercury private-builtin type-info helpers (arity-suffixed names
   -- match the bridge's call-site convention)
   , "type_info_const__1"
@@ -4829,6 +4837,8 @@ externalRuntimeArity = Map.fromList
   , ("safe_rational_mul__2", 2)
   , ("extract_nth_power_extracted__2", 2)
   , ("extract_nth_power_remainder__2", 2)
+  , ("partition_lits_lits__1", 1)
+  , ("partition_lits_rest__1", 1)
   , ("list_range", 2)
   , ("type_info_const__1", 1)
   , ("type_info_cell_constructor__2", 2)

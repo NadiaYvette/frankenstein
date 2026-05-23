@@ -477,13 +477,40 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
   [g] -> translateGoalAsTest knownCtors env g
   _   -> -- For multi-goal conjunctions, bind intermediate goals and
          -- return the last. Use CPS for all but the last goal.
+         --
+         -- For init goals that are DECONSTRUCTS of bound vars, emit a
+         -- 2-branch ECase so a mismatch short-circuits the conjunction
+         -- to 0 instead of falling through with garbage bindings.  This
+         -- is the semidet semantics needed for if-cond conjunctions
+         -- like @A = s_rat(RA), B = s_rat(RB)@ — if either deconstruct
+         -- fails, the whole cond fails (returns 0) and the if-else
+         -- picks the else branch.  Other init goals (unify, call,
+         -- assignment) use plain translateGoalK CPS threading.
          let initGoals = init goals
              lastGoal  = last goals
              envsFor   = scanl extendBindingsFor env goals
              initPairs = zip initGoals envsFor
              lastEnv   = envsFor !! (length goals - 1)
              innerExpr = translateGoalAsTest knownCtors lastEnv lastGoal
-         in foldr (\(g, e) acc -> translateGoalK knownCtors e g acc) innerExpr initPairs
+             threadGoal (g, e) acc = case g of
+               GoalConstruct var ctor cargs | Set.member var e ->
+                 -- Test-mode deconstruct: PatCon binds vars + proceeds
+                 -- to acc; PatWild yields 0 to fail the whole cond.
+                 ECase (EVar (Name var 0))
+                   [ Branch (PatCon (QName "" (Name (bareTag ctor) 0))
+                              [PatVar (Name a 0) anyTy | a <- cargs])
+                            Nothing acc
+                   , Branch (PatWild anyTy) Nothing (ELit (LitInt 0))
+                   ]
+               GoalDeconstruct var ctor cargs ->
+                 ECase (EVar (Name var 0))
+                   [ Branch (PatCon (QName "" (Name (bareTag ctor) 0))
+                              [PatVar (Name a 0) anyTy | a <- cargs])
+                            Nothing acc
+                   , Branch (PatWild anyTy) Nothing (ELit (LitInt 0))
+                   ]
+               _ -> translateGoalK knownCtors e g acc
+         in foldr threadGoal innerExpr initPairs
 translateGoalAsTest knownCtors env (GoalIfThenElse cond then' else') =
   ECase (translateGoalAsTest knownCtors env cond)
     [ Branch (PatLit (LitInt 1)) Nothing (translateGoalAsTest knownCtors env then')

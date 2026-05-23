@@ -340,20 +340,30 @@ translatePred knownCtors srcModule pred' = do
         Just goal -> bodyExpr goal
         Nothing   -> ELit (LitString "no body")
 
-      -- For semidet predicates: wrap in "if test then 1 else perform exn.fail"
+      -- For semidet predicates: behaviour depends on whether the pred has
+      -- an output variable.
+      --
+      --   * No output (pure test, e.g. @is_zero/1@): wrap the test result
+      --     as @case test of 1 -> 1 ; _ -> fail@.
+      --
+      --   * With output (e.g. @lead_coeff(P, LC)@): just return the raw
+      --     body — the body's CPS terminator IS the output value.  The
+      --     CALLER (translateGoalAsTest GoalCall) is responsible for
+      --     treating @output == 0@ as failure and any non-zero value as
+      --     success.  Doing the success/fail tag here would either throw
+      --     away the output (returning 1) or compare the output to
+      --     literal 1 (always false for heap-pointer outputs).
       goalBody = case predDet pred' of
         Semidet ->
-          -- For semidet with no output var, the CPS terminator is 0 and
-          -- the test result gets discarded. Use translateGoalAsTest which
-          -- yields the test result directly as the scrutinee.
-          let testExpr = case (outputName, predGoal pred') of
-                (Nothing, Just goal) -> translateGoalAsTest knownCtors initialEnv goal
-                _                    -> rawGoalBody
-          in ECase testExpr
-               [ Branch (PatLit (LitInt 1)) Nothing (ELit (LitInt 1))
-               , Branch (PatWild boolType) Nothing
-                   (EPerform (QName "mercury" (Name "fail" 0)) [])
-               ]
+          case (outputName, predGoal pred') of
+            (Nothing, Just goal) ->
+              let testExpr = translateGoalAsTest knownCtors initialEnv goal
+              in ECase testExpr
+                   [ Branch (PatLit (LitInt 1)) Nothing (ELit (LitInt 1))
+                   , Branch (PatWild boolType) Nothing
+                       (EPerform (QName "mercury" (Name "fail" 0)) [])
+                   ]
+            _ -> rawGoalBody
         _ -> rawGoalBody
       boolType = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
 
@@ -420,7 +430,20 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
   , let outName = last args
   , not (Set.member outName env)
   , isJustVar outName =
-      translateGoalK knownCtors env (GoalCall predName' args) (EVar (Name outName 0))
+      -- Semidet pred in test position with an unbound output.  The HLDS
+      -- caller expects the if-cond to fire when the predicate succeeds
+      -- (= output bound to a non-zero / non-failure value).  Previously
+      -- the bridge yielded the raw output value as the test result; that
+      -- only matched literal 1 inside the surrounding ECase, so any
+      -- heap-pointer or non-1 numeric output sent the cond to its else
+      -- branch (surd's @det_lead_coeff@ then aborted, or worse, the
+      -- caller's then-branch re-ran with a stale/wrong output).  Map any
+      -- non-zero output to 1 via an ECase so the success path matches.
+      let testExpr = ECase (EVar (Name outName 0))
+            [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+            , Branch (PatWild anyTy)     Nothing (ELit (LitInt 1))
+            ]
+      in translateGoalK knownCtors env (GoalCall predName' args) testExpr
   | otherwise =
       let isStdlibPrefixed n = any (`T.isPrefixOf` n)
             ["io.", "int.", "integer.", "string.", "list.", "char."

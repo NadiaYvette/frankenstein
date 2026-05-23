@@ -804,8 +804,33 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       secondaryOutputs = case trailingUnbound of
         (_:rest) -> rest
         []       -> []
+      -- Compute secondary outputs for known multi-output preds.
+      -- @poly.div_mod(TCI, F, G, Q, R)@: R = F - Q*G is the natural
+      -- mathematical relation, computable from the call's bound Q +
+      -- the input F & G.  Without this, surd's @gcd@ recurses with
+      -- R = 0 (literal int, defaulted from secondary-output placeholder)
+      -- and the next div_mod gets G=NULL → reciprocal(NULL) crash.
+      isDivMod = predName' `elem` ["poly.div_mod", "div_mod"]
+      divModRemainderExpr fVar gVar qName tciVar =
+        EApp (EVar (Name "poly_sub__3" 0))
+          [ EVar (Name tciVar 0)
+          , EVar (Name fVar 0)
+          , EApp (EVar (Name "poly_mul__3" 0))
+              [ EVar (Name tciVar 0)
+              , EVar (Name qName 0)
+              , EVar (Name gVar 0)
+              ]
+          ]
       wrapSecondaries body = foldr
-        (\n acc -> ELet [[Bind (Name n 0) intTy (ELit (LitInt 0)) DefVal]] acc)
+        (\n acc ->
+           let defaultExpr
+                 -- div_mod: secondary output is R = F - Q*G.
+                 | isDivMod, length args == 5
+                 , [tciV, fV, gV] <- take 3 args
+                 , Just qV <- outputBinding
+                 = divModRemainderExpr fV gV qV tciV
+                 | otherwise = ELit (LitInt 0)
+           in ELet [[Bind (Name n 0) valueTy defaultExpr DefVal]] acc)
         body
         secondaryOutputs
   in case outputBinding of

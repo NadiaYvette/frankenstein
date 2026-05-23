@@ -900,10 +900,15 @@ translateGoalK kctors env (GoalDisj goals) k = case goals of
               ]
 
 translateGoalK kctors env (GoalNot goal) k =
-  -- Unchanged semantics: wrap negation as a call to a runtime helper.
+  -- mercury_not(closure) calls closure() and inverts its result
+  -- (r == 0 ? 1 : 0).  The closure body must therefore evaluate the
+  -- inner goal as a TEST (yielding 0/1).  Previously we passed
+  -- @translateGoalK env goal (ELit 0)@ which always yielded 0 —
+  -- so mercury_not always returned 1 and @not(...)@ was a no-op.
+  -- Use translateGoalAsTest so the goal's truth value flows out.
   ELet [[Bind (Name "_" 0) intTy
            (EApp (EVar (Name "mercury_not" 0))
-                 [ELam [] (translateGoalK kctors env goal (ELit (LitInt 0)))])
+                 [ELam [] (translateGoalAsTest kctors env goal)])
            DefVal]]
        k
 

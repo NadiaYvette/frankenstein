@@ -42,6 +42,33 @@ import Text.Read (readMaybe)
 import Control.Applicative ((<|>))
 import Data.Maybe (isJust)
 
+-- | Det multi-output pred markers: returns a Set of names of the form
+-- @"MULTIOUT:<module>.<predname>__<inputArity>"@ for every det pred
+-- with 2+ output modes.  These markers are merged into @knownCtors@
+-- and consulted by:
+--   * 'translatePred' to switch the body terminator from
+--     @EVar firstOutput@ to a @tuple(out1, out2, ...)@ constructor.
+--   * 'translateGoalK' GoalCall to deconstruct the call's tuple result
+--     into all output positions (instead of binding only the first
+--     and defaulting the rest to 0, which loses Rest in
+--     @partition_lits@, Remainder in @extract_nth_power@, etc.).
+-- Semidet preds are excluded because their failure path returns the
+-- 0 sentinel (not a tuple); the caller's tuple-deconstruct would
+-- mishandle the failure case.  Semidet multi-output preds continue
+-- to use the existing per-pred shim pattern.
+multiOutputMarkers :: Text -> [MercuryPred] -> Set Text
+multiOutputMarkers srcModule preds = Set.fromList
+  [ "MULTIOUT:" <> srcModule <> "." <> predName p
+                <> "__" <> T.pack (show inputArity)
+  | p <- preds
+  , predDet p == Det
+  , let outputCount = length [m | m <- predModes p
+                                , m == ModeOut || m == ModeUo]
+  , outputCount >= 2
+  , let inputArity = length [m | m <- predModes p
+                               , m == ModeIn || m == ModeDi]
+  ]
+
 -- | Translate a full Mercury HLDS module to Frankenstein Core
 translateHlds :: MercuryHLDS -> Either Text Program
 translateHlds hlds = do
@@ -50,7 +77,8 @@ translateHlds hlds = do
         | t <- hldsTypes hlds, (cname, _) <- typeDeclCtors t ]
       userCtorNames = Set.fromList ([q | (q, _) <- moduleCtors]
                                  ++ [b | (_, b) <- moduleCtors])
-      knownCtors = Set.union userCtorNames stdlibCtorNames
+      multiOutMarkers = multiOutputMarkers (hldsModule hlds) (hldsPreds hlds)
+      knownCtors = Set.unions [userCtorNames, stdlibCtorNames, multiOutMarkers]
   defs <- mapM (translatePred knownCtors (hldsModule hlds)) (hldsPreds hlds)
   let dataDecls = map (translateMercuryTypeDecl (hldsModule hlds)) (hldsTypes hlds)
       -- Default handler for exn.fail: returns 0
@@ -139,7 +167,11 @@ translateMultiHlds (entry : rest) = do
                    ++ concatMap (\h -> concatMap collectCtorsFromPred (hldsPreds h)) rest
       bodyCtorNames = Set.fromList ([q | (q, _) <- bodyCtorPairs]
                                  ++ [b | (_, b) <- bodyCtorPairs])
-      knownCtors = Set.unions [userCtorNames, bodyCtorNames, stdlibCtorNames]
+      multiOutMarkers = Set.unions
+        $ multiOutputMarkers (hldsModule entry) (hldsPreds entry)
+        : [multiOutputMarkers (hldsModule h) (hldsPreds h) | h <- rest]
+      knownCtors = Set.unions
+        [userCtorNames, bodyCtorNames, stdlibCtorNames, multiOutMarkers]
   -- Translate every module's predicates and data decls.
   entryDefs <- mapM (translatePred knownCtors (hldsModule entry)) (hldsPreds entry)
   restDefsLists <- mapM (\h -> mapM (translatePred knownCtors (hldsModule h)) (hldsPreds h)) rest
@@ -312,13 +344,29 @@ translatePred knownCtors srcModule pred' = do
       -- to the value bound to that output variable. Pure predicates with
       -- no outputs (rare) fall back to 0.
       outputModes = [i | (i, m) <- indexedModes, m == ModeOut || m == ModeUo]
-      outputName  = case [predArgNames pred' !! i
-                         | i <- outputModes, i < length (predArgNames pred')] of
+      outputNames = [predArgNames pred' !! i
+                     | i <- outputModes, i < length (predArgNames pred')]
+      outputName  = case outputNames of
                       (n:_) -> Just n
                       []    -> Nothing
-      terminator  = case outputName of
-        Just n  -> EVar (Name n 0)
-        Nothing -> ELit (LitInt 0)
+      -- Det multi-output preds (gated via the @MULTIOUT:@ marker that
+      -- @multiOutputMarkers@ added to @knownCtors@) build a @tuple@
+      -- of all outputs.  Single-output preds keep the existing
+      -- @EVar outputName@ form, and semidet preds (including
+      -- multi-output ones) also keep the existing form because their
+      -- failure path returns the 0 sentinel which can't be
+      -- tuple-deconstructed cleanly by the caller.
+      multiOutputMarker = "MULTIOUT:" <> srcModule <> "." <> effectiveName
+      isMultiOutputDet = predDet pred' == Det
+                      && length outputNames >= 2
+                      && Set.member multiOutputMarker knownCtors
+      terminator
+        | isMultiOutputDet =
+            EApp (ECon (QName "" (Name "tuple" 0)))
+                 [EVar (Name n 0) | n <- outputNames]
+        | otherwise = case outputName of
+            Just n  -> EVar (Name n 0)
+            Nothing -> ELit (LitInt 0)
       -- Initial binding environment: input parameters are bound on entry.
       -- Output variables are NOT in the initial env — they get bound as
       -- the goal executes, which is what lets construct goals recognise
@@ -331,11 +379,18 @@ translatePred knownCtors srcModule pred' = do
       -- one ITE arm of rational_norm) still satisfy the terminator's
       -- EVar reference instead of leaking a free-name to the link
       -- stage.  Working branches that actually bind the output via
-      -- ELet shadow the default by lexical scope.
-      bodyExpr goal = case outputName of
-        Just n  -> ELet [[Bind (Name n 0) anyTy (ELit (LitInt 0)) DefVal]]
-                         (translateGoalK knownCtors initialEnv goal terminator)
-        Nothing -> translateGoalK knownCtors initialEnv goal terminator
+      -- ELet shadow the default by lexical scope.  For multi-output
+      -- preds, default-bind ALL outputs (not just the first) so the
+      -- tuple terminator's references all resolve.
+      bodyExpr goal
+        | isMultiOutputDet =
+            ELet [[ Bind (Name n 0) anyTy (ELit (LitInt 0)) DefVal
+                  | n <- outputNames ]]
+                 (translateGoalK knownCtors initialEnv goal terminator)
+        | otherwise = case outputName of
+            Just n  -> ELet [[Bind (Name n 0) anyTy (ELit (LitInt 0)) DefVal]]
+                             (translateGoalK knownCtors initialEnv goal terminator)
+            Nothing -> translateGoalK knownCtors initialEnv goal terminator
       rawGoalBody = case predGoal pred' of
         Just goal -> bodyExpr goal
         Nothing   -> ELit (LitString "no body")
@@ -976,7 +1031,25 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
            in ELet [[Bind (Name n 0) valueTy defaultExpr DefVal]] acc)
         body
         secondaryOutputs
-  in case outputBinding of
+      -- Det multi-output user pred: the callee returns a tuple of all
+      -- outputs (see 'multiOutputMarkers' + 'translatePred' tuple
+      -- terminator).  Deconstruct the tuple into ALL trailing-unbound
+      -- output positions instead of binding only the first and
+      -- defaulting the rest to 0.
+      multiOutMarker = "MULTIOUT:" <> predName' <> "__"
+                                   <> T.pack (show (length callInputs))
+      useTupleConvention = Set.member multiOutMarker _kctors
+                        && length trailingUnbound >= 2
+  in if useTupleConvention
+       then
+         let tupleVar = "_tuple_result"
+             outPats  = [PatVar (Name o 0) anyTy | o <- trailingUnbound]
+         in ELet [[Bind (Name tupleVar 0) valueTy callExpr DefVal]]
+              (ECase (EVar (Name tupleVar 0))
+                [ Branch (PatCon (QName "" (Name "tuple" 0)) outPats)
+                         Nothing k
+                ])
+       else case outputBinding of
        Nothing      -> ELet [[Bind (Name "_" 0) valueTy callExpr DefVal]]
                             (wrapSecondaries k)
        Just outName -> ELet [[Bind (Name outName 0) valueTy callExpr DefVal]]

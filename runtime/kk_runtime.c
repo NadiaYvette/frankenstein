@@ -3830,11 +3830,18 @@ int64_t list_det_index0(int64_t ti, int64_t list, int64_t n) {
     return 0;
 }
 
-/* list.det_replace_nth(L, N, X) = L' — replace Nth element with X. */
+/* list.det_replace_nth(L, N, X) = L' — replace Nth element with X.
+ * Mercury convention: N is 1-INDEXED (the Nth element is counted from 1),
+ * NOT 0-indexed.  Callers like poly.add_at_index compute @N = Idx + 1@
+ * specifically because they treat det_replace_nth as 1-based; if we
+ * treat it as 0-based, the replacement falls one slot to the right and
+ * usually walks off the end of short accumulator lists — the product
+ * never updates and mul_accumulate yields the original zero-seeded
+ * accumulator, collapsing every poly.mul result to poly([]). */
 int64_t list_det_replace_nth(int64_t ti, int64_t list, int64_t n, int64_t x) {
     (void)ti;
     int64_t rev = kk_nil();
-    int64_t i = 0;
+    int64_t i = 1;
     while (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
         int64_t elem = (i == n) ? x : kk_field(list, 0);
         rev = kk_cons(elem, rev);

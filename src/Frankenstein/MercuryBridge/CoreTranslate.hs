@@ -679,6 +679,17 @@ rewriteTypeclassMethod predName' args = case (predName', args) of
   -- conjunction.  The stub replicates rational_norm's logic in C.
   ("rational.from_integers", [a, b])       -> Just ("safe_from_integers", [a, b])
   ("rational.from_integers", [a, b, o])    -> Just ("safe_from_integers", [a, b, o])
+  -- Defensive rational.* — substitutes r(0, 1) for any operand
+  -- with denominator=0 (or that fails the rational tag check), so a
+  -- 0 sentinel propagated from upstream div-by-zero handling doesn't
+  -- cascade into another rational_norm crash.
+  ("rational.*",             [a, b])       -> Just ("safe_rational_mul", [a, b])
+  ("rational.*",             [a, b, o])    -> Just ("safe_rational_mul", [a, b, o])
+  -- @rad_normalize.extract_nth_power(N, M, Extracted, Remainder)@ →
+  -- route to a runtime stub that returns Extracted directly; bridge's
+  -- wrapSecondaries supplies Remainder via the @_remainder@ stub.
+  ("rad_normalize.extract_nth_power", [n, m, ext, rem])
+    -> Just ("extract_nth_power_extracted", [n, m, ext, rem])
   _ -> Nothing
 
 -- | Names that share their bare-form with a known stdlib TYPE but are
@@ -898,6 +909,7 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       -- and the next div_mod gets G=NULL → reciprocal(NULL) crash.
       isDivMod = predName' `elem` ["poly.div_mod", "div_mod"]
       isIntDivWithRem = predName' == "integer.divide_with_rem"
+      isExtractNthPower = predName' == "extract_nth_power_extracted"
       divModRemainderExpr fVar gVar qName tciVar =
         EApp (EVar (Name "poly_sub__3" 0))
           [ EVar (Name tciVar 0)
@@ -916,6 +928,17 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       intDivRemainderExpr nVar pVar =
         EApp (EVar (Name "integer_rem" 0))
           [EVar (Name nVar 0), EVar (Name pVar 0)]
+      -- rad_normalize.extract_nth_power(N, M, Extracted, Remainder):
+      -- surd's body uses list.foldl2 to thread two accumulators, but
+      -- the bridge's HO closure model can't represent 2-output
+      -- closures — the Remainder leaks as integer 0.  Runtime stubs
+      -- @extract_nth_power_extracted__2@ / @_remainder__2@ implement
+      -- the decomposition (trial-division factorization) directly.
+      -- The primary output Extracted comes from the call's result;
+      -- wrapSecondaries supplies Remainder via the remainder stub.
+      extractNthRemainderExpr nVar mVar =
+        EApp (EVar (Name "extract_nth_power_remainder__2" 0))
+          [EVar (Name nVar 0), EVar (Name mVar 0)]
       wrapSecondaries body = foldr
         (\n acc ->
            let defaultExpr
@@ -928,6 +951,11 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
                  | isIntDivWithRem, length args == 4
                  , [nV, pV] <- take 2 args
                  = intDivRemainderExpr nV pV
+                 -- rad_normalize.extract_nth_power(N, M, Ext, Rem): Rem
+                 -- supplied by the dedicated runtime stub.
+                 | isExtractNthPower, length args == 4
+                 , [nV, mV] <- take 2 args
+                 = extractNthRemainderExpr nV mV
                  | otherwise = ELit (LitInt 0)
            in ELet [[Bind (Name n 0) valueTy defaultExpr DefVal]] acc)
         body
@@ -955,25 +983,19 @@ translateGoalK kctors env (GoalDisj goals) k = case goals of
               ]
 
 translateGoalK kctors env (GoalNot goal) k =
-  -- mercury_not(closure) calls closure() and inverts its result
-  -- (r == 0 ? 1 : 0).  The closure body must therefore evaluate the
-  -- inner goal as a TEST (yielding 0/1).  Previously we passed
-  -- @translateGoalK env goal (ELit 0)@ which always yielded 0 —
-  -- so mercury_not always returned 1 and @not(...)@ was a no-op.
-  -- Use translateGoalAsTest so the goal's truth value flows out.
-  --
-  -- The result is currently DISCARDED — short-circuiting via ECase
-  -- caused a regression in elliptic (rational_norm: division by zero
-  -- via factor → find_linear_factor → div_mod with type-confused
-  -- rational coefficients).  Until the bridge tracks det vs semidet
-  -- context — or polynomial coefficient typing is hardened so a
-  -- short-circuited closure can return 0 without nulling downstream
-  -- computations — keep the weaker (no-op) semantics.
-  ELet [[Bind (Name "_" 0) intTy
-           (EApp (EVar (Name "mercury_not" 0))
-                 [ELam [] (translateGoalAsTest kctors env goal)])
-           DefVal]]
-       k
+  -- mercury_not(closure) returns 1 if the inner goal failed (negation
+  -- succeeded) and 0 if it succeeded (negation failed).  Branch on
+  -- the result: continue with @k@ when the negation succeeded, else
+  -- return 0 (the bridge's semidet-failure sentinel).  Needed by
+  -- @make_candidates@'s @not is_zero(D), R = from_integers(N, D)@
+  -- guard and by @rad_normalize.distribute@'s @not L = re_lit(_)@
+  -- guards (without short-circuit, distribute recurses infinitely
+  -- on a deeply-nested expression in example 6's path).
+  ECase (EApp (EVar (Name "mercury_not" 0))
+              [ELam [] (translateGoalAsTest kctors env goal)])
+    [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+    , Branch (PatWild intTy)     Nothing k
+    ]
 
 translateGoalK kctors env (GoalIfThenElse cond then' else') k =
   -- Mercury's if-then-else lets the cond's local bindings flow into

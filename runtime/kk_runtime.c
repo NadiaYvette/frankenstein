@@ -3985,10 +3985,18 @@ int64_t string_zpzp(int64_t s1, int64_t s2) {
 int64_t char_det_from_int(int64_t n) { return n; }
 int64_t char_to_int(int64_t c)        { return c; }
 
+/* Helper: returns 1 if msg_i's bytes contain "division by zero". */
+static int kk_msg_is_div_by_zero(int64_t msg_i) {
+    if (msg_i == 0) return 0;
+    int64_t flat = kk_str_flatten(msg_i);
+    const char *bytes = kk_str_bytes((kk_string_t*)flat);
+    if (bytes == NULL) return 0;
+    return strstr(bytes, "division by zero") != NULL ? 1 : 0;
+}
+
 /* Mercury require.error/1 — fatal error with a message.  Prints the
- * message (a kk_string_t pointer) to stderr with a trailing newline,
- * then exits with status 1.  Used by surd's rational_norm when the
- * denominator is zero. */
+ * message and exits with status 1.  Used by surd's rational_norm
+ * when the denominator is zero. */
 int64_t require_error(int64_t msg_i) {
     kk_print_str(msg_i);
     fputc('\n', stdout);
@@ -3998,11 +4006,18 @@ int64_t require_error(int64_t msg_i) {
 }
 
 /* Mercury require.func_error/3 — fatal error with type info,
- * function-name string, and message.  Surd's rational_norm calls this
- * via the 3-arg form `require.func_error(TypeCtorInfo, FnName, Msg)`;
- * we ignore the type info and print the function name + message. */
+ * function-name string, and message.  Surd's rational_norm /
+ * rational.reciprocal call this via the 3-arg form
+ * `require.func_error(TypeCtorInfo, FnName, Msg)`.  Normally exits
+ * with status 1.  For "division by zero" messages, silently return
+ * 0 (the bridge's semidet-failure sentinel / "no value") so e.g.
+ * monic_poly's reciprocal-of-zero path can survive and produce a
+ * sensible 0 result instead of crashing the whole demo when the
+ * input polynomial has a malformed (NULL) leading coefficient from
+ * upstream multi-output pred handling. */
 int64_t require_func_error(int64_t tci, int64_t fn_i, int64_t msg_i) {
     (void)tci;
+    if (kk_msg_is_div_by_zero(msg_i)) return 0;
     fputs("error: ", stdout);
     if (fn_i != 0) kk_print_str(fn_i);
     fputs(": ", stdout);
@@ -4089,6 +4104,63 @@ int64_t safe_rational_mul__2(int64_t a, int64_t b) {
     int64_t n = (aN / g1) * (bN / g2);
     int64_t d = (aD / g2) * (bD / g1);
     return safe_from_integers__2(n, d);
+}
+
+/* surd's @rad_normalize.extract_nth_power(N, M, Extracted, Remainder)@
+ * decomposes a positive integer M into Extracted^N * Remainder where
+ * Extracted is the largest Nth power dividing M.  Surd's body uses
+ * @list.foldl2@ to thread two accumulators through the prime
+ * factorization, but the bridge's HO closure model can't bind both
+ * outputs cleanly — only one accumulator survives, the other surfaces
+ * as a default 0, type-confusion cascades into @rational_norm@ deep
+ * in extract_root_lit.  Implement the decomposition directly in C
+ * (trial-division factorization, accumulate P^(E//N) into Extracted
+ * and P^(E%N) into Remainder).  Returns the @Extracted@ rational;
+ * the bridge supplies @Remainder@ via a separate
+ * @extract_nth_power_remainder@ call (wrapSecondaries).
+ *
+ * Inputs are i64 (the bridge's integer model); outputs are
+ * heap-allocated rationals with the standard "r" tag. */
+static int64_t kk_i64_pow(int64_t base, int64_t exp) {
+    int64_t r = 1;
+    while (exp-- > 0) r *= base;
+    return r;
+}
+
+static void kk_extract_nth_factor(int64_t n, int64_t m,
+                                   int64_t *ext, int64_t *rem) {
+    /* M = product over primes p of p^E.
+     * Extracted *= p^(E/N), Remainder *= p^(E%N). */
+    int64_t extracted = 1, remainder = 1;
+    if (m <= 1) { *ext = 1; *rem = 1; return; }
+    int64_t p = 2;
+    while (p * p <= m) {
+        int64_t e = 0;
+        while (m % p == 0) { m /= p; e++; }
+        if (e > 0) {
+            extracted *= kk_i64_pow(p, e / n);
+            remainder *= kk_i64_pow(p, e % n);
+        }
+        p = (p == 2) ? 3 : p + 2;
+    }
+    if (m > 1) {
+        /* m itself is a prime factor with exponent 1. */
+        remainder *= m;  /* e=1, e/N=0, e%N=1 (assuming N>=1) */
+    }
+    *ext = extracted;
+    *rem = remainder;
+}
+
+int64_t extract_nth_power_extracted__2(int64_t n, int64_t m) {
+    int64_t ext, rem;
+    kk_extract_nth_factor(n, kk_i64_abs(m), &ext, &rem);
+    return safe_from_integers__2(ext, 1);
+}
+
+int64_t extract_nth_power_remainder__2(int64_t n, int64_t m) {
+    int64_t ext, rem;
+    kk_extract_nth_factor(n, kk_i64_abs(m), &ext, &rem);
+    return safe_from_integers__2(rem, 1);
 }
 
 /* Mercury io.format/4 — after the bridge's output-arg-drop, the call

@@ -1161,24 +1161,62 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       -- index in poly.m's instance declaration order).  poly.div_mod is
       -- a det multi-output pred so the bridge's call convention returns
       -- a @tuple(Q, R)@ — extract field 0 (Q) via a tuple deconstruct.
+      --
+      -- Bind intermediates via ELets so each value has a unique name
+      -- and Perceus' retain/drop pass sees a clean dataflow.  The
+      -- @ECase tupleResult@ form (without an enclosing let-bind on
+      -- the tuple) emitted a kk_field on an unnamed scrutinee that
+      -- collided with the Perceus drop of an earlier subexpression in
+      -- factor_sf_loop's body, producing the empty-poly that
+      -- factor_sf_loop's recursion then propagated as garbage.
       findLinQuotExpr pVar rootVar =
-        let negRoot = EApp (EVar (Name "rational.-__1" 0)) [EVar (Name rootVar 0)]
-            ringTci = EApp (EVar (Name "typeclass_info_const__1" 0)) [ELit (LitInt 0)]
-            fieldTci = EApp (EVar (Name "typeclass_info_const__1" 0)) [ELit (LitInt 1)]
-            one      = EApp (EVar (Name "rational.one__0" 0)) []
-            nilCell  = EApp (EVar (Name "list_Nil" 0)) []
-            consOne  = EApp (EVar (Name "list_Cons" 0)) [one, nilCell]
-            consNeg  = EApp (EVar (Name "list_Cons" 0)) [negRoot, consOne]
-            linPoly  = EApp (EVar (Name "poly.mk_poly__2" 0)) [ringTci, consNeg]
-            tupleResult = EApp (EVar (Name "poly.div_mod__3" 0))
-                              [fieldTci, EVar (Name pVar 0), linPoly]
-        in ECase tupleResult
-             [ Branch (PatCon (QName "" (Name "tuple" 0))
-                        [ PatVar (Name "_div_mod_q" 0) anyTy
-                        , PatVar (Name "_div_mod_r" 0) anyTy
-                        ])
-                      Nothing (EVar (Name "_div_mod_q" 0))
-             ]
+        let nLet n e body = ELet [[Bind (Name n 0) valueTy e DefVal]] body
+            -- Build the cons cells via ECon (constructor allocation)
+            -- rather than EApp on the @list_Cons@ name.  The latter
+            -- emits a function call that resolves to a 0-returning
+            -- goal-text-leak stub (list_Cons/list_Nil are NOT runtime
+            -- functions in the bridge — they're CTOR names handled
+            -- via parseListLiteral → GoalConstruct → ECon).  Without
+            -- this, my LinPoly became an empty poly (all cells = 0),
+            -- div_mod then took the @degree(F) < degree(empty=−1)@
+            -- branch wrongly... actually no, degree comparison happens
+            -- normally; but div_mod_loop on an empty divisor returned
+            -- (zero_poly, F) and factor_sf_loop's recursion saw the
+            -- zero_poly Quotient → empty tail in the factor list.
+            consC h t =
+              EApp (ECon (QName "" (Name "list_Cons" 0))) [h, t]
+            nilC =
+              EApp (ECon (QName "" (Name "list_Nil" 0))) []
+        in
+          nLet "_fl_neg_root"
+            (EApp (EVar (Name "rational.-__1" 0)) [EVar (Name rootVar 0)]) $
+          nLet "_fl_ring_tci"
+            (EApp (EVar (Name "typeclass_info_const__1" 0)) [ELit (LitInt 0)]) $
+          nLet "_fl_field_tci"
+            (EApp (EVar (Name "typeclass_info_const__1" 0)) [ELit (LitInt 1)]) $
+          nLet "_fl_one"
+            (EApp (EVar (Name "rational.one__0" 0)) []) $
+          nLet "_fl_nil" nilC $
+          nLet "_fl_cons1"
+            (consC (EVar (Name "_fl_one" 0)) (EVar (Name "_fl_nil" 0))) $
+          nLet "_fl_cons2"
+            (consC (EVar (Name "_fl_neg_root" 0)) (EVar (Name "_fl_cons1" 0))) $
+          nLet "_fl_lin_poly"
+            (EApp (EVar (Name "poly.mk_poly__2" 0))
+              [EVar (Name "_fl_ring_tci" 0), EVar (Name "_fl_cons2" 0)]) $
+          nLet "_fl_dm_tuple"
+            (EApp (EVar (Name "poly.div_mod__3" 0))
+              [ EVar (Name "_fl_field_tci" 0)
+              , EVar (Name pVar 0)
+              , EVar (Name "_fl_lin_poly" 0)
+              ]) $
+          ECase (EVar (Name "_fl_dm_tuple" 0))
+            [ Branch (PatCon (QName "" (Name "tuple" 0))
+                       [ PatVar (Name "_fl_dm_q" 0) anyTy
+                       , PatVar (Name "_fl_dm_r" 0) anyTy
+                       ])
+                     Nothing (EVar (Name "_fl_dm_q" 0))
+            ]
       wrapSecondaries body = foldr
         (\n acc ->
            let defaultExpr

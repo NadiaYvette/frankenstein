@@ -3237,7 +3237,11 @@ static int64_t kk_pair_fst(int64_t p) { return kk_field(p, 0); }
 static int64_t kk_pair_snd(int64_t p) { return kk_field(p, 1); }
 
 /* map.init(M) — bind M to the empty map. */
-int64_t map_init(int64_t tinfo)            { (void)tinfo; return kk_nil(); }
+/* map.init — Mercury passes 2 TCIs (for K and V types).  Both ignored. */
+int64_t map_init(int64_t tinfo_k, int64_t tinfo_v) {
+    (void)tinfo_k; (void)tinfo_v;
+    return kk_nil();
+}
 
 /* map.search(M, K, V) — semidet: V := value associated with K in M;
  * fails (returns 0) if missing.  In the i64 model we return the
@@ -3253,10 +3257,10 @@ int64_t map_search(int64_t tinfo, int64_t m, int64_t k) {
     return 0;
 }
 
-/* map.lookup(M, K, V) — det: same as search but expects K to be present.
- * We fall through to a 0 sentinel if missing rather than aborting. */
-int64_t map_lookup(int64_t tinfo, int64_t m, int64_t k) {
-    return map_search(tinfo, m, k);
+/* map.lookup(M, K) = V — det.  Mercury passes 2 TCIs (K, V types). */
+int64_t map_lookup(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k) {
+    (void)tinfo_v;
+    return map_search(tinfo_k, m, k);
 }
 
 /* map.contains(M, K) — semidet. */
@@ -3278,11 +3282,12 @@ int64_t map_count(int64_t tinfo, int64_t m) {
     return n;
 }
 
-/* map.set(M, K, V, M') — det: insert (or update if K already present)
- * and return the new map.  Walks once; if K is found we replace its
- * pair, otherwise prepend a fresh pair at the head. */
-int64_t map_set(int64_t tinfo, int64_t m, int64_t k, int64_t v) {
-    (void)tinfo;
+/* map.set(M, K, V) = M' — det.  Mercury passes 2 TCIs (K, V types).
+ * Insert (or update if K already present) and return the new map.  Walks
+ * once; if K is found we replace its pair, otherwise prepend a fresh
+ * pair at the head. */
+int64_t map_set(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t v) {
+    (void)tinfo_k; (void)tinfo_v;
     /* Build a new map by walking M, replacing the matching pair if any. */
     int64_t* keys = NULL;
     int64_t* vals = NULL;
@@ -3316,12 +3321,13 @@ int64_t map_set(int64_t tinfo, int64_t m, int64_t k, int64_t v) {
 
 /* map.det_insert(M, K, V) and map.det_update(M, K, V) both alias to set
  * in our stub.  Real Mercury aborts on key-already-present /
- * key-not-found, but stub behaviour is to silently insert/update. */
-int64_t map_det_insert(int64_t tinfo, int64_t m, int64_t k, int64_t v) {
-    return map_set(tinfo, m, k, v);
+ * key-not-found, but stub behaviour is to silently insert/update.
+ * Mercury passes 2 TCIs (K, V types). */
+int64_t map_det_insert(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t v) {
+    return map_set(tinfo_k, tinfo_v, m, k, v);
 }
-int64_t map_det_update(int64_t tinfo, int64_t m, int64_t k, int64_t v) {
-    return map_set(tinfo, m, k, v);
+int64_t map_det_update(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t v) {
+    return map_set(tinfo_k, tinfo_v, m, k, v);
 }
 
 /* map.delete(M, K, M') — det: remove K from M if present. */
@@ -3584,9 +3590,8 @@ int64_t map_overlay(int64_t tinfo_k, int64_t tinfo_v, int64_t m1, int64_t m2) {
     int64_t cur = m2;
     while (!kk_is_nil(cur)) {
         int64_t p = kk_field(cur, 0);
-        m = map_set(tinfo_k, m, kk_pair_fst(p), kk_pair_snd(p));
+        m = map_set(tinfo_k, tinfo_v, m, kk_pair_fst(p), kk_pair_snd(p));
         cur = kk_field(cur, 1);
-        (void)tinfo_v;
     }
     return m;
 }

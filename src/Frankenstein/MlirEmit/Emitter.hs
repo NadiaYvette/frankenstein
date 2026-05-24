@@ -1111,14 +1111,14 @@ emitProgramText prog =
     , "  func.func private @io_command_line_arguments(i64, i64) -> i64"
     , "  func.func private @pair_zm(i64, i64) -> i64"
     , "  func.func private @typeclass_info_const__1(i64) -> i64"
-    , "  func.func private @map_init(i64) -> i64"
+    , "  func.func private @map_init(i64, i64) -> i64"
     , "  func.func private @map_search(i64, i64, i64) -> i64"
-    , "  func.func private @map_lookup(i64, i64, i64) -> i64"
+    , "  func.func private @map_lookup(i64, i64, i64, i64) -> i64"
     , "  func.func private @map_contains(i64, i64, i64) -> i64"
     , "  func.func private @map_count(i64, i64) -> i64"
-    , "  func.func private @map_set(i64, i64, i64, i64) -> i64"
-    , "  func.func private @map_det_insert(i64, i64, i64, i64) -> i64"
-    , "  func.func private @map_det_update(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_set(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_insert(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_update(i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @map_delete(i64, i64, i64) -> i64"
     , "  func.func private @map_from_assoc_list(i64, i64) -> i64"
     , "  func.func private @map_values(i64, i64) -> i64"
@@ -1738,14 +1738,14 @@ emitProgramWasm prog =
     , "  func.func private @io_command_line_arguments(i64, i64) -> i64"
     , "  func.func private @pair_zm(i64, i64) -> i64"
     , "  func.func private @typeclass_info_const__1(i64) -> i64"
-    , "  func.func private @map_init(i64) -> i64"
+    , "  func.func private @map_init(i64, i64) -> i64"
     , "  func.func private @map_search(i64, i64, i64) -> i64"
-    , "  func.func private @map_lookup(i64, i64, i64) -> i64"
+    , "  func.func private @map_lookup(i64, i64, i64, i64) -> i64"
     , "  func.func private @map_contains(i64, i64, i64) -> i64"
     , "  func.func private @map_count(i64, i64) -> i64"
-    , "  func.func private @map_set(i64, i64, i64, i64) -> i64"
-    , "  func.func private @map_det_insert(i64, i64, i64, i64) -> i64"
-    , "  func.func private @map_det_update(i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_set(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_insert(i64, i64, i64, i64, i64) -> i64"
+    , "  func.func private @map_det_update(i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @map_delete(i64, i64, i64) -> i64"
     , "  func.func private @map_from_assoc_list(i64, i64) -> i64"
     , "  func.func private @map_values(i64, i64) -> i64"
@@ -4847,9 +4847,9 @@ externalRuntimeArity = Map.fromList
   , ("type_info_cell_constructor__5", 5)
   , ("io_command_line_arguments", 2), ("pair_zm", 2)
   , ("typeclass_info_const__1", 1)
-  , ("map_init", 1), ("map_search", 3), ("map_lookup", 3)
+  , ("map_init", 2), ("map_search", 3), ("map_lookup", 4)
   , ("map_contains", 3), ("map_count", 2)
-  , ("map_set", 4), ("map_det_insert", 4), ("map_det_update", 4)
+  , ("map_set", 5), ("map_det_insert", 5), ("map_det_update", 5)
   , ("map_delete", 3), ("map_from_assoc_list", 2)
   , ("map_values", 2), ("map_keys", 2)
   , ("map_foldl", 6)

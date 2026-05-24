@@ -534,8 +534,19 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
   -- semidet predicates in a cond position the call's result IS the
   -- test, so terminate the CPS with the bound name (or @1@ when all
   -- args are already bound).
+  --
+  -- For multi-output semidet preds (e.g. @find_linear_factor(P, Root,
+  -- Quotient)@), translateGoalK binds the call result to the FIRST
+  -- trailing-unbound arg (Root); the SECONDARIES (Quotient) default to
+  -- literal 0 via wrapSecondaries.  Using @last args@ as the test
+  -- scrutinee therefore inspected a defaulted-to-0 secondary and the
+  -- test always reported failure, so @factor_sf_loop@'s
+  -- @if find_linear_factor(...) then ... else ...@ always took the
+  -- else branch and the polynomial appeared irreducible.
   | not (null args)
-  , let outName = last args
+  , let outName = case firstTrailingUnboundArg of
+          Just n  -> n
+          Nothing -> last args
   , not (Set.member outName env)
   , isJustVar outName =
       -- Semidet pred in test position with an unbound output.  The HLDS
@@ -612,6 +623,19 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
       _ -> False
     isNothing Nothing = True
     isNothing _       = False
+    -- Mirror translateGoalK's trailing-unbound heuristic: the call's
+    -- primary output is the FIRST trailing arg that's neither in env
+    -- nor a literal.  Returns @Just name@ when there's at least one
+    -- such trailing arg, @Nothing@ when all args are bound.
+    isLitArgT t = isJust (readMaybe (T.unpack t) :: Maybe Integer)
+               || isJust (parseMercuryStringLit t)
+               || isJust (parseMercuryCharLit t)
+               || isJust (parseMercuryFloatLit t)
+    isBoundT t = Set.member t env || isLitArgT t
+    firstTrailingUnboundArg =
+      case reverse (takeWhile (not . isBoundT) (reverse args)) of
+        (n:_) -> Just n
+        []    -> Nothing
 translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
   []  -> ELit (LitInt 1)
   [g] -> translateGoalAsTest knownCtors env g
@@ -678,11 +702,30 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
                         ("SEMIDET:" <> predName' <> "__"
                                     <> T.pack (show (length callArgs)))
                         knownCtors ->
-                     translateGoalK knownCtors e g
-                       (ECase (EVar (Name "_" 0))
-                         [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
-                         , Branch (PatWild anyTy)     Nothing acc
-                         ])
+                     -- The 0/1 result lives wherever translateGoalK GoalCall
+                     -- binds the call's value.  For preds with no output args
+                     -- that's "_"; for semidet preds WITH output args (like
+                     -- @find_linear_factor/3@: P in, Root + Quotient out) the
+                     -- result is bound to the FIRST trailing-unbound arg
+                     -- (Root), and "_" is unbound.  Compute the same primary
+                     -- output name here so the test inspects the call's
+                     -- actual success/fail value, not a defaulted-to-0
+                     -- secondary that always reads as failure.
+                     let isLitArg t = isJust (readMaybe (T.unpack t) :: Maybe Integer)
+                                   || isJust (parseMercuryStringLit t)
+                                   || isJust (parseMercuryCharLit t)
+                                   || isJust (parseMercuryFloatLit t)
+                         isBound t = Set.member t e || isLitArg t
+                         trailingUnbound =
+                           reverse (takeWhile (not . isBound) (reverse callArgs))
+                         testVarName = case trailingUnbound of
+                           (n:_) -> n
+                           []    -> "_"
+                     in translateGoalK knownCtors e g
+                          (ECase (EVar (Name testVarName 0))
+                            [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+                            , Branch (PatWild anyTy)     Nothing acc
+                            ])
                _ -> translateGoalK knownCtors e g acc
          in foldr threadGoal innerExpr initPairs
 translateGoalAsTest knownCtors env (GoalIfThenElse cond then' else') =

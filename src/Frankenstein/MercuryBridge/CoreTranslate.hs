@@ -1258,9 +1258,16 @@ translateGoalK kctors env (GoalConstruct var ctor args) k
                 ]
             | otherwise = [baseBranch]
       in ECase (EVar (Name var 0)) branches
-  | Set.member ctor kctors || Set.member bareCtor kctors
+  | (Set.member ctor kctors
+      || (not (T.isInfixOf "." ctor) && Set.member bareCtor kctors))
   , not (isKnownStdlibFunction ctor) =
       -- Real ctor allocation.  ECon name is bare (the data-decl form).
+      -- Falling back to @bareCtor@ only when @ctor@ is unqualified
+      -- prevents misidentification of e.g. @rad_dag.r/2@ (a function in
+      -- rad_dag.m) as @rational.r/2@ (the rational constructor).  Both
+      -- share the bare name "r"; before this guard the bridge would
+      -- allocate a rational.r-tagged cell and stuff RM and A into its
+      -- fields, corrupting downstream dag operations on the result.
       -- The @isKnownStdlibFunction@ guard rejects names like
       -- @integer.integer@ that have the same bare name as a type
       -- ctor (@integer@) but are actually FUNCTIONS in the stdlib

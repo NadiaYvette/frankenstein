@@ -3246,12 +3246,18 @@ int64_t map_init(int64_t tinfo_k, int64_t tinfo_v) {
 /* map.search(M, K, V) — semidet: V := value associated with K in M;
  * fails (returns 0) if missing.  Mercury threads two type-infos
  * (one per type parameter of map(K, V)), so the runtime signature
- * is (TI_K, TI_V, M, K) → V. */
+ * is (TI_K, TI_V, M, K) → V.  The returned value is RETAINED so the
+ * caller owns it independently of M (which is typically dropped
+ * after this returns). */
 int64_t map_search(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k) {
     (void)tinfo_k; (void)tinfo_v;
     while (!kk_is_nil(m)) {
         int64_t p = kk_field(m, 0);
-        if (kk_structural_eq(kk_pair_fst(p), k)) return kk_pair_snd(p);
+        if (kk_structural_eq(kk_pair_fst(p), k)) {
+            int64_t v = kk_pair_snd(p);
+            kk_retain(v);
+            return v;
+        }
         m = kk_field(m, 1);
     }
     return 0;
@@ -3288,7 +3294,11 @@ int64_t map_count(int64_t tinfo_k, int64_t tinfo_v, int64_t m) {
  * pair at the head. */
 int64_t map_set(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t v) {
     (void)tinfo_k; (void)tinfo_v;
-    /* Build a new map by walking M, replacing the matching pair if any. */
+    /* Build a new map by walking M, replacing the matching pair if any.
+     * Retain each surviving key/value before putting it in the new map:
+     * the input map M is dropped by the caller after this returns, and
+     * its drop cascades through cons → pair → (key, value), so without
+     * retain the new map's references would be freed underneath. */
     int64_t* keys = NULL;
     int64_t* vals = NULL;
     int64_t cap = 0, n = 0;
@@ -3304,9 +3314,12 @@ int64_t map_set(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t 
             vals = (int64_t*)realloc(vals, (size_t)cap * sizeof(int64_t));
         }
         if (!replaced && kk_structural_eq(pk, k)) {
+            kk_retain(pk);
             keys[n] = pk; vals[n] = v;
             replaced = 1;
         } else {
+            kk_retain(pk);
+            kk_retain(pv);
             keys[n] = pk; vals[n] = pv;
         }
         n++;
@@ -3416,7 +3429,14 @@ int64_t map_foldl(int64_t tinfo_k, int64_t tinfo_v, int64_t tinfo_a,
         int64_t p = kk_field(m, 0);
         int64_t k = kk_pair_fst(p);
         int64_t v = kk_pair_snd(p);
-        /* call_closure_3 dispatches a 3-arg closure. */
+        /* Retain k, v, and f: closure consumes them via Perceus drops.
+         * Without retains, M's pair still references k/v while the
+         * closure simultaneously drops them, taking refcount to 0 and
+         * wiping the values out of subsequent iterations' lookups
+         * (observed in surd's dag_fold_constants foldl over Nodes). */
+        kk_retain(k);
+        kk_retain(v);
+        kk_retain(f);
         acc0 = kk_call_closure_3(f, k, v, acc0);
         m = kk_field(m, 1);
     }

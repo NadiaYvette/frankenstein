@@ -4333,10 +4333,21 @@ int64_t io_format(int64_t fmt_i, int64_t args_list, int64_t io_state) {
     for (int64_t i = 0; i < n; i++) {
         char c = buf[i];
         if (c == '%' && i + 1 < n) {
-            char spec = buf[i + 1];
+            /* Parse extended spec: %[flags][width][.precision]<conv>.
+             * Handles Mercury's @io.format("%.10f", ...)@ style. */
+            int64_t j = i + 1;
+            while (j < n && (buf[j] == '-' || buf[j] == '+' || buf[j] == ' '
+                          || buf[j] == '#' || buf[j] == '0')) j++;
+            while (j < n && buf[j] >= '0' && buf[j] <= '9') j++;
+            if (j < n && buf[j] == '.') {
+                j++;
+                while (j < n && buf[j] >= '0' && buf[j] <= '9') j++;
+            }
+            if (j >= n) { putchar(c); continue; }
+            char spec = buf[j];
             if (spec == '%') {
                 putchar('%');
-                i++;
+                i = j;
                 continue;
             }
             /* Pop next element from the list (cons cell, 2 fields). */
@@ -4348,30 +4359,54 @@ int64_t io_format(int64_t fmt_i, int64_t args_list, int64_t io_state) {
                 int64_t val =
                     (kk_is_heap_ptr(head) && kk_nfields(head) >= 1)
                     ? kk_field(head, 0) : head;
-                switch (spec) {
-                  case 's':
-                    if (val != 0) kk_print_str(val);
-                    break;
-                  case 'd':
-                  case 'i':
-                    printf("%lld", (long long)val);
-                    break;
-                  case 'f': {
-                    double d;
-                    memcpy(&d, &val, 8);
-                    printf("%f", d);
-                    break;
-                  }
-                  case 'c':
-                    putchar((int)val);
-                    break;
-                  default:
-                    putchar('%');
-                    putchar(spec);
-                    break;
+                /* Build the substitution format string [i..j] inclusive,
+                 * then dispatch via printf for proper width/precision. */
+                int64_t spec_len = j - i + 1;
+                char fmt_buf[32];
+                if (spec_len < (int64_t)sizeof(fmt_buf)) {
+                    memcpy(fmt_buf, buf + i, (size_t)spec_len);
+                    fmt_buf[spec_len] = '\0';
+                    switch (spec) {
+                      case 's':
+                        /* %s with width/precision: kk_print_str doesn't
+                         * support them; print raw if val nonzero. */
+                        if (val != 0) kk_print_str(val);
+                        break;
+                      case 'd':
+                      case 'i': {
+                        /* Replace %d/%i with %lld for int64_t. */
+                        char alt[34];
+                        memcpy(alt, fmt_buf, (size_t)spec_len - 1);
+                        alt[spec_len - 1] = 'l';
+                        alt[spec_len]     = 'l';
+                        alt[spec_len + 1] = spec;
+                        alt[spec_len + 2] = '\0';
+                        printf(alt, (long long)val);
+                        break;
+                      }
+                      case 'f':
+                      case 'e':
+                      case 'g':
+                      case 'E':
+                      case 'G': {
+                        double d;
+                        memcpy(&d, &val, 8);
+                        printf(fmt_buf, d);
+                        break;
+                      }
+                      case 'c':
+                        printf(fmt_buf, (int)val);
+                        break;
+                      default:
+                        fwrite(fmt_buf, 1, (size_t)spec_len, stdout);
+                        break;
+                    }
+                } else {
+                    /* Fallback: write the raw spec text. */
+                    fwrite(buf + i, 1, (size_t)spec_len, stdout);
                 }
                 cur_args = tail;
-                i++;  /* skip spec char */
+                i = j;
             } else {
                 putchar(c);
             }

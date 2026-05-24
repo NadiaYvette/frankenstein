@@ -1295,7 +1295,21 @@ extendBindingsFor env g = case g of
     Set.insert var (foldr Set.insert env args)
   GoalDeconstruct var _ args ->
     Set.insert var (foldr Set.insert env args)
-  GoalSwitch var _ -> Set.insert var env
+  GoalSwitch var cases ->
+    -- Bind the scrutinee + intersect bindings made by every arm.  A
+    -- switch on @DiscSq@ whose two arms both call
+    -- @io.write_string(_, STATE_VARIABLE_IO_40, STATE_VARIABLE_IO_45)@
+    -- definitely binds @STATE_VARIABLE_IO_45@ after the switch; without
+    -- propagating that, a downstream @io.format(..., IO_45, ...)@ sees
+    -- IO_45 as "unbound" and the call drops it from callInputs,
+    -- shifting the output binding onto IO_45 and losing the actual
+    -- output.  Same intersect-across-arms semantics as @GoalDisj@.
+    let envSc = Set.insert var env
+    in case filter (not . goalAlwaysAborts . snd) cases of
+         []  -> envSc
+         ((_, c0):cs') ->
+           foldl (\acc (_, c) -> Set.intersection acc (extendBindingsFor envSc c))
+                 (extendBindingsFor envSc c0) cs'
   GoalCall _ args  -> foldr Set.insert env args
   GoalConj gs      -> foldl extendBindingsFor env gs
   GoalLambda var _ _ _ -> Set.insert var env

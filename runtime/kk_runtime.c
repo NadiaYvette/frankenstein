@@ -3649,6 +3649,10 @@ int64_t map_foldl2(int64_t tinfo_k, int64_t tinfo_v, int64_t tinfo_a, int64_t ti
 int64_t list_foldl2_impl(int64_t f, int64_t xs, int64_t a, int64_t b) {
     while (!kk_is_nil(xs)) {
         int64_t h = kk_field(xs, 0);
+        /* See kk_list_foldl for the retain rationale: the closure
+         * receives h as owned and may drop it, but the cons cell still
+         * references h via field 0. */
+        kk_retain(h);
         a = kk_call_closure_2(f, h, a);
         xs = kk_field(xs, 1);
     }
@@ -4789,6 +4793,11 @@ static int64_t kk_list_reverse(int64_t xs) {
     int64_t r = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        /* The new cons cell stores h, and the input list's cons cell
+         * still references h via field 0.  When the input list is
+         * later dropped, h is dropped too; without retain the
+         * returned reversed list would alias a freed cell. */
+        kk_retain(h);
         r = kk_cons(h, r);
         xs = kk_field(xs, 1);
     }
@@ -4800,6 +4809,8 @@ int64_t kk_list_map(int64_t xs, int64_t f) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        /* See kk_list_foldl. */
+        kk_retain(h);
         int64_t mapped = kk_call_closure_1(f, h);
         acc = kk_cons(mapped, acc);
         xs = kk_field(xs, 1);
@@ -4812,7 +4823,13 @@ int64_t kk_list_filter(int64_t xs, int64_t p) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        /* Retain once for the predicate's owned arg. */
+        kk_retain(h);
         if (kk_call_closure_1(p, h)) {
+            /* And once more for storing into the output cons cell —
+             * h is now referenced by both the input list and the new
+             * acc cons. */
+            kk_retain(h);
             acc = kk_cons(h, acc);
         }
         xs = kk_field(xs, 1);
@@ -4853,6 +4870,7 @@ int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f) {
 int64_t kk_list_all(int64_t xs, int64_t p) {
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* See kk_list_foldl. */
         if (!kk_call_closure_1(p, h)) return 0;
         xs = kk_field(xs, 1);
     }
@@ -4863,6 +4881,7 @@ int64_t kk_list_all(int64_t xs, int64_t p) {
 int64_t kk_list_any(int64_t xs, int64_t p) {
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* See kk_list_foldl. */
         if (kk_call_closure_1(p, h)) return 1;
         xs = kk_field(xs, 1);
     }
@@ -4884,6 +4903,8 @@ int64_t kk_list_take(int64_t xs, int64_t n) {
     int64_t acc = kk_nil();
     while (n > 0 && kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* h is stored in the new cons cell; the input
+                        * list still references it. */
         acc = kk_cons(h, acc);
         xs = kk_field(xs, 1);
         n--;
@@ -4907,6 +4928,8 @@ int64_t kk_list_concat(int64_t xs, int64_t ys) {
     int64_t rev = kk_list_reverse(xs);
     while (kk_is_heap_ptr(rev) && kk_tag(rev) == KK_CONS_TAG) {
         int64_t h = kk_field(rev, 0);
+        kk_retain(h);  /* h is stored in the new cons; rev's cons cell
+                        * still references it. */
         acc = kk_cons(h, acc);
         rev = kk_field(rev, 1);
     }
@@ -4919,10 +4942,13 @@ int64_t kk_list_flatmap(int64_t xs, int64_t f) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* See kk_list_foldl. */
         int64_t sub = kk_call_closure_1(f, h);
         /* Append `sub` to acc. */
         while (kk_is_heap_ptr(sub) && kk_tag(sub) == KK_CONS_TAG) {
             int64_t sh = kk_field(sub, 0);
+            kk_retain(sh);  /* sh is stored in acc; sub's cons cell
+                             * still references it. */
             acc = kk_cons(sh, acc);
             sub = kk_field(sub, 1);
         }
@@ -4937,13 +4963,17 @@ int64_t kk_list_filter_map(int64_t xs, int64_t f) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* See kk_list_foldl. */
         int64_t r = kk_call_closure_1(f, h);
         /* Just(v) cells carry KK_JUST_TAG with the payload at field 0;
          * Nothing cells carry KK_NOTHING_TAG and no payload.  Both tags
          * match the djb2-hash assignment Frankenstein puts on the
          * generated `Just`/`Nothing` constructors. */
         if (kk_is_heap_ptr(r) && kk_tag(r) == KK_JUST_TAG) {
-            acc = kk_cons(kk_field(r, 0), acc);
+            int64_t inner = kk_field(r, 0);
+            kk_retain(inner);  /* inner is stored in acc; r's Just cell
+                                * still references it. */
+            acc = kk_cons(inner, acc);
         }
         xs = kk_field(xs, 1);
     }
@@ -4966,7 +4996,10 @@ int64_t kk_range_list(int64_t lo, int64_t hi) {
  * only call this on Just values). */
 int64_t kk_unjust(int64_t maybe_v) {
     if (kk_is_heap_ptr(maybe_v) && kk_nfields(maybe_v) >= 1) {
-        return kk_field(maybe_v, 0);
+        int64_t v = kk_field(maybe_v, 0);
+        kk_retain(v);  /* v escapes as the return value; the Just
+                        * cell still references it. */
+        return v;
     }
     return 0;
 }
@@ -4980,6 +5013,8 @@ int64_t kk_maybe_head(int64_t xs) {
          * The tag we use here matches Cons since our maybe
          * encoding piggy-backs on Cons / Nil. */
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* h is stored in the returned cell AND
+                        * remains referenced by xs's cons cell. */
         return kk_cons(h, kk_nil());
     }
     /* Nothing → nil */
@@ -4994,6 +5029,10 @@ int64_t kk_list_zip(int64_t xs, int64_t ys) {
         && kk_is_heap_ptr(ys) && kk_tag(ys) == KK_CONS_TAG) {
         int64_t x = kk_field(xs, 0);
         int64_t y = kk_field(ys, 0);
+        /* Retain x, y: each is stored in the new pair AND remains
+         * referenced by its source cons cell. */
+        kk_retain(x);
+        kk_retain(y);
         /* Build Tuple2(x, y) using KK_CONS_TAG (Koka represents
          * Tuple2 as a 2-field cell; tag value doesn't matter for
          * field access). */
@@ -5013,6 +5052,7 @@ int64_t kk_list_map_indexed(int64_t xs, int64_t f) {
     int64_t i = 0;
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* See kk_list_foldl. */
         int64_t mapped = kk_call_closure_2(f, i, h);
         acc = kk_cons(mapped, acc);
         xs = kk_field(xs, 1);
@@ -5061,6 +5101,7 @@ int64_t kk_throw(int64_t msg) {
 int64_t kk_list_foreach(int64_t xs, int64_t f) {
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        kk_retain(h);  /* See kk_list_foldl. */
         (void)kk_call_closure_1(f, h);
         xs = kk_field(xs, 1);
     }

@@ -1293,12 +1293,21 @@ translateGoalK kctors env (GoalLambda lhs params mOut body) k =
       -- defaulting the output to 0 so error-path branches still
       -- satisfy the terminator's reference (same trick as
       -- translatePred uses for whole-pred bodies).
+      --
+      -- For pred-form lambdas with no output (semidet test or det
+      -- procedure), use 'translateGoalAsTest' so the body's semidet
+      -- semantics propagate — without this, a filter pred like
+      -- @(pred(R::in) is semidet :- float.abs(im(R)) < 1e-6)@
+      -- translates to @translateGoalK body (ELit 1)@, ignoring the
+      -- @float.<@ result and always returning 1.  Det pred bodies
+      -- always succeed in Mercury, so test-mode translation safely
+      -- returns 1 for them too.
       bodyExpr = case mOut of
         Just o  ->
           ELet [[Bind (Name o 0) anyTy (ELit (LitInt 0)) DefVal]]
                (translateGoalK kctors bodyInitialEnv body bodyTerminator)
         Nothing ->
-          translateGoalK kctors bodyInitialEnv body bodyTerminator
+          translateGoalAsTest kctors bodyInitialEnv body
       lamParams = [(Name p 0, anyTy) | p <- params]
       lamExpr   = ELam lamParams bodyExpr
   in ELet [[Bind (Name lhs 0) anyTy lamExpr DefVal]] k

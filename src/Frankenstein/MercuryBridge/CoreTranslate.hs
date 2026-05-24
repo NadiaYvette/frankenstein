@@ -516,10 +516,34 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
       -- branch (surd's @det_lead_coeff@ then aborted, or worse, the
       -- caller's then-branch re-ran with a stale/wrong output).  Map any
       -- non-zero output to 1 via an ECase so the success path matches.
-      let testExpr = ECase (EVar (Name outName 0))
-            [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
-            , Branch (PatWild anyTy)     Nothing (ELit (LitInt 1))
-            ]
+      --
+      -- For multi-output calls (tuple convention), the "last output
+      -- non-zero" heuristic is wrong: translateGoalK destructures the
+      -- tuple and the PatWild branch already yields 0 on failure
+      -- (tuple-vs-sentinel-0).  In a DET multi-output sub-call inside
+      -- a semidet body — e.g. @div_mod(P, LinPoly, Q, _)@ in
+      -- @find_linear_factor@ — the discarded @_@ (remainder) is 0 for
+      -- clean division, so the old heuristic wrongly yielded 0 and
+      -- collapsed the semidet success path.  Use ELit 1 as the test
+      -- continuation; the destructure success/failure is the test.
+      let isLitArg t = isJust (readMaybe (T.unpack t) :: Maybe Integer)
+                    || isJust (parseMercuryStringLit t)
+                    || isJust (parseMercuryCharLit t)
+                    || isJust (parseMercuryFloatLit t)
+          isBoundT t = Set.member t env || isLitArg t
+          (revUnbound, _) = span (not . isBoundT) (reverse args)
+          trailingUnbound = reverse revUnbound
+          callInputsLen = length args - length trailingUnbound
+          multiOutMarker = "MULTIOUT:" <> predName' <> "__"
+                                       <> T.pack (show callInputsLen)
+          usesTupleConv = Set.member multiOutMarker knownCtors
+                       && length trailingUnbound >= 2
+          testExpr
+            | usesTupleConv = ELit (LitInt 1)
+            | otherwise = ECase (EVar (Name outName 0))
+                [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+                , Branch (PatWild anyTy)     Nothing (ELit (LitInt 1))
+                ]
       in translateGoalK knownCtors env (GoalCall predName' args) testExpr
   | otherwise =
       let isStdlibPrefixed n = any (`T.isPrefixOf` n)

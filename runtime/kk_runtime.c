@@ -234,17 +234,6 @@ int64_t kk_structural_eq(int64_t a, int64_t b) {
     int64_t tag_a = kk_tag(a);
     int64_t tag_b = kk_tag(b);
     if (tag_a != tag_b) return 0;
-    /* Rational cells (r/2, tag 46645) sometimes surface with stale
-     * nfields=0 metadata when threaded through poly coeff lists (the
-     * underlying memory still holds the two i64 fields).  Compare fields
-     * 0/1 directly. */
-    if (tag_a == 46645 /* KK_RATIONAL_R_TAG */) {
-        int64_t n_a = *(int64_t*)(a + 8);
-        int64_t n_b = *(int64_t*)(b + 8);
-        int64_t d_a = *(int64_t*)(a + 16);
-        int64_t d_b = *(int64_t*)(b + 16);
-        return (n_a == n_b && d_a == d_b) ? 1 : 0;
-    }
     /* Compare fields */
     int64_t nf_a = kk_nfields(a);
     int64_t nf_b = kk_nfields(b);
@@ -4104,12 +4093,8 @@ int64_t safe_from_integers__2(int64_t n, int64_t d) {
 static int kk_rational_is_malformed(int64_t r) {
     if (!kk_is_heap_ptr(r)) return 1;
     if (kk_tag(r) != KK_RATIONAL_R_TAG) return 1;
-    /* nfields metadata can be stale 0 on cells originating from the bridge's
-     * MercuryBridge path (esp. coeff lists threaded through poly.div_mod /
-     * factor); however, the underlying memory always holds two i64 fields
-     * (numer, denom) at offsets +8 / +16.  Read them directly. */
-    int64_t denom_field = *(int64_t*)(r + 16);
-    if (denom_field == 0) return 1;
+    if (kk_nfields(r) < 2) return 1;
+    if (kk_field(r, 1) == 0) return 1;
     return 0;
 }
 
@@ -4117,12 +4102,8 @@ int64_t safe_rational_mul__2(int64_t a, int64_t b) {
     if (kk_rational_is_malformed(a) || kk_rational_is_malformed(b)) {
         return safe_from_integers__2(0, 1);
     }
-    /* Read fields directly: the nfields metadata can be stale 0 on cells
-     * threaded through coeff lists, but the underlying r(numer, denom)
-     * layout is consistent.  kk_field would otherwise read garbage when
-     * nfields says 0. */
-    int64_t aN = *(int64_t*)(a + 8),  aD = *(int64_t*)(a + 16);
-    int64_t bN = *(int64_t*)(b + 8),  bD = *(int64_t*)(b + 16);
+    int64_t aN = kk_field(a, 0), aD = kk_field(a, 1);
+    int64_t bN = kk_field(b, 0), bD = kk_field(b, 1);
     int64_t g1 = kk_i64_gcd(aN, bD);
     int64_t g2 = kk_i64_gcd(aD, bN);
     int64_t n = (aN / g1) * (bN / g2);
@@ -4844,6 +4825,15 @@ int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f) {
     int64_t acc = z;
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
+        /* Retain h: the closure receives h as an owned arg and its
+         * Perceus-inserted drops will consume the refcount.  The cons
+         * cell still references h via field 0, so without this retain
+         * the closure's drop takes h's refcount to 0 — wiping its
+         * nfields metadata while the rest of the program still
+         * accesses the cell (observed for rational coefficients in
+         * surd's lcm_of_denoms → list.foldl with a lambda body that
+         * destructures C into denom(C)). */
+        kk_retain(h);
         /* Mercury's list.foldl convention: F is @pred(X, A0, A)@ —
          * the closure expects (element, accumulator), not
          * (accumulator, element).  The previous arg order tripped up

@@ -593,6 +593,15 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
              initPairs = zip initGoals envsFor
              lastEnv   = envsFor !! (length goals - 1)
              innerExpr = translateGoalAsTest knownCtors lastEnv lastGoal
+             semidetCmpBuiltins = Set.fromList
+               [ "int.>=", "int.>", "int.<", "int.=<"
+               , "int.=:=", "int.=\\=", "int.compare"
+               , "integer.>=", "integer.>", "integer.<", "integer.=<"
+               , "integer.=:=", "integer.=\\=", "integer.is_zero"
+               , "float.>=", "float.>", "float.<", "float.=<"
+               , "float.=:=", "float.=\\="
+               , "unify"
+               ] :: Set Text
              threadGoal (g, e) acc = case g of
                GoalConstruct var ctor cargs | Set.member var e ->
                  -- Test-mode deconstruct: PatCon binds vars + proceeds
@@ -610,6 +619,20 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
                             Nothing acc
                    , Branch (PatWild anyTy) Nothing (ELit (LitInt 0))
                    ]
+               -- Comparison builtins (int.>=, integer.<, etc.) in
+               -- non-last positions of a semidet conjunction: capture
+               -- the 0/1 result and short-circuit on 0.  Without this,
+               -- @find_quadratic_factor@'s @degree(P) >= 4@ guard is
+               -- silently discarded and the body runs for degree-2
+               -- inputs, tripping infinite recursion in
+               -- @poly.div_mod_loop@.
+               GoalCall predName' _
+                 | Set.member predName' semidetCmpBuiltins ->
+                     translateGoalK knownCtors e g
+                       (ECase (EVar (Name "_" 0))
+                         [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+                         , Branch (PatWild anyTy)     Nothing acc
+                         ])
                _ -> translateGoalK knownCtors e g acc
          in foldr threadGoal innerExpr initPairs
 translateGoalAsTest knownCtors env (GoalIfThenElse cond then' else') =

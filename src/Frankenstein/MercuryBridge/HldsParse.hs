@@ -645,10 +645,20 @@ parseGoalLines ls0 =
           || "% switch on" `T.isInfixOf` firstLine
         Nothing -> False
   in case ls of
-    -- Recognise an inline lambda binding BEFORE the conjunction check
-    -- — the lambda body contains its own `% conjunction` marker and
-    -- `,` separators that would otherwise shatter it apart.
-    _ | Just (lhs, params, mOut, bodyLs) <- splitLambda stripped ->
+    -- If the input is a `( % conjunction ... )` wrapper around 2+
+    -- conjuncts at depth 0, split the conjunction BEFORE checking
+    -- for a lambda.  A lambda that appears as the FIRST conjunct of
+    -- a multi-goal conjunction (e.g. @V_8 = (pred(...) is det :- ...),
+    -- V_9 = ..., list.foldl(...)@ in @factoring.lcm_of_denoms@)
+    -- would otherwise have @splitLambda@'s paren-depth walk consume
+    -- the lambda PLUS all subsequent conjuncts, dropping the
+    -- @list.foldl@ call that uses the lambda.  Coordinated with the
+    -- semidet multi-output → tuple convention extension below.
+    _ | wrappedConj, length conjParts > 1 ->
+          GoalConj (map parseGoalLines conjParts)
+      -- Recognise an inline lambda binding (now safe — outer
+      -- multi-conjunct conjunctions were already split above).
+      | Just (lhs, params, mOut, bodyLs) <- splitLambda stripped ->
           GoalLambda lhs params mOut (parseGoalLines bodyLs)
       -- Mercury negation `not ( body )`.  HLDS prints `not (` as a
       -- line of its own, then the body, then a closing `)` on its

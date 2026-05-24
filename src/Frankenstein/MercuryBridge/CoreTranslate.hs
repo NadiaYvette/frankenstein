@@ -584,7 +584,15 @@ translateGoalAsTest knownCtors env (GoalCall predName' args)
             , "map.", "set.", "maybe.", "pair.", "assoc_list."]
             || n `elem` ["mercury_fail", "mercury_not", "list_range"
                         , "unify", "mercury_choose"]
+          -- @list.sort@ ships in two HLDS shapes: the 2-arg func form
+          -- @list.sort(TI, In)@ (default compare, threads typeinfo) and
+          -- the 3-arg form @list.sort(TI, Cmp, In)@ (explicit comparator
+          -- closure).  The runtime @list_sort/2@ only handles the
+          -- typeinfo-default form; the cmp form needs a different
+          -- runtime entry point that actually invokes the comparator.
+          -- Disambiguate by arity at the call site.
           taggedName
+            | predName' == "list.sort", length args == 3 = "list_sort__3"
             | isStdlibPrefixed predName' = predName'
             | otherwise = predName' <> "__" <> T.pack (show (length args))
       in EApp (EVar (Name taggedName 0))
@@ -1010,6 +1018,7 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
         || n `elem` ["mercury_fail", "mercury_not", "list_range"
                     , "unify", "mercury_choose"]
       taggedName
+        | predName' == "list.sort", length callInputs == 3 = "list_sort__3"
         | isStdlibPrefixed predName' = predName'
         | otherwise = predName' <> "__" <> T.pack (show (length callInputs))
       callExpr

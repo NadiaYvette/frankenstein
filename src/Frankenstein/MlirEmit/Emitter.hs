@@ -1015,6 +1015,7 @@ emitProgramText prog =
     , "  func.func private @list_det_replace_nth(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_filter_map(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_sort(i64, i64) -> i64"
+    , "  func.func private @list_sort__3(i64, i64, i64) -> i64"
     , "  func.func private @list_foldl2(i64, i64, i64, i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @apply__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @call__4(i64, i64, i64, i64) -> i64"
@@ -1642,6 +1643,7 @@ emitProgramWasm prog =
     , "  func.func private @list_det_replace_nth(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_filter_map(i64, i64, i64, i64) -> i64"
     , "  func.func private @list_sort(i64, i64) -> i64"
+    , "  func.func private @list_sort__3(i64, i64, i64) -> i64"
     , "  func.func private @list_foldl2(i64, i64, i64, i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @apply__4(i64, i64, i64, i64) -> i64"
     , "  func.func private @call__4(i64, i64, i64, i64) -> i64"
@@ -4647,7 +4649,7 @@ externalRuntimeFns = Set.fromList
   , "list_foldl", "list_map", "list_filter", "list_length"
   , "list_append", "list_reverse", "list_condense", "list_duplicate"
   , "list_last", "list_member", "list_det_index0", "list_det_replace_nth"
-  , "list_filter_map", "list_sort", "list_foldl2"
+  , "list_filter_map", "list_sort", "list_sort__3", "list_foldl2"
   , "apply__4", "call__4", "class_method_call__4"
   , "list_zpzp", "string_zpzp"
   , "char_det_from_int", "char_to_int"
@@ -4797,7 +4799,8 @@ externalRuntimeArity = Map.fromList
   , ("list_append", 3), ("list_reverse", 2), ("list_condense", 2)
   , ("list_duplicate", 3), ("list_last", 2), ("list_member", 3)
   , ("list_det_index0", 3), ("list_det_replace_nth", 4)
-  , ("list_filter_map", 4), ("list_sort", 2), ("list_foldl2", 8)
+  , ("list_filter_map", 4), ("list_sort", 2), ("list_sort__3", 3)
+  , ("list_foldl2", 8)
   , ("apply__4", 4), ("call__4", 4), ("class_method_call__4", 4)
   , ("list_zpzp", 3), ("string_zpzp", 2)
   , ("char_det_from_int", 1), ("char_to_int", 1)

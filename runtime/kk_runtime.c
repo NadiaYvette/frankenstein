@@ -3912,10 +3912,19 @@ int64_t list_filter_map(int64_t ti1, int64_t ti2, int64_t closure, int64_t list)
  * for ordering, which compares heap pointers/values lexicographically
  * for non-string heap cells — good enough for many surd usages but
  * NOT a real semantic sort). */
-int64_t list_sort(int64_t ti, int64_t list) {
+/* `list.sort/3 (TypeInfo, Cmp, List)` — sort a list using the
+ * user-supplied comparator closure.  The Mercury bridge dispatches
+ * the explicit-comparator form here (vs. list_sort/2 which uses
+ * the typeinfo's default compare).  The comparator returns a
+ * Mercury comparison_result cell; by the bridge's lookupConTag
+ * convention, ctors are tagged in declaration order, so the
+ * "less than" tag is strictly smaller than the "greater than"
+ * tag.  We discover the lt-tag lazily on the first non-equal
+ * comparison.  Retains cmp and elements per call because
+ * Perceus-translated closure bodies consume their args. */
+static int64_t kk_cmp_lt_tag_cached = -1;
+int64_t list_sort__3(int64_t ti, int64_t cmp, int64_t list) {
     (void)ti;
-    /* Use bubble sort for simplicity; not great asymptotically. */
-    /* Collect to array first. */
     int64_t n = 0; int64_t tmp = list;
     while (kk_is_heap_ptr(tmp) && kk_tag(tmp) == KK_CONS_TAG) {
         n++; tmp = kk_field(tmp, 1);
@@ -3927,7 +3936,70 @@ int64_t list_sort(int64_t ti, int64_t list) {
     while (kk_is_heap_ptr(tmp) && kk_tag(tmp) == KK_CONS_TAG) {
         arr[i++] = kk_field(tmp, 0); tmp = kk_field(tmp, 1);
     }
-    /* Bubble sort by raw i64 value (proxy ordering). */
+    int64_t lt_tag = kk_cmp_lt_tag_cached;
+    for (i = 0; i < n - 1; i++) {
+        for (int64_t j = 0; j < n - 1 - i; j++) {
+            kk_retain(cmp);
+            kk_retain(arr[j]);
+            kk_retain(arr[j+1]);
+            int64_t r1 = kk_call_closure_2(cmp, arr[j], arr[j+1]);
+            int64_t t1 = kk_is_heap_ptr(r1) ? kk_tag(r1) : r1;
+            int swap = 0;
+            if (lt_tag >= 0) {
+                if (t1 != lt_tag) {
+                    /* Could still be Eq; check reverse. */
+                    kk_retain(cmp);
+                    kk_retain(arr[j]);
+                    kk_retain(arr[j+1]);
+                    int64_t r2 = kk_call_closure_2(cmp, arr[j+1], arr[j]);
+                    int64_t t2 = kk_is_heap_ptr(r2) ? kk_tag(r2) : r2;
+                    if (t2 == lt_tag) swap = 1;
+                }
+            } else {
+                /* Discover lt-tag from a reverse call. */
+                kk_retain(cmp);
+                kk_retain(arr[j]);
+                kk_retain(arr[j+1]);
+                int64_t r2 = kk_call_closure_2(cmp, arr[j+1], arr[j]);
+                int64_t t2 = kk_is_heap_ptr(r2) ? kk_tag(r2) : r2;
+                if (t1 != t2) {
+                    lt_tag = t1 < t2 ? t1 : t2;
+                    kk_cmp_lt_tag_cached = lt_tag;
+                    if (t2 == lt_tag) swap = 1;
+                }
+            }
+            if (swap) {
+                int64_t t = arr[j]; arr[j] = arr[j+1]; arr[j+1] = t;
+            }
+        }
+    }
+    int64_t r = kk_nil();
+    for (i = n - 1; i >= 0; i--) {
+        kk_retain(arr[i]);
+        r = kk_cons(arr[i], r);
+    }
+    free(arr);
+    return r;
+}
+
+int64_t list_sort(int64_t ti, int64_t list) {
+    (void)ti;
+    /* Default comparison: bubble sort by raw i64 value (proxy
+     * ordering).  Use for the typeinfo-driven Mercury `list.sort/2`
+     * form; the explicit-comparator form `list.sort/3` is handled
+     * by list_sort__3 above. */
+    int64_t n = 0; int64_t tmp = list;
+    while (kk_is_heap_ptr(tmp) && kk_tag(tmp) == KK_CONS_TAG) {
+        n++; tmp = kk_field(tmp, 1);
+    }
+    if (n <= 1) return list;
+    int64_t* arr = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
+    if (!arr) return list;
+    int64_t i = 0; tmp = list;
+    while (kk_is_heap_ptr(tmp) && kk_tag(tmp) == KK_CONS_TAG) {
+        arr[i++] = kk_field(tmp, 0); tmp = kk_field(tmp, 1);
+    }
+    /* Bubble sort by raw i64 value. */
     for (i = 0; i < n - 1; i++) {
         for (int64_t j = 0; j < n - 1 - i; j++) {
             if (arr[j] > arr[j+1]) {
@@ -3936,7 +4008,10 @@ int64_t list_sort(int64_t ti, int64_t list) {
         }
     }
     int64_t r = kk_nil();
-    for (i = n - 1; i >= 0; i--) r = kk_cons(arr[i], r);
+    for (i = n - 1; i >= 0; i--) {
+        kk_retain(arr[i]);
+        r = kk_cons(arr[i], r);
+    }
     free(arr);
     return r;
 }

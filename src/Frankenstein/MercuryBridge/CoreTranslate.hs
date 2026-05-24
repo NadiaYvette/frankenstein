@@ -73,6 +73,30 @@ multiOutputMarkers srcModule preds = Set.fromList
                                , m == ModeIn || m == ModeDi]
   ]
 
+-- | Semidet pred markers: returns a Set of names of the form
+-- @"SEMIDET:<predname>__<inputArity>"@ for every semidet pred with
+-- 0 output modes (pure tests).  These markers let
+-- @translateGoalAsTest@'s GoalConj threadGoal recognize user-defined
+-- semidet test calls and short-circuit the conjunction on failure
+-- (same treatment as the closed list of comparison builtins).
+-- Without this, e.g. @is_square_integer(N)@ appearing as a non-last
+-- conjunct of @is_square_rational@'s body is computed-then-discarded
+-- and the test always reflects only the LAST goal — making
+-- @is_square_rational(50000)@ wrongly succeed because the @D=1@ part
+-- is a square and the @N=50000@ check is dropped.
+semidetPredMarkers :: Text -> [MercuryPred] -> Set Text
+semidetPredMarkers srcModule preds = Set.fromList
+  [ "SEMIDET:" <> srcModule <> "." <> predName p
+              <> "__" <> T.pack (show inputArity)
+  | p <- preds
+  , predDet p == Semidet
+  , let outputCount = length [m | m <- predModes p
+                                , m == ModeOut || m == ModeUo]
+  , outputCount == 0
+  , let inputArity = length [m | m <- predModes p
+                               , m == ModeIn || m == ModeDi]
+  ]
+
 -- | Translate a full Mercury HLDS module to Frankenstein Core
 translateHlds :: MercuryHLDS -> Either Text Program
 translateHlds hlds = do
@@ -82,7 +106,9 @@ translateHlds hlds = do
       userCtorNames = Set.fromList ([q | (q, _) <- moduleCtors]
                                  ++ [b | (_, b) <- moduleCtors])
       multiOutMarkers = multiOutputMarkers (hldsModule hlds) (hldsPreds hlds)
-      knownCtors = Set.unions [userCtorNames, stdlibCtorNames, multiOutMarkers]
+      semidetMarkers  = semidetPredMarkers (hldsModule hlds) (hldsPreds hlds)
+      knownCtors = Set.unions
+        [userCtorNames, stdlibCtorNames, multiOutMarkers, semidetMarkers]
   defs <- mapM (translatePred knownCtors (hldsModule hlds)) (hldsPreds hlds)
   let dataDecls = map (translateMercuryTypeDecl (hldsModule hlds)) (hldsTypes hlds)
       -- Default handler for exn.fail: returns 0
@@ -174,8 +200,13 @@ translateMultiHlds (entry : rest) = do
       multiOutMarkers = Set.unions
         $ multiOutputMarkers (hldsModule entry) (hldsPreds entry)
         : [multiOutputMarkers (hldsModule h) (hldsPreds h) | h <- rest]
+      semidetMarkers = Set.unions
+        $ semidetPredMarkers (hldsModule entry) (hldsPreds entry)
+        : [semidetPredMarkers (hldsModule h) (hldsPreds h) | h <- rest]
       knownCtors = Set.unions
-        [userCtorNames, bodyCtorNames, stdlibCtorNames, multiOutMarkers]
+        [ userCtorNames, bodyCtorNames, stdlibCtorNames
+        , multiOutMarkers, semidetMarkers
+        ]
   -- Translate every module's predicates and data decls.
   entryDefs <- mapM (translatePred knownCtors (hldsModule entry)) (hldsPreds entry)
   restDefsLists <- mapM (\h -> mapM (translatePred knownCtors (hldsModule h)) (hldsPreds h)) rest
@@ -600,6 +631,8 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
                , "integer.=:=", "integer.=\\=", "integer.is_zero"
                , "float.>=", "float.>", "float.<", "float.=<"
                , "float.=:=", "float.=\\="
+               , "rational.>=", "rational.>", "rational.<", "rational.=<"
+               , "rational.=:=", "rational.=\\="
                , "unify"
                ] :: Set Text
              threadGoal (g, e) acc = case g of
@@ -619,15 +652,24 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
                             Nothing acc
                    , Branch (PatWild anyTy) Nothing (ELit (LitInt 0))
                    ]
-               -- Comparison builtins (int.>=, integer.<, etc.) in
-               -- non-last positions of a semidet conjunction: capture
-               -- the 0/1 result and short-circuit on 0.  Without this,
+               -- Comparison builtins (int.>=, integer.<, etc.) and
+               -- user-defined semidet preds in non-last positions of
+               -- a semidet conjunction: capture the 0/1 result and
+               -- short-circuit on 0.  Without this,
                -- @find_quadratic_factor@'s @degree(P) >= 4@ guard is
                -- silently discarded and the body runs for degree-2
                -- inputs, tripping infinite recursion in
-               -- @poly.div_mod_loop@.
-               GoalCall predName' _
-                 | Set.member predName' semidetCmpBuiltins ->
+               -- @poly.div_mod_loop@.  And @is_square_rational@'s
+               -- @is_square_integer(N), is_square_integer(D)@ pair
+               -- ignores the first check and reports the rational as
+               -- "square" whenever the denominator is a square (e.g.
+               -- @50000/1@ wrongly classified as square).
+               GoalCall predName' callArgs
+                 | Set.member predName' semidetCmpBuiltins
+                   || Set.member
+                        ("SEMIDET:" <> predName' <> "__"
+                                    <> T.pack (show (length callArgs)))
+                        knownCtors ->
                      translateGoalK knownCtors e g
                        (ECase (EVar (Name "_" 0))
                          [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))

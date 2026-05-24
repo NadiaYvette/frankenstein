@@ -3244,11 +3244,11 @@ int64_t map_init(int64_t tinfo_k, int64_t tinfo_v) {
 }
 
 /* map.search(M, K, V) — semidet: V := value associated with K in M;
- * fails (returns 0) if missing.  In the i64 model we return the
- * value when found; 0 is also a valid value, so callers that need
- * to distinguish "not found" must use map.contains first. */
-int64_t map_search(int64_t tinfo, int64_t m, int64_t k) {
-    (void)tinfo;
+ * fails (returns 0) if missing.  Mercury threads two type-infos
+ * (one per type parameter of map(K, V)), so the runtime signature
+ * is (TI_K, TI_V, M, K) → V. */
+int64_t map_search(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k) {
+    (void)tinfo_k; (void)tinfo_v;
     while (!kk_is_nil(m)) {
         int64_t p = kk_field(m, 0);
         if (kk_structural_eq(kk_pair_fst(p), k)) return kk_pair_snd(p);
@@ -3260,12 +3260,12 @@ int64_t map_search(int64_t tinfo, int64_t m, int64_t k) {
 /* map.lookup(M, K) = V — det.  Mercury passes 2 TCIs (K, V types). */
 int64_t map_lookup(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k) {
     (void)tinfo_v;
-    return map_search(tinfo_k, m, k);
+    return map_search(tinfo_k, tinfo_v, m, k);
 }
 
-/* map.contains(M, K) — semidet. */
-int64_t map_contains(int64_t tinfo, int64_t m, int64_t k) {
-    (void)tinfo;
+/* map.contains(M, K) — semidet.  Takes 2 TCIs (K, V) like map.search. */
+int64_t map_contains(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k) {
+    (void)tinfo_k; (void)tinfo_v;
     while (!kk_is_nil(m)) {
         int64_t p = kk_field(m, 0);
         if (kk_structural_eq(kk_pair_fst(p), k)) return 1;
@@ -3274,9 +3274,9 @@ int64_t map_contains(int64_t tinfo, int64_t m, int64_t k) {
     return 0;
 }
 
-/* map.count(M, N) — det: bind N to the number of entries in M. */
-int64_t map_count(int64_t tinfo, int64_t m) {
-    (void)tinfo;
+/* map.count(M) = N — det.  Mercury threads 2 TCIs (K, V). */
+int64_t map_count(int64_t tinfo_k, int64_t tinfo_v, int64_t m) {
+    (void)tinfo_k; (void)tinfo_v;
     int64_t n = 0;
     while (!kk_is_nil(m)) { n++; m = kk_field(m, 1); }
     return n;
@@ -3651,8 +3651,10 @@ int64_t list_foldl2_impl(int64_t f, int64_t xs, int64_t a, int64_t b) {
         int64_t h = kk_field(xs, 0);
         /* See kk_list_foldl for the retain rationale: the closure
          * receives h as owned and may drop it, but the cons cell still
-         * references h via field 0. */
+         * references h via field 0.  Retain f too for the closure's
+         * self-drop. */
         kk_retain(h);
+        kk_retain(f);
         a = kk_call_closure_2(f, h, a);
         xs = kk_field(xs, 1);
     }
@@ -4884,8 +4886,10 @@ int64_t kk_list_map(int64_t xs, int64_t f) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        /* See kk_list_foldl. */
+        /* Retain h and f: closure consumes both (h as arg, f as self
+         * via Perceus drop in the closure body).  See kk_list_foldl. */
         kk_retain(h);
+        kk_retain(f);
         int64_t mapped = kk_call_closure_1(f, h);
         acc = kk_cons(mapped, acc);
         xs = kk_field(xs, 1);
@@ -4898,12 +4902,11 @@ int64_t kk_list_filter(int64_t xs, int64_t p) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        /* Retain once for the predicate's owned arg. */
+        /* Retain h and p for the predicate call. */
         kk_retain(h);
+        kk_retain(p);
         if (kk_call_closure_1(p, h)) {
-            /* And once more for storing into the output cons cell —
-             * h is now referenced by both the input list and the new
-             * acc cons. */
+            /* And once more on h for storing into the output cons. */
             kk_retain(h);
             acc = kk_cons(h, acc);
         }
@@ -4917,15 +4920,17 @@ int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f) {
     int64_t acc = z;
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        /* Retain h: the closure receives h as an owned arg and its
-         * Perceus-inserted drops will consume the refcount.  The cons
-         * cell still references h via field 0, so without this retain
-         * the closure's drop takes h's refcount to 0 — wiping its
-         * nfields metadata while the rest of the program still
+        /* Retain h and f: the closure receives h as an owned arg and
+         * its Perceus-inserted drops will consume the refcount.  The
+         * cons cell still references h via field 0, so without this
+         * retain the closure's drop takes h's refcount to 0 — wiping
+         * its nfields metadata while the rest of the program still
          * accesses the cell (observed for rational coefficients in
          * surd's lcm_of_denoms → list.foldl with a lambda body that
-         * destructures C into denom(C)). */
+         * destructures C into denom(C)).  Retain f too because the
+         * closure body's Perceus also drops its self arg. */
         kk_retain(h);
+        kk_retain(f);
         /* Mercury's list.foldl convention: F is @pred(X, A0, A)@ —
          * the closure expects (element, accumulator), not
          * (accumulator, element).  The previous arg order tripped up
@@ -4945,7 +4950,7 @@ int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f) {
 int64_t kk_list_all(int64_t xs, int64_t p) {
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        kk_retain(h);  /* See kk_list_foldl. */
+        kk_retain(h); kk_retain(p);  /* See kk_list_foldl. */
         if (!kk_call_closure_1(p, h)) return 0;
         xs = kk_field(xs, 1);
     }
@@ -4956,7 +4961,7 @@ int64_t kk_list_all(int64_t xs, int64_t p) {
 int64_t kk_list_any(int64_t xs, int64_t p) {
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        kk_retain(h);  /* See kk_list_foldl. */
+        kk_retain(h); kk_retain(p);  /* See kk_list_foldl. */
         if (kk_call_closure_1(p, h)) return 1;
         xs = kk_field(xs, 1);
     }
@@ -5017,7 +5022,7 @@ int64_t kk_list_flatmap(int64_t xs, int64_t f) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        kk_retain(h);  /* See kk_list_foldl. */
+        kk_retain(h); kk_retain(f);  /* See kk_list_foldl. */
         int64_t sub = kk_call_closure_1(f, h);
         /* Append `sub` to acc. */
         while (kk_is_heap_ptr(sub) && kk_tag(sub) == KK_CONS_TAG) {
@@ -5038,7 +5043,7 @@ int64_t kk_list_filter_map(int64_t xs, int64_t f) {
     int64_t acc = kk_nil();
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        kk_retain(h);  /* See kk_list_foldl. */
+        kk_retain(h); kk_retain(f);  /* See kk_list_foldl. */
         int64_t r = kk_call_closure_1(f, h);
         /* Just(v) cells carry KK_JUST_TAG with the payload at field 0;
          * Nothing cells carry KK_NOTHING_TAG and no payload.  Both tags
@@ -5127,7 +5132,7 @@ int64_t kk_list_map_indexed(int64_t xs, int64_t f) {
     int64_t i = 0;
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        kk_retain(h);  /* See kk_list_foldl. */
+        kk_retain(h); kk_retain(f);  /* See kk_list_foldl. */
         int64_t mapped = kk_call_closure_2(f, i, h);
         acc = kk_cons(mapped, acc);
         xs = kk_field(xs, 1);
@@ -5176,7 +5181,7 @@ int64_t kk_throw(int64_t msg) {
 int64_t kk_list_foreach(int64_t xs, int64_t f) {
     while (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CONS_TAG) {
         int64_t h = kk_field(xs, 0);
-        kk_retain(h);  /* See kk_list_foldl. */
+        kk_retain(h); kk_retain(f);  /* See kk_list_foldl. */
         (void)kk_call_closure_1(f, h);
         xs = kk_field(xs, 1);
     }

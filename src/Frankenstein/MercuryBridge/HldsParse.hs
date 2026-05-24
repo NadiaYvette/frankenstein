@@ -617,19 +617,30 @@ parseGoalLines ls0 =
       -- arms; matching by "any line" would treat the whole body as a
       -- conjunction.  Conversely, a conjunction can wrap a switch as
       -- one of its goals.  The leading marker wins.
+      -- Mercury HLDS uses three switch annotations:
+      --   "% switch on"           (det)
+      --   "% cannot_fail switch on"
+      --   "% can_fail switch on"  (may-fail; arms aren't exhaustive)
+      -- All three need to route to GoalSwitch — previously the can_fail
+      -- form fell through to GoalDisj, which turned semidet-meaningful
+      -- pattern matches like @rational.>='s @(Cmp = > ; Cmp = =)@ into
+      -- a mercury_choose that always succeeded, so @R >= 0@ returned
+      -- true for negative R.
+      isSwitchMarker l =
+        "% cannot_fail switch on" `T.isInfixOf` l
+        || "% can_fail switch on" `T.isInfixOf` l
+        || "% switch on" `T.isInfixOf` l
       firstMarker = listToMaybe
         [ () | l <- stripped
              , "% conjunction" `T.isInfixOf` l
-            || "% cannot_fail switch on" `T.isInfixOf` l
-            || "% switch on" `T.isInfixOf` l
+            || isSwitchMarker l
         ]
       firstIsConj = case firstMarker of
         Just () ->
           let firstLine = head
                 [ l | l <- stripped
                     , "% conjunction" `T.isInfixOf` l
-                   || "% cannot_fail switch on" `T.isInfixOf` l
-                   || "% switch on" `T.isInfixOf` l
+                   || isSwitchMarker l
                 ]
           in "% conjunction" `T.isInfixOf` firstLine
         Nothing -> False
@@ -638,11 +649,9 @@ parseGoalLines ls0 =
           let firstLine = head
                 [ l | l <- stripped
                     , "% conjunction" `T.isInfixOf` l
-                   || "% cannot_fail switch on" `T.isInfixOf` l
-                   || "% switch on" `T.isInfixOf` l
+                   || isSwitchMarker l
                 ]
-          in "% cannot_fail switch on" `T.isInfixOf` firstLine
-          || "% switch on" `T.isInfixOf` firstLine
+          in isSwitchMarker firstLine
         Nothing -> False
   in case ls of
     -- If the input is a `( % conjunction ... )` wrapper around 2+
@@ -1032,8 +1041,17 @@ parseSwitch ls =
   -- Find the switch variable from "switch on `Var'"
   let switchLine = head $ filter (\l -> "switch on" `T.isInfixOf` l) ls
       varName = T.takeWhile (/= '\'') $ T.drop 1 $ snd $ T.breakOn "`" switchLine
-      -- Split arms at "has functor" markers
-      arms = extractSwitchArms ls
+      -- A "can_fail switch" means the arms aren't exhaustive — missing
+      -- ctor values fall through to failure (used by semidet preds like
+      -- @rational.>=@'s @(Cmp = > ; Cmp = =)@).  Append a synthetic
+      -- wildcard arm with @fail@ body so the bridge's GoalSwitch
+      -- translation generates a fall-through fail branch rather than
+      -- collapsing the last real arm into an unconditional yield.
+      isCanFail = "% can_fail switch on" `T.isInfixOf` switchLine
+      armsRaw = extractSwitchArms ls
+      arms = if isCanFail
+             then armsRaw ++ [("_", GoalCall "mercury_fail" [])]
+             else armsRaw
   in GoalSwitch varName arms
 
 extractSwitchArms :: [Text] -> [(Text, MercuryGoal)]
@@ -1208,7 +1226,18 @@ parseSingleGoal txt
     isCleanCallName n =
       not (T.null n)
       && not (T.any (\c -> c == ' ' || c == '=' || c == '\n' || c == '\t'
-                        || c == '`' || c == ';' || c == '|') n)
+                        || c == '`' || c == ';' || c == '|'
+                        -- Reject parens / bracket operators so
+                        -- 'builtin.(<)' / 'builtin.(>)' fall through to
+                        -- parseQualifiedOp (which strips the parens and
+                        -- emits the bare op as the ctor name).  Without
+                        -- this guard the parens are baked into the ctor
+                        -- name, hashing to a different tag than the
+                        -- bare-name pattern that switch arms use, and
+                        -- comparisons like @rational.>=@ silently fail
+                        -- on the @>@ arm.
+                        || c == '(' || c == ')'
+                        || c == '<' || c == '>') n)
       && let h = T.head n
          in (h >= 'a' && h <= 'z') || (h >= 'A' && h <= 'Z') || h == '_'
 

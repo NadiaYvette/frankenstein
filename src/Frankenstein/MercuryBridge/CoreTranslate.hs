@@ -1211,9 +1211,23 @@ translateGoalK kctors env (GoalSwitch var cases) k =
   -- HLDS prints functors as @module.ctor/arity@ (e.g. @euler1/1@);
   -- parseCtorApp on the construction side returns just @euler1@.  Without
   -- matching strips the tag hashes diverge and every switch arm fails.
+  --
+  -- @parseSwitch@ may append a synthetic ("_", mercury_fail) arm for
+  -- can_fail switches; translate "_" as PatWild so the bridge's
+  -- emitter generates a real catch-all (otherwise the last arm would
+  -- be emitted unconditionally as the exhaustive-tail case, masking
+  -- failure for unmatched ctors).
   ECase (EVar (Name var 0))
-    [ Branch (PatCon (QName "" (Name (bareTag tag) 0)) []) Nothing
-             (translateGoalK kctors env body k)
+    [ if tag == "_"
+        then -- The wildcard arm for can_fail switches must NOT thread
+             -- through the success continuation @k@ — that would
+             -- post-call the success path after mercury_fail and
+             -- silently succeed on unmatched ctors.  Yield the fail
+             -- sentinel (0) directly instead.
+             Branch (PatWild anyTy) Nothing
+                    (EApp (EVar (Name "mercury_fail" 0)) [])
+        else Branch (PatCon (QName "" (Name (bareTag tag) 0)) []) Nothing
+                    (translateGoalK kctors env body k)
     | (tag, body) <- cases
     ]
 

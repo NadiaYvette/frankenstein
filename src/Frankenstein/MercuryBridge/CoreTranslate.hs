@@ -1116,6 +1116,13 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       isIntDivWithRem = predName' == "integer.divide_with_rem"
       isExtractNthPower = predName' == "extract_nth_power_extracted"
       isPartitionLits = predName' == "partition_lits_lits"
+      -- @factoring.find_linear_factor(P, Root, Quotient)@ is semidet with
+      -- two outputs.  The bridge binds Root to the call's return value
+      -- but cannot recover Quotient without re-doing the polynomial
+      -- division.  Rebuild Quotient inline from the well-known
+      -- mathematical relation @Q = P / (x - Root)@ via @poly.div_mod@
+      -- on the freshly-built @[-Root, rational.one]@ linear polynomial.
+      isFindLinearFactor = predName' == "factoring.find_linear_factor"
       divModRemainderExpr fVar gVar qName tciVar =
         EApp (EVar (Name "poly_sub__3" 0))
           [ EVar (Name tciVar 0)
@@ -1149,6 +1156,29 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       partitionLitsRestExpr lVar =
         EApp (EVar (Name "partition_lits_rest__1" 0))
           [EVar (Name lVar 0)]
+      -- find_linear_factor's Quotient = poly.div_mod(field_tci, P, x-Root).
+      -- typeclass_info_const(1) → field(rational); ring uses 0 (typeclass
+      -- index in poly.m's instance declaration order).  poly.div_mod is
+      -- a det multi-output pred so the bridge's call convention returns
+      -- a @tuple(Q, R)@ — extract field 0 (Q) via a tuple deconstruct.
+      findLinQuotExpr pVar rootVar =
+        let negRoot = EApp (EVar (Name "rational.-__1" 0)) [EVar (Name rootVar 0)]
+            ringTci = EApp (EVar (Name "typeclass_info_const__1" 0)) [ELit (LitInt 0)]
+            fieldTci = EApp (EVar (Name "typeclass_info_const__1" 0)) [ELit (LitInt 1)]
+            one      = EApp (EVar (Name "rational.one__0" 0)) []
+            nilCell  = EApp (EVar (Name "list_Nil" 0)) []
+            consOne  = EApp (EVar (Name "list_Cons" 0)) [one, nilCell]
+            consNeg  = EApp (EVar (Name "list_Cons" 0)) [negRoot, consOne]
+            linPoly  = EApp (EVar (Name "poly.mk_poly__2" 0)) [ringTci, consNeg]
+            tupleResult = EApp (EVar (Name "poly.div_mod__3" 0))
+                              [fieldTci, EVar (Name pVar 0), linPoly]
+        in ECase tupleResult
+             [ Branch (PatCon (QName "" (Name "tuple" 0))
+                        [ PatVar (Name "_div_mod_q" 0) anyTy
+                        , PatVar (Name "_div_mod_r" 0) anyTy
+                        ])
+                      Nothing (EVar (Name "_div_mod_q" 0))
+             ]
       wrapSecondaries body = foldr
         (\n acc ->
            let defaultExpr
@@ -1171,6 +1201,15 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
                  | isPartitionLits, length args == 3
                  , [lV] <- take 1 args
                  = partitionLitsRestExpr lV
+                 -- find_linear_factor(P, Root, Quotient): Quotient =
+                 -- P / (x - Root).  Re-derives the quotient at the
+                 -- call site so the caller's @factor_sf_loop(Quotient)@
+                 -- gets the real divisor instead of the literal-0
+                 -- placeholder.
+                 | isFindLinearFactor, length args == 3
+                 , [pV] <- take 1 args
+                 , Just rV <- outputBinding
+                 = findLinQuotExpr pV rV
                  | otherwise = ELit (LitInt 0)
            in ELet [[Bind (Name n 0) valueTy defaultExpr DefVal]] acc)
         body

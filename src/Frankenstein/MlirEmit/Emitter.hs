@@ -1010,6 +1010,7 @@ emitProgramText prog =
     , "  func.func private @list_condense(i64, i64) -> i64"
     , "  func.func private @list_duplicate(i64, i64, i64) -> i64"
     , "  func.func private @list_last(i64, i64) -> i64"
+    , "  func.func private @list_det_last(i64, i64) -> i64"
     , "  func.func private @list_member(i64, i64, i64) -> i64"
     , "  func.func private @list_det_index0(i64, i64, i64) -> i64"
     , "  func.func private @list_det_replace_nth(i64, i64, i64, i64) -> i64"
@@ -1641,6 +1642,7 @@ emitProgramWasm prog =
     , "  func.func private @list_condense(i64, i64) -> i64"
     , "  func.func private @list_duplicate(i64, i64, i64) -> i64"
     , "  func.func private @list_last(i64, i64) -> i64"
+    , "  func.func private @list_det_last(i64, i64) -> i64"
     , "  func.func private @list_member(i64, i64, i64) -> i64"
     , "  func.func private @list_det_index0(i64, i64, i64) -> i64"
     , "  func.func private @list_det_replace_nth(i64, i64, i64, i64) -> i64"
@@ -4654,7 +4656,8 @@ externalRuntimeFns = Set.fromList
   -- Mercury list HO functions — typeclass dispatch prepends TypeInfo args
   , "list_foldl", "list_map", "list_filter", "list_length"
   , "list_append", "list_reverse", "list_condense", "list_duplicate"
-  , "list_last", "list_member", "list_det_index0", "list_det_replace_nth"
+  , "list_last", "list_det_last"
+  , "list_member", "list_det_index0", "list_det_replace_nth"
   , "list_filter_map", "list_sort", "list_sort__3", "list_foldl2"
   , "apply__4", "call__4", "class_method_call__4"
   , "list_zpzp", "string_zpzp"
@@ -4809,7 +4812,7 @@ externalRuntimeArity = Map.fromList
   , ("class_method_call__2", 2), ("class_method_call__3", 3)
   , ("list_foldl", 5), ("list_map", 4), ("list_filter", 3), ("list_length", 2)
   , ("list_append", 3), ("list_reverse", 2), ("list_condense", 2)
-  , ("list_duplicate", 3), ("list_last", 2), ("list_member", 3)
+  , ("list_duplicate", 3), ("list_last", 2), ("list_det_last", 2), ("list_member", 3)
   , ("list_det_index0", 3), ("list_det_replace_nth", 4)
   , ("list_filter_map", 4), ("list_sort", 2), ("list_sort__3", 3)
   , ("list_foldl2", 8)

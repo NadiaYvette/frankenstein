@@ -3977,6 +3977,13 @@ int64_t list_last(int64_t ti, int64_t list) {
     return last;
 }
 
+/* list.det_last(L) = X — same as list.last but det (aborts on empty);
+ * since the bridge doesn't expose aborting, just return 0 on empty.
+ * Same shared-element retain as list_last. */
+int64_t list_det_last(int64_t ti, int64_t list) {
+    return list_last(ti, list);
+}
+
 
 /* list.member(X, L) — semidet, returns 1 if X appears in L.  Caller
  * provides typeinfo + element + list (3 args). */

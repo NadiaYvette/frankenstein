@@ -2680,8 +2680,28 @@ int64_t int_zs(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 int64_t int___(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
 /* Mercury int./ (single-slash division, sanitises to "int__"). */
 int64_t int__(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
-/* Mercury int.div (truncated integer division — same semantics as // in i64). */
-int64_t int_div(int64_t a, int64_t b) { return b == 0 ? 0 : a / b; }
+/* Mercury int.div: integer division rounded TOWARDS NEGATIVE INFINITY (floor).
+ * Differs from C's @/@ for mixed-sign operands: C trunc-divides toward zero,
+ * Mercury floor-divides.  e.g. int.div(-1, 2) = -1 (Mercury floor)
+ * vs C @-1 / 2 = 0@ (C trunc).
+ *
+ * Why the runtime distinguishes: surd's @reduce_atom@ does
+ * @Full = int.div(E, N), Rem = int.mod(E, N)@ on signed E (notably E=-1
+ * during @invert_monomial@'s exponent-negation pass).  Trunc-division
+ * yielded @Full=0, Rem=-1@ → @C@ accumulator unchanged → @reduce_monomial@'s
+ * result became @1 · (√R)^(-1)@ instead of @(1/R) · √R@, leaving a
+ * negative-exponent atom that downstream @from_norm_expr@ rendered as
+ * @re_pow(re_root(2, re_lit(R)), -1)@ — which simplify_via_canonical
+ * subsequently collapsed to zero, producing surd-elliptic's "0 · F(...)"
+ * leading-coefficient bug. */
+int64_t int_div(int64_t a, int64_t b) {
+    if (b == 0) return 0;
+    int64_t q = a / b;
+    int64_t r = a % b;
+    /* Correction for floor when signs differ and there's a non-zero remainder */
+    if ((r != 0) && ((r < 0) != (b < 0))) q -= 1;
+    return q;
+}
 /* int.pow(Base, Exp) — non-negative integer exponentiation. */
 int64_t int_pow(int64_t base, int64_t exp) {
     int64_t r = 1;
@@ -2698,7 +2718,19 @@ int64_t int_zezl(int64_t a, int64_t b){ return a <= b ? 1 : 0; }
 int64_t int_zgze(int64_t a, int64_t b){ return a >= b ? 1 : 0; }
 int64_t int_zezeze(int64_t a, int64_t b){ return a == b ? 1 : 0; }
 int64_t int_rem(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
-int64_t int_mod(int64_t a, int64_t b) { return b == 0 ? 0 : a % b; }
+/* Mercury int.mod: remainder matching floor-division (@int.div@), so the
+ * sign of the result follows @b@ (non-negative when @b > 0@).  Distinct
+ * from @int.rem@ which follows C's @%@ (sign follows @a@).
+ *
+ * Why: pairs with @int_div@'s floor semantics so the identity
+ * @a = int.div(a,b) * b + int.mod(a,b)@ holds with @0 <= int.mod(a,b) < b@
+ * for @b > 0@.  See @int_div@'s comment for the surd-elliptic bug. */
+int64_t int_mod(int64_t a, int64_t b) {
+    if (b == 0) return 0;
+    int64_t r = a % b;
+    if ((r != 0) && ((r < 0) != (b < 0))) r += b;
+    return r;
+}
 int64_t int_max(int64_t a, int64_t b) { return a > b ? a : b; }
 int64_t int_min(int64_t a, int64_t b) { return a < b ? a : b; }
 int64_t int_abs(int64_t x) { return x < 0 ? -x : x; }

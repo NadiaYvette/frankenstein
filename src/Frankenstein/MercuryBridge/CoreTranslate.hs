@@ -781,6 +781,24 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
                             [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
                             , Branch (PatWild anyTy)     Nothing acc
                             ])
+               -- GoalUnify in non-last position of a test-context
+               -- conjunction: short-circuit on 0 (the unify failed).
+               -- Without this, intermediate unifications like
+               -- @C = rational.one@ in the cond
+               -- @(C = rational.one, Base = re_lit(R), R = rational.one)@
+               -- are translated by translateGoalK's fallback that
+               -- discards the unify's 0/1 result — so the cond's test
+               -- outcome depends only on the LAST unify, making
+               -- collect_terms in rad_normalize mis-classify negative
+               -- rational coefficients as 1.
+               GoalUnify x y
+                 | Set.member x e || isJust (readMaybe (T.unpack x) :: Maybe Integer)
+                 , Set.member y e || isJust (readMaybe (T.unpack y) :: Maybe Integer)
+                 ->
+                     ECase (translateGoalAsTest knownCtors e (GoalUnify x y))
+                       [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+                       , Branch (PatWild anyTy)     Nothing acc
+                       ]
                _ -> translateGoalK knownCtors e g acc
          in foldr threadGoal innerExpr initPairs
 translateGoalAsTest knownCtors env (GoalIfThenElse cond then' else') =

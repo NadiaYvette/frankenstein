@@ -760,10 +760,20 @@ translateGoalAsTest knownCtors env (GoalConj goals) = case goals of
                _ -> translateGoalK knownCtors e g acc
          in foldr threadGoal innerExpr initPairs
 translateGoalAsTest knownCtors env (GoalIfThenElse cond then' else') =
-  ECase (translateGoalAsTest knownCtors env cond)
-    [ Branch (PatLit (LitInt 1)) Nothing (translateGoalAsTest knownCtors env then')
-    , Branch (PatWild boolTy)    Nothing (translateGoalAsTest knownCtors env else')
-    ]
+  -- Propagate cond's bindings into the THEN arm so subsequent goals see
+  -- the cond's output variables.  Mirrors @translateGoalK GoalIfThenElse@'s
+  -- @condEnv@ threading.  Without this, in test position the THEN body's
+  -- @Quotient = Q@ (where Q is bound by the cond) sees neither var in env,
+  -- falls to the stub-unify fallback, and emits useless
+  -- @unify(@Var$0(), @Var$0())@ extern calls.  Doesn't change the test
+  -- result but cleans up the emitted MLIR.
+  let condEnv = extendBindingsFor env cond
+  in ECase (translateGoalAsTest knownCtors env cond)
+       [ Branch (PatLit (LitInt 1)) Nothing
+                (translateGoalAsTest knownCtors condEnv then')
+       , Branch (PatWild boolTy)    Nothing
+                (translateGoalAsTest knownCtors env else')
+       ]
   where boolTy = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)
 -- Deconstruct in test position: a semidet pattern match.  The ECase
 -- produced by translateGoalK is exhaustive (single branch), so the

@@ -496,12 +496,26 @@ translatePred knownCtors srcModule pred' = do
             -- @rational./(N0, 0) = 0/1@ → surd-elliptic rendered
             -- every leading coefficient as "0 · F(...)".
             (Just oName, Just goal) ->
-              let valueBody = bodyExpr goal
-                  testBody  = translateGoalAsTest knownCtors initialEnv goal
-              in ECase testBody
-                   [ Branch (PatLit (LitInt 1)) Nothing valueBody
-                   , Branch (PatWild boolType) Nothing (ELit (LitInt 0))
-                   ]
+              if isMultiOutputDet && predDet pred' == Semidet
+                then
+                  -- Multi-output semidet pred: with the tuple-return
+                  -- convention, valueBody's terminator IS
+                  -- @tuple(o1, o2, ...)@ on success or @0@ on failure
+                  -- (the bridge's CPS chain yields @0@ when any
+                  -- sub-goal returns the semidet-fail sentinel).
+                  -- No separate test phase needed; single-eval avoids
+                  -- double-evaluating large intermediate structures
+                  -- like find_quadratic_factor's 3134-elem Candidates
+                  -- list, whose first traversal consumed the cons
+                  -- cells before the second traversal could see them.
+                  bodyExpr goal
+                else
+                  let valueBody = bodyExpr goal
+                      testBody  = translateGoalAsTest knownCtors initialEnv goal
+                  in ECase testBody
+                       [ Branch (PatLit (LitInt 1)) Nothing valueBody
+                       , Branch (PatWild boolType) Nothing (ELit (LitInt 0))
+                       ]
             _ -> rawGoalBody
         _ -> rawGoalBody
       boolType = TCon (TypeCon (QName "std" (Name "bool" 0)) KindValue)

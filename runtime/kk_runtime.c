@@ -3234,8 +3234,22 @@ int64_t pair_zm(int64_t k, int64_t v) {
  * real implementation is a 2-3 tree, but for surd-mercury demos a flat
  * list suffices.  Each entry is a 2-field pair cell {Key, Value}; the
  * map itself is a cons-list of these pairs.  Empty map = nil. */
+/* Mercury's stdlib @pair(A, B)@ is defined as @type pair(A, B) ---> A - B@ —
+ * the @-@ infix is the pair constructor.  The bridge's ECon path for
+ * source-level @pair.(A - B)@ patterns allocates cells with tag
+ * @stableConTag("-") = 46576@; user-side deconstructs like
+ * @T = (Mono - C)@ in @norm_inv@ and @norm_coeff@ check that tag.
+ *
+ * The earlier tag-0 sig made every runtime-built pair invisible to
+ * those source patterns — @norm_inv@'s single-mono fast path skipped,
+ * @norm_coeff@ couldn't extract a pure-rational coefficient, and
+ * surd's @rationalize_inv@ tripped its @require.error("cannot invert")@
+ * fallback in the elliptic-integral reduction.  Aligning the tag means
+ * runtime-allocated pairs deconstruct cleanly via the source-level
+ * idiom — the same convention the bridge already uses. */
+#define KK_PAIR_DASH_TAG 46576
 static int64_t kk_pair_new(int64_t k, int64_t v) {
-    int64_t p = kk_alloc_con(0, 2);
+    int64_t p = kk_alloc_con(KK_PAIR_DASH_TAG, 2);
     kk_set_field(p, 0, k);
     kk_set_field(p, 1, v);
     return p;
@@ -5082,14 +5096,6 @@ int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f) {
          * closure body's Perceus also drops its self arg. */
         kk_retain(h);
         kk_retain(f);
-        /* Mercury's list.foldl convention: F is @pred(X, A0, A)@ —
-         * the closure expects (element, accumulator), not
-         * (accumulator, element).  The previous arg order tripped up
-         * surd's @list.foldl(render_example("text"), examples, !IO)@
-         * by passing (IO_state, Example) where render_example
-         * expected (Example, IO_state); the example deconstruct then
-         * read fields from the IO state and the whole rational/poly
-         * chain inherited @0@ instead of real values. */
         acc = kk_call_closure_2(f, h, acc);
         xs = kk_field(xs, 1);
     }

@@ -2955,8 +2955,15 @@ static int64_t kk_call_closure_1(int64_t closure, int64_t a);
 static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b);
 static int64_t kk_call_closure_3(int64_t closure, int64_t a, int64_t b, int64_t c);
 
-/* list.all_true(P, Xs) — semidet: P holds for every X in Xs. */
-int64_t list_all_true(int64_t p, int64_t xs) {
+/* list.all_true(P, Xs) — semidet: P holds for every X in Xs.
+ * HLDS prepends one type_info arg (for the element type), so the
+ * runtime signature is (TI, P, Xs).  The previous 2-arg signature
+ * misaligned the stack: P pulled in the TI's value and Xs pulled in
+ * the closure, so kk_call_closure_1 dereferenced a non-closure cell
+ * as a function pointer and wild-jumped (observed in surd-elliptic's
+ * norm_poly_is_zero → list.all_true(norm_is_zero, _) call site). */
+int64_t list_all_true(int64_t tinfo, int64_t p, int64_t xs) {
+    (void)tinfo;
     while (!kk_is_nil(xs)) {
         int64_t h = kk_field(xs, 0);
         int64_t r = kk_call_closure_1(p, h);

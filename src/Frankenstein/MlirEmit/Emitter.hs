@@ -1080,7 +1080,7 @@ emitProgramText prog =
     , "  func.func private @string_to_int(i64) -> i64"
     , "  func.func private @string_to_float(i64) -> i64"
     , "  func.func private @string_sub_string_search(i64, i64) -> i64"
-    , "  func.func private @list_all_true(i64, i64) -> i64"
+    , "  func.func private @list_all_true(i64, i64, i64) -> i64"
     , "  func.func private @list_drop(i64, i64) -> i64"
     , "  func.func private @list_delete_all(i64, i64, i64) -> i64"
     , "  func.func private @list_det_tail(i64, i64) -> i64"
@@ -1711,7 +1711,7 @@ emitProgramWasm prog =
     , "  func.func private @string_to_int(i64) -> i64"
     , "  func.func private @string_to_float(i64) -> i64"
     , "  func.func private @string_sub_string_search(i64, i64) -> i64"
-    , "  func.func private @list_all_true(i64, i64) -> i64"
+    , "  func.func private @list_all_true(i64, i64, i64) -> i64"
     , "  func.func private @list_drop(i64, i64) -> i64"
     , "  func.func private @list_delete_all(i64, i64, i64) -> i64"
     , "  func.func private @list_det_tail(i64, i64) -> i64"
@@ -4840,7 +4840,7 @@ externalRuntimeArity = Map.fromList
   , ("string_to_int", 1), ("string_to_float", 1)
   , ("string_sub_string_search", 2)
   , ("string_float_to_string", 1), ("string_prefix", 2)
-  , ("list_all_true", 2), ("list_drop", 2)
+  , ("list_all_true", 3), ("list_drop", 2)
   , ("list_delete_all", 3), ("list_det_tail", 2), ("list_det_split_last", 2)
   , ("list_take_upto", 3), ("list_sort_and_remove_dups", 2)
   , ("list_map_corresponding", 6)

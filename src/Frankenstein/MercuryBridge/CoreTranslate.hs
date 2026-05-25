@@ -1646,6 +1646,10 @@ stdlibCtorNames = Set.fromList
   -- builtin comparison_result tags (parseQualifiedOp emits these)
   , "builtin.=", "builtin.<", "builtin.>"
   , "=", "<", ">"
+  -- Mercury's stdlib @pair(A, B)@ has @-@ as its only constructor;
+  -- HLDS prints @pair.(A - B)@ which the bridge rewrites to
+  -- @GoalConstruct lhs "pair.-" [A, B]@.
+  , "pair.-", "-"
   -- Bridge-synthesised placeholder for unimplemented higher-order
   -- features (lambdas, HO calls).  Treated as a 0-arg ctor so the
   -- LHS gets a let-binding instead of fusing into an unify-stub

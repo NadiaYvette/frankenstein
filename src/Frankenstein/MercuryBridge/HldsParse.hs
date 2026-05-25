@@ -1140,6 +1140,19 @@ parseSingleGoal txt
           rhs' = T.strip (T.drop 3 rhs)
           lhs' = T.strip lhs
       in case parseMercuryBuiltin rhs' of
+           -- @pair.(A - B)@: the @-@ here is the pair CONSTRUCTOR
+           -- (Mercury's stdlib @pair@ is defined as @type pair(A, B) ---> A - B@),
+           -- not subtraction.  Route to GoalConstruct with the synthesised
+           -- @pair_-@ ctor name; downstream the bridge's GoalConstruct
+           -- handler decides construct vs deconstruct based on whether LHS
+           -- is already bound.  Without this, @from_norm_expr@'s
+           -- @HeadVar = pair.(V - Coeff)@ deconstruct was routed through
+           -- the runtime pair_zm subtraction stub (returns 0), so V and
+           -- Coeff stayed unbound and the function body operated on
+           -- 0-valued pair fields — segfault when mono_term_to_expr
+           -- tried to dereference them.
+           Just (GoalCall "pair.-" [a, b]) ->
+             GoalConstruct lhs' "pair.-" [a, b]
            -- RHS is "module.(X op Y)" or "module.(op X)" form — emit as
            -- a function call with LHS appended as the synthesised output
            -- arg.  GoalConstruct would route through ECon and allocate a

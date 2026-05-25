@@ -52,20 +52,24 @@ import Data.Maybe (isJust)
 --     into all output positions (instead of binding only the first
 --     and defaulting the rest to 0, which loses Rest in
 --     @partition_lits@, Remainder in @extract_nth_power@, etc.).
--- Semidet preds are excluded: an attempt to extend the convention to
--- semidet multi-output preds caused a regression in euler example 6
--- (sign-flipped log-arg without helping the elliptic reduction path).
--- The elliptic "cannot reduce" fallback traces to a deeper
--- type-confusion issue (numer/abs/int_divisors chain producing 0
--- where it should produce 1) that's independent of multi-output
--- handling.  Targeted shims continue to handle the few semidet
--- multi-output preds that need them.
+-- Now includes semidet preds with 2+ outputs.  Earlier attempts at this
+-- regressed euler-6 because of unrelated bugs in the numer/abs/int_divisors
+-- chain (since fixed).  Without the tuple convention for semidet multi-output
+-- preds, the bridge can only thread the FIRST output's value back to the
+-- caller; subsequent outputs default to literal 0, breaking callers that
+-- rely on them.  E.g. surd's @factoring.find_dividing(P, [F|Fs], MonicFac,
+-- Quotient)@ returned the correct MonicFac but Quotient=0, so
+-- @factor_square_free@ saw an empty-polynomial quotient and bailed.
+--
+-- Semidet success path returns @tuple(o1, o2, ...)@ (heap pointer, always
+-- non-zero); semidet failure returns @0@ (sentinel).  Callers
+-- pattern-match: @case result of 0 -> 0; tuple(o1, o2) -> ...@.
 multiOutputMarkers :: Text -> [MercuryPred] -> Set Text
 multiOutputMarkers srcModule preds = Set.fromList
   [ "MULTIOUT:" <> srcModule <> "." <> predName p
                 <> "__" <> T.pack (show inputArity)
   | p <- preds
-  , predDet p == Det
+  , predDet p `elem` [Det, Semidet]
   , let outputCount = length [m | m <- predModes p
                                 , m == ModeOut || m == ModeUo]
   , outputCount >= 2
@@ -399,7 +403,7 @@ translatePred knownCtors srcModule pred' = do
       -- ones) also keep the existing form — see @multiOutputMarkers@
       -- for the rationale.
       multiOutputMarker = "MULTIOUT:" <> srcModule <> "." <> effectiveName
-      isMultiOutputDet = predDet pred' == Det
+      isMultiOutputDet = predDet pred' `elem` [Det, Semidet]
                       && length outputNames >= 2
                       && Set.member multiOutputMarker knownCtors
       terminator
@@ -1323,12 +1327,27 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
         && length trailingUnbound >= 2
   in if useTupleConvention
        then
+         -- Semidet multi-output preds return @0@ on failure or a tuple
+         -- on success.  Use a nested ECase so the outer 0-check is
+         -- classified as IntLitCase (scf.if dispatch) and the inner
+         -- single-branch PatCon is classified as SingleConCase
+         -- (unconditional field extraction).  A flat 2-branch
+         -- @[PatLit 0, PatCon tuple]@ ECase gets classified as
+         -- IntLitCase by the emitter, which doesn't extract the
+         -- PatCon's pattern bindings — leaking the secondary outputs
+         -- as undefined @$0()@ externs.  For det callees the 0 branch
+         -- is dead code (the callee always returns a tuple).
          let tupleVar = "_tuple_result"
              outPats  = [PatVar (Name o 0) anyTy | o <- trailingUnbound]
+             tupleDeconstruct =
+               ECase (EVar (Name tupleVar 0))
+                 [ Branch (PatCon (QName "" (Name "tuple" 0)) outPats)
+                          Nothing k
+                 ]
          in ELet [[Bind (Name tupleVar 0) valueTy callExpr DefVal]]
               (ECase (EVar (Name tupleVar 0))
-                [ Branch (PatCon (QName "" (Name "tuple" 0)) outPats)
-                         Nothing k
+                [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+                , Branch (PatWild anyTy) Nothing tupleDeconstruct
                 ])
        else case outputBinding of
        Nothing      -> ELet [[Bind (Name "_" 0) valueTy callExpr DefVal]]
@@ -1435,17 +1454,9 @@ translateGoalK kctors env (GoalNot goal) k =
     ]
 
 translateGoalK kctors env (GoalIfThenElse cond then' else') k =
-  -- Mercury's if-then-else lets the cond's local bindings flow into
-  -- the then-branch.  Standard structure: ECase on the cond's
-  -- boolean test result.  THEN-side is the cond's CPS chain
-  -- wrapping the then-body so cond's pattern variables enter the
-  -- then-body's lexical scope.
   let condEnv  = extendBindingsFor env cond
       thenE    = translateGoalK kctors condEnv then' k
       elseE    = translateGoalK kctors env else' k
-      -- Re-run cond's CPS chain wrapping thenE; cond's bindings
-      -- now reach thenE.  Safe to duplicate now that PAP wrappers
-      -- are named per-arity (no cross-arity wrapper-sharing bug).
       thenWithCondBindings = translateGoalK kctors env cond thenE
   in ECase (translateGoalAsTest kctors env cond)
        [ Branch (PatLit (LitInt 1)) Nothing thenWithCondBindings

@@ -639,6 +639,13 @@ emitProgramText prog =
           [ "print", "println_str", "putStrLn", "print_str"
           , "println_haskell_chars", "print_haskell_chars"
           , "rust_print_dispatch"
+          -- Mercury io.format / io.print* not yet remapped to runtime
+          -- stubs via ioCallRuntimeName.  The bridge emits them as
+          -- @EApp (EVar "io.format") [...]@ which routes through the
+          -- @io_format@ runtime; the call still produces stdout output,
+          -- so the wrapper must not print the alias's Int return.
+          , "io.format", "io_format"
+          , "io.nl", "io_nl"
           -- Mercury bridge synthesises a no-arg `main` alias that calls
           -- the user's `main(io::di, io::uo) is det` predicate
           -- (renamed to `main_io_impl` to avoid the alias collision,

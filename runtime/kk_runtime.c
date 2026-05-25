@@ -3954,7 +3954,18 @@ int64_t list_duplicate(int64_t ti, int64_t n, int64_t x) {
     return r;
 }
 
-/* list.last(L) = X — return the last element (or 0 if empty). */
+/* list.last(L) = X — return the last element (or 0 if empty).
+ *
+ * Retain the returned element: it lives inside the list cell, sharing the
+ * list's reference.  Without an explicit retain, the caller's drop of the
+ * returned value also frees the element from inside the list — observed
+ * in surd's @lead_coeff(poly([1/1]), LC) :- Cs = [_|_], list.last(Cs, LC)@
+ * called from a SEMIDET-WITH-OUTPUT pred whose translation discards the
+ * test phase's bound output via @kk_drop@.  The drop hit the only
+ * remaining ref of the shared rational, freeing it; the body phase then
+ * returned the freed pointer to its caller, which @safe_rational_div@
+ * saw as a malformed rational and substituted with @0/1@ — yielding
+ * surd-elliptic's "0 · F(...)" leading-coefficient bug. */
 int64_t list_last(int64_t ti, int64_t list) {
     (void)ti;
     int64_t last = 0;
@@ -3962,8 +3973,10 @@ int64_t list_last(int64_t ti, int64_t list) {
         last = kk_field(list, 0);
         list = kk_field(list, 1);
     }
+    if (last != 0) kk_retain(last);
     return last;
 }
+
 
 /* list.member(X, L) — semidet, returns 1 if X appears in L.  Caller
  * provides typeinfo + element + list (3 args). */
@@ -3984,7 +3997,12 @@ int64_t list_det_index0(int64_t ti, int64_t list, int64_t n) {
         n--;
     }
     if (kk_is_heap_ptr(list) && kk_tag(list) == KK_CONS_TAG) {
-        return kk_field(list, 0);
+        /* Retain: see list_last for the rationale — the element is shared
+         * with the list cell, and the caller's drop of the returned value
+         * must not free memory the list still references. */
+        int64_t elem = kk_field(list, 0);
+        if (elem != 0) kk_retain(elem);
+        return elem;
     }
     return 0;
 }

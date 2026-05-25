@@ -428,15 +428,25 @@ translatePred knownCtors srcModule pred' = do
       -- ELet shadow the default by lexical scope.  For multi-output
       -- preds, default-bind ALL outputs (not just the first) so the
       -- tuple terminator's references all resolve.
+      -- For SEMIDET multi-output preds (single-eval mode), use a body
+      -- translation that short-circuits on comparison-builtin failures.
+      -- Without this, @find_quadratic_factor@'s @degree(P) >= 4@ guard
+      -- silently produces a discarded 0/1 result and the body returns
+      -- a tuple even for degree-2 inputs.  Other contexts keep the
+      -- normal translateGoalK which doesn't short-circuit comparisons
+      -- (adding it there regresses q5's Galois group identification).
+      translateBody = if isMultiOutputDet && predDet pred' == Semidet
+                      then translateSemidetBody knownCtors initialEnv
+                      else translateGoalK knownCtors initialEnv
       bodyExpr goal
         | isMultiOutputDet =
             ELet [[ Bind (Name n 0) anyTy (ELit (LitInt 0)) DefVal
                   | n <- outputNames ]]
-                 (translateGoalK knownCtors initialEnv goal terminator)
+                 (translateBody goal terminator)
         | otherwise = case outputName of
             Just n  -> ELet [[Bind (Name n 0) anyTy (ELit (LitInt 0)) DefVal]]
-                             (translateGoalK knownCtors initialEnv goal terminator)
-            Nothing -> translateGoalK knownCtors initialEnv goal terminator
+                             (translateBody goal terminator)
+            Nothing -> translateBody goal terminator
       rawGoalBody = case predGoal pred' of
         Just goal -> bodyExpr goal
         Nothing   -> ELit (LitString "no body")
@@ -875,6 +885,60 @@ translateGoalAsTest knownCtors env goal =
 -- correctly across conjuncts.
 translateGoal :: MercuryGoal -> Expr
 translateGoal g = translateGoalK Set.empty Set.empty g (ELit (LitInt 0))
+
+-- | SEMIDET-body-aware CPS translation: like 'translateGoalK' but
+-- short-circuits comparison builtins (int.>=, rational.>, …) on
+-- failure, yielding the semidet-fail sentinel @0@.  Needed for the
+-- single-eval translation of multi-output semidet pred bodies, where
+-- 'translateGoalAsTest's threadGoal-with-short-circuit is no longer
+-- wrapping the body via the testBody+valueBody pattern.
+--
+-- Using this in arbitrary contexts (det pred bodies, lambdas) caused
+-- a q5 Galois-group identification regression — the C5 vs D5 detector
+-- has comparison-result-discarding paths that "always succeed"
+-- semantically; short-circuiting them as failures collapses the
+-- detector's branch tree.  Restricted to semidet multi-output bodies.
+translateSemidetBody :: Set Text -> Set Text -> MercuryGoal -> Expr -> Expr
+translateSemidetBody kctors env (GoalConj goals) k =
+  let envsFor = scanl extendBindingsFor env goals
+      semidetCmpBuiltins = Set.fromList
+        [ "int.>=", "int.>", "int.<", "int.=<"
+        , "int.=:=", "int.=\\=", "int.compare"
+        , "integer.>=", "integer.>", "integer.<", "integer.=<"
+        , "integer.=:=", "integer.=\\=", "integer.is_zero"
+        , "float.>=", "float.>", "float.<", "float.=<"
+        , "float.=:=", "float.=\\="
+        , "rational.>=", "rational.>", "rational.<", "rational.=<"
+        , "rational.=:=", "rational.=\\="
+        , "unify"
+        ] :: Set Text
+      isLitArg t = isJust (readMaybe (T.unpack t) :: Maybe Integer)
+                || isJust (parseMercuryStringLit t)
+                || isJust (parseMercuryCharLit t)
+                || isJust (parseMercuryFloatLit t)
+      threadGoal (g, e) acc = case g of
+        GoalCall predName' callArgs
+          | let isBound t = Set.member t e || isLitArg t
+                trailingUnbound =
+                  reverse (takeWhile (not . isBound) (reverse callArgs))
+                inputArity = length callArgs - length trailingUnbound
+          , Set.member predName' semidetCmpBuiltins
+            || Set.member
+                 ("SEMIDET:" <> predName' <> "__"
+                             <> T.pack (show inputArity))
+                 kctors ->
+              let testVarName = case trailingUnbound of
+                    (n:_) -> n
+                    []    -> "_"
+              in translateGoalK kctors e g
+                   (ECase (EVar (Name testVarName 0))
+                     [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+                     , Branch (PatWild anyTy)     Nothing acc
+                     ])
+        _ -> translateGoalK kctors e g acc
+      pairs = zip goals envsFor
+  in foldr threadGoal k pairs
+translateSemidetBody kctors env goal k = translateGoalK kctors env goal k
 
 -- | Typeclass-method-wrapper rewrites: surd's polymorphic code goes
 -- through @poly.ring_zero(TCI)@, @poly.ring_add(TCI, A, B)@, etc.,
@@ -1421,21 +1485,11 @@ translateGoalK kctors env (GoalConj goals) k =
         -- result is silently discarded and the program relies on
         -- the "comparison always succeeds" assumption.  Adding
         -- short-circuit there regresses q5's Galois group
-        -- identification and other surd-quintic paths.  SEMIDET
-        -- pred markers are narrower (user-defined preds explicitly
-        -- declared semidet) and were already short-circuited in
-        -- test position by 'translateGoalAsTest' — extending them
-        -- to value position is the targeted fix for the
-        -- if-then-else cond re-evaluation problem.
+        -- identification.
         GoalCall predName' callArgs
           | let isBound t = Set.member t e || isLitArg t
                 trailingUnbound =
                   reverse (takeWhile (not . isBound) (reverse callArgs))
-                -- semidetPredMarkers builds keys with INPUT arity,
-                -- not total arity.  For preds with output bindings
-                -- (semidet-with-output like try_divide(P, F, Q)),
-                -- @length callArgs@ would include the output and
-                -- miss the marker; use the input-only count.
                 inputArity = length callArgs - length trailingUnbound
           , Set.member
               ("SEMIDET:" <> predName' <> "__"

@@ -3443,8 +3443,15 @@ int64_t map_delete(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k) {
 /* map.from_assoc_list(Pairs, M) — det: build a map from a list of
  * key-value pairs.  We accept the list directly since our map is
  * already a list of pairs. */
-int64_t map_from_assoc_list(int64_t tinfo, int64_t pairs) {
-    (void)tinfo;
+/* Mercury's HLDS adds two type-info arguments for map's K and V type
+ * params (see normal_form.canonicalize_nested_root's call site).  The
+ * stub ignores both; in our model the map IS the assoc list.  Taking
+ * the third arg here matches the HLDS call shape so the bridge
+ * doesn't see the call as oversaturated and synthesize a bogus
+ * closure-indirect call on the returned list. */
+int64_t map_from_assoc_list(int64_t tinfo_k, int64_t tinfo_v, int64_t pairs) {
+    (void)tinfo_k;
+    (void)tinfo_v;
     return pairs;
 }
 

@@ -1132,7 +1132,7 @@ emitProgramText prog =
     , "  func.func private @map_det_insert(i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @map_det_update(i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @map_delete(i64, i64, i64, i64) -> i64"
-    , "  func.func private @map_from_assoc_list(i64, i64) -> i64"
+    , "  func.func private @map_from_assoc_list(i64, i64, i64) -> i64"
     , "  func.func private @map_values(i64, i64) -> i64"
     , "  func.func private @map_keys(i64, i64, i64) -> i64"
     , "  func.func private @map_foldl(i64, i64, i64, i64, i64, i64) -> i64"
@@ -1764,7 +1764,7 @@ emitProgramWasm prog =
     , "  func.func private @map_det_insert(i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @map_det_update(i64, i64, i64, i64, i64) -> i64"
     , "  func.func private @map_delete(i64, i64, i64, i64) -> i64"
-    , "  func.func private @map_from_assoc_list(i64, i64) -> i64"
+    , "  func.func private @map_from_assoc_list(i64, i64, i64) -> i64"
     , "  func.func private @map_values(i64, i64) -> i64"
     , "  func.func private @map_keys(i64, i64, i64) -> i64"
     , "  func.func private @map_foldl(i64, i64, i64, i64, i64, i64) -> i64"
@@ -4878,7 +4878,7 @@ externalRuntimeArity = Map.fromList
   , ("map_init", 2), ("map_search", 4), ("map_lookup", 4)
   , ("map_contains", 4), ("map_count", 3)
   , ("map_set", 5), ("map_det_insert", 5), ("map_det_update", 5)
-  , ("map_delete", 4), ("map_from_assoc_list", 2)
+  , ("map_delete", 4), ("map_from_assoc_list", 3)
   , ("map_values", 2), ("map_keys", 3)
   , ("map_foldl", 6)
   , ("map_is_empty", 3), ("map_singleton", 4)

@@ -883,6 +883,17 @@ rewriteTypeclassMethod predName' args = case (predName', args) of
   -- cascade into another rational_norm crash.
   ("rational.*",             [a, b])       -> Just ("safe_rational_mul", [a, b])
   ("rational.*",             [a, b, o])    -> Just ("safe_rational_mul", [a, b, o])
+  -- rational.+ / rational./ via i128 shims (overflow protection for
+  -- the bisect_root path in surd's approx_roots; without these the
+  -- deep-bisection rationals overflow i64 and rational_norm trips its
+  -- Den=0 guard).  rational.- is NOT shimmed: Mercury's user impl is
+  -- @R1 - R2 = R1 + (-R2)@ which routes through safe_rational_add for
+  -- the underlying arithmetic (the @(-_)@ negation is just a sign flip
+  -- of an i64 num, no overflow risk).
+  ("rational.+",             [a, b])       -> Just ("safe_rational_add", [a, b])
+  ("rational.+",             [a, b, o])    -> Just ("safe_rational_add", [a, b, o])
+  ("rational./",             [a, b])       -> Just ("safe_rational_div", [a, b])
+  ("rational./",             [a, b, o])    -> Just ("safe_rational_div", [a, b, o])
   -- @rad_normalize.extract_nth_power(N, M, Extracted, Remainder)@ →
   -- route to a runtime stub that returns Extracted directly; bridge's
   -- wrapSecondaries supplies Remainder via the @_remainder@ stub.

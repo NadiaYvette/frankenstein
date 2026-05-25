@@ -4181,6 +4181,57 @@ static int64_t kk_i64_gcd(int64_t a, int64_t b) {
     return a == 0 ? 1 : a;
 }
 
+/* __int128 helpers — used by the rational arithmetic shims below to keep
+ * intermediate products safe past the i64 budget that Mercury's
+ * arbitrary-precision @integer@ takes for granted.  Surd's elliptic-integral
+ * reduction runs poly.bisect_root for 50 halvings; each iteration roughly
+ * doubles the rational denominators, so by ~30 iterations the
+ * @aD * bD@ product in @rational.+@ / @rational.*@ exceeds i64 and the
+ * result silently becomes 0, tripping @rational.rational_norm@'s Den=0
+ * guard.  Computing in __int128 and rescaling lossy-by-2 once the reduced
+ * result no longer fits i64 preserves the bisection's sign-of-eval
+ * discipline (the only thing approx_roots needs) at the cost of bounded
+ * precision loss in deep iterations. */
+typedef __int128 i128_t;
+static i128_t kk_i128_abs(i128_t x) { return x < 0 ? -x : x; }
+static i128_t kk_i128_gcd(i128_t a, i128_t b) {
+    a = kk_i128_abs(a); b = kk_i128_abs(b);
+    while (b != 0) { i128_t t = a % b; a = b; b = t; }
+    return a == 0 ? 1 : a;
+}
+
+/* Normalize an i128 num/den fraction: make den positive, reduce by gcd,
+ * and rescale (lossily) by powers of 2 until both num and den fit i64.
+ * Sets *out_num and *out_den to the resulting i64 values. */
+static void kk_i128_normalize_to_i64(i128_t num, i128_t den,
+                                      int64_t *out_num, int64_t *out_den) {
+    if (den == 0) { *out_num = 0; *out_den = 1; return; }
+    if (den < 0) { num = -num; den = -den; }
+    i128_t g = kk_i128_gcd(num, den);
+    num /= g;
+    den /= g;
+    /* Lossy rescale to fit i64 (sign-preserving).  Keeps the magnitude
+     * approximately correct; deep bisection iterations lose precision
+     * but sign-of-eval — the bisection's discriminator — stays valid. */
+    while (num > (i128_t)INT64_MAX || num < -(i128_t)INT64_MAX
+        || den > (i128_t)INT64_MAX) {
+        num >>= 1;
+        den >>= 1;
+        if (den == 0) { den = 1; break; }
+    }
+    *out_num = (int64_t)num;
+    *out_den = (int64_t)den;
+}
+
+static int64_t kk_alloc_rational_from_i128(i128_t num, i128_t den) {
+    int64_t n64, d64;
+    kk_i128_normalize_to_i64(num, den, &n64, &d64);
+    int64_t cell = kk_alloc_con(KK_RATIONAL_R_TAG, 2);
+    kk_set_field(cell, 0, n64);
+    kk_set_field(cell, 1, d64);
+    return cell;
+}
+
 int64_t safe_from_integers__2(int64_t n, int64_t d) {
     if (d == 0) return 0;  /* sentinel — caller (list.filter_map) skips */
     int64_t cell = kk_alloc_con(KK_RATIONAL_R_TAG, 2);
@@ -4219,11 +4270,59 @@ int64_t safe_rational_mul__2(int64_t a, int64_t b) {
     }
     int64_t aN = kk_field(a, 0), aD = kk_field(a, 1);
     int64_t bN = kk_field(b, 0), bD = kk_field(b, 1);
-    int64_t g1 = kk_i64_gcd(aN, bD);
-    int64_t g2 = kk_i64_gcd(aD, bN);
-    int64_t n = (aN / g1) * (bN / g2);
-    int64_t d = (aD / g2) * (bD / g1);
-    return safe_from_integers__2(n, d);
+    /* Compute in i128 then normalize+rescale to i64.  The old per-factor
+     * gcd pre-reduction (aN/g1)*(bN/g2) survives most surd arithmetic but
+     * still overflows on the bisect_root path's deep iterations. */
+    i128_t num = (i128_t)aN * (i128_t)bN;
+    i128_t den = (i128_t)aD * (i128_t)bD;
+    int64_t n64, d64;
+    kk_i128_normalize_to_i64(num, den, &n64, &d64);
+    return safe_from_integers__2(n64, d64);
+}
+
+/* Mercury @rational.+/2@ via i128 intermediates.  Reduce in i128 and
+ * route the i64-resized result through safe_from_integers__2 for
+ * consistency with mul (which retains the same allocation discipline). */
+int64_t safe_rational_add__2(int64_t a, int64_t b) {
+    if (kk_rational_is_malformed(a) || kk_rational_is_malformed(b)) {
+        return safe_from_integers__2(0, 1);
+    }
+    int64_t aN = kk_field(a, 0), aD = kk_field(a, 1);
+    int64_t bN = kk_field(b, 0), bD = kk_field(b, 1);
+    i128_t num = (i128_t)aN * (i128_t)bD + (i128_t)bN * (i128_t)aD;
+    i128_t den = (i128_t)aD * (i128_t)bD;
+    int64_t n64, d64;
+    kk_i128_normalize_to_i64(num, den, &n64, &d64);
+    return safe_from_integers__2(n64, d64);
+}
+
+/* Mercury @rational.-/2@ (binary subtract).  Some surd sites also call
+ * @rational.-/1@ (unary negate) — that path stays on the user-defined
+ * Mercury impl since negating r(An, Ad) only flips the sign of An (no
+ * arithmetic, no overflow). */
+int64_t safe_rational_sub__2(int64_t a, int64_t b) {
+    if (kk_rational_is_malformed(a) || kk_rational_is_malformed(b)) {
+        return safe_from_integers__2(0, 1);
+    }
+    int64_t aN = kk_field(a, 0), aD = kk_field(a, 1);
+    int64_t bN = kk_field(b, 0), bD = kk_field(b, 1);
+    i128_t num = (i128_t)aN * (i128_t)bD - (i128_t)bN * (i128_t)aD;
+    i128_t den = (i128_t)aD * (i128_t)bD;
+    return kk_alloc_rational_from_i128(num, den);
+}
+
+/* Mercury @rational./2@.  Substitutes the rational-zero sentinel when
+ * dividing by zero (matches existing surd safe-shim convention). */
+int64_t safe_rational_div__2(int64_t a, int64_t b) {
+    if (kk_rational_is_malformed(a) || kk_rational_is_malformed(b)) {
+        return safe_from_integers__2(0, 1);
+    }
+    int64_t aN = kk_field(a, 0), aD = kk_field(a, 1);
+    int64_t bN = kk_field(b, 0), bD = kk_field(b, 1);
+    if (bN == 0) return safe_from_integers__2(0, 1);
+    i128_t num = (i128_t)aN * (i128_t)bD;
+    i128_t den = (i128_t)aD * (i128_t)bN;
+    return kk_alloc_rational_from_i128(num, den);
 }
 
 /* surd's @rad_normalize.extract_nth_power(N, M, Extracted, Remainder)@

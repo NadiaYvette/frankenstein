@@ -1100,6 +1100,9 @@ emitProgramText prog =
     , "  func.func private @list_range(i64, i64) -> i64"
     , "  func.func private @safe_from_integers__2(i64, i64) -> i64"
     , "  func.func private @safe_rational_mul__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_add__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_sub__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_div__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_extracted__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_remainder__2(i64, i64) -> i64"
     , "  func.func private @partition_lits_lits__1(i64) -> i64"
@@ -1728,6 +1731,9 @@ emitProgramWasm prog =
     , "  func.func private @list_range(i64, i64) -> i64"
     , "  func.func private @safe_from_integers__2(i64, i64) -> i64"
     , "  func.func private @safe_rational_mul__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_add__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_sub__2(i64, i64) -> i64"
+    , "  func.func private @safe_rational_div__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_extracted__2(i64, i64) -> i64"
     , "  func.func private @extract_nth_power_remainder__2(i64, i64) -> i64"
     , "  func.func private @partition_lits_lits__1(i64) -> i64"
@@ -4694,6 +4700,12 @@ externalRuntimeFns = Set.fromList
   -- Defensive rational.* shim — substitutes r(0, 1) for any operand
   -- with denominator=0 to keep example 6's poly arithmetic going.
   , "safe_rational_mul__2"
+  -- i128-backed rational +/-/  to keep deep bisection rationals
+  -- representable past the i64 budget that overflows in
+  -- approx_roots' poly.bisect_root loop (elliptic-integral path).
+  , "safe_rational_add__2"
+  , "safe_rational_sub__2"
+  , "safe_rational_div__2"
   -- Replacement for surd's rad_normalize.extract_nth_power that
   -- avoids the broken list.foldl2 multi-output closure path.
   , "extract_nth_power_extracted__2"
@@ -4838,6 +4850,9 @@ externalRuntimeArity = Map.fromList
   , ("mercury_not", 1), ("builtin_compare", 4), ("builtin_ordering", 3)
   , ("safe_from_integers__2", 2)
   , ("safe_rational_mul__2", 2)
+  , ("safe_rational_add__2", 2)
+  , ("safe_rational_sub__2", 2)
+  , ("safe_rational_div__2", 2)
   , ("extract_nth_power_extracted__2", 2)
   , ("extract_nth_power_remainder__2", 2)
   , ("partition_lits_lits__1", 1)

@@ -2954,6 +2954,7 @@ int64_t string_sub_string_search(int64_t whole, int64_t sub) {
 static int64_t kk_call_closure_1(int64_t closure, int64_t a);
 static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b);
 static int64_t kk_call_closure_3(int64_t closure, int64_t a, int64_t b, int64_t c);
+static int64_t kk_call_closure_4(int64_t closure, int64_t a, int64_t b, int64_t c, int64_t d);
 
 /* list.all_true(P, Xs) — semidet: P holds for every X in Xs.
  * HLDS prepends one type_info arg (for the element type), so the
@@ -3698,15 +3699,23 @@ int64_t map_map_values(int64_t tinfo_k, int64_t tinfo_v1, int64_t tinfo_v2,
 int64_t map_foldl2(int64_t tinfo_k, int64_t tinfo_v, int64_t tinfo_a, int64_t tinfo_b,
                    int64_t f, int64_t m, int64_t a, int64_t b) {
     (void)tinfo_k; (void)tinfo_v; (void)tinfo_a; (void)tinfo_b;
+    /* Mercury @map.foldl2(P, M, A0, A, B0, B)@ takes a 4-input/2-output
+     * @pred(K, V, A_in, A_out, B_in, B_out) is det@.  The bridge wraps
+     * this as a closure taking 4 args (K, V, A_in, B_in) and returning
+     * the first output (A_out); the second output (B_out) is
+     * unrepresentable in a single i64 return value.  Call with all
+     * FOUR args so the closure sees the correct (K, V, A, B); the
+     * returned value updates @a@ and we keep @b@ unchanged (best
+     * effort — surd-mercury's only foldl2 use is @reduce_atom@ where
+     * the second accumulator is a map being built in-place, which the
+     * Mercury source handles by re-deriving it from the inputs). */
     while (!kk_is_nil(m)) {
         int64_t p = kk_field(m, 0);
         int64_t k = kk_pair_fst(p);
         int64_t v = kk_pair_snd(p);
-        /* Best-effort: call as 3-arg closure with k, v, a. */
-        a = kk_call_closure_3(f, k, v, a);
+        a = kk_call_closure_4(f, k, v, a, b);
         m = kk_field(m, 1);
     }
-    (void)b;
     return a;
 }
 
@@ -3757,6 +3766,7 @@ int64_t integer_divide_with_rem(int64_t a, int64_t b) {
 static int64_t kk_call_closure_1(int64_t closure, int64_t a);
 static int64_t kk_call_closure_2(int64_t closure, int64_t a, int64_t b);
 static int64_t kk_call_closure_3(int64_t closure, int64_t a, int64_t b, int64_t c);
+static int64_t kk_call_closure_4(int64_t closure, int64_t a, int64_t b, int64_t c, int64_t d);
 int64_t kk_list_foldl(int64_t xs, int64_t z, int64_t f);
 int64_t kk_list_map(int64_t xs, int64_t f);
 int64_t kk_list_filter(int64_t xs, int64_t p);
@@ -5026,6 +5036,14 @@ static int64_t kk_call_closure_3(int64_t closure,
     typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t);
     fn_t fn = (fn_t)(uintptr_t)fptr_i64;
     return fn(closure, a, b, c);
+}
+
+static int64_t kk_call_closure_4(int64_t closure,
+                                 int64_t a, int64_t b, int64_t c, int64_t d) {
+    int64_t fptr_i64 = kk_field(closure, 0);
+    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t);
+    fn_t fn = (fn_t)(uintptr_t)fptr_i64;
+    return fn(closure, a, b, c, d);
 }
 
 /* Reverse a list in place by walking head-to-tail and rebuilding

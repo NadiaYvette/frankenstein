@@ -74,25 +74,33 @@ multiOutputMarkers srcModule preds = Set.fromList
   ]
 
 -- | Semidet pred markers: returns a Set of names of the form
--- @"SEMIDET:<predname>__<inputArity>"@ for every semidet pred with
--- 0 output modes (pure tests).  These markers let
--- @translateGoalAsTest@'s GoalConj threadGoal recognize user-defined
--- semidet test calls and short-circuit the conjunction on failure
--- (same treatment as the closed list of comparison builtins).
--- Without this, e.g. @is_square_integer(N)@ appearing as a non-last
--- conjunct of @is_square_rational@'s body is computed-then-discarded
--- and the test always reflects only the LAST goal — making
--- @is_square_rational(50000)@ wrongly succeed because the @D=1@ part
--- is a square and the @N=50000@ check is dropped.
+-- @"SEMIDET:<predname>__<inputArity>"@ for every semidet pred,
+-- INCLUDING those with output modes.  These markers let
+-- @translateGoalAsTest@'s and @translateGoalK@'s GoalConj
+-- threadGoal recognize user-defined semidet calls and
+-- short-circuit the conjunction on failure (same treatment as
+-- the closed list of comparison builtins).
+--
+-- Without short-circuit on zero-output preds: @is_square_integer(N)@
+-- in a non-last conjunct of @is_square_rational@'s body was
+-- computed-then-discarded and the test always reflected only the
+-- LAST goal — @is_square_rational(50000)@ wrongly succeeded because
+-- the @D=1@ part is a square and the @N=50000@ check was dropped.
+--
+-- Without short-circuit on output-bearing preds: @lead_coeff(P, LC)@
+-- and @try_divide(P, F, Q)@ in if-then-else conds saw the body
+-- re-evaluation read freed inputs and return @0@; the body then
+-- bound the output to @0@ as if it were a real value → surd-elliptic's
+-- "0 · F(...)" leading coefficients and the factor_square_free hang.
+-- Detecting the output's @0@ value as semidet-fail (analogous to
+-- the bridge's GoalCall default-bind-to-0 behavior) lets the
+-- threadGoal route to the standard mercury_fail sentinel.
 semidetPredMarkers :: Text -> [MercuryPred] -> Set Text
 semidetPredMarkers srcModule preds = Set.fromList
   [ "SEMIDET:" <> srcModule <> "." <> predName p
               <> "__" <> T.pack (show inputArity)
   | p <- preds
   , predDet p == Semidet
-  , let outputCount = length [m | m <- predModes p
-                                , m == ModeOut || m == ModeUo]
-  , outputCount == 0
   , let inputArity = length [m | m <- predModes p
                                , m == ModeIn || m == ModeDi]
   ]
@@ -1329,11 +1337,78 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
                             (wrapSecondaries k)
 
 translateGoalK kctors env (GoalConj goals) k =
-  -- foldr: first goal wraps the rest (left-to-right execution order).
-  let go (g, envNow) acc = translateGoalK kctors envNow g acc
-      envsFor = scanl extendBindingsFor env goals
+  -- Thread each conjunct through a CPS chain that SHORT-CIRCUITS on
+  -- semidet failure — the same logic 'translateGoalAsTest' uses for
+  -- test-position conjunctions.  Without short-circuit, a failed
+  -- semidet conjunct (e.g. @degree(P) >= 4@, @lead_coeff(P, LC)@,
+  -- @try_divide(P, F, Q)@) silently produces a default-bound output
+  -- (typically @0@) and subsequent conjuncts run unconditionally,
+  -- propagating the bogus value.  Short-circuit yields the
+  -- semidet-fail sentinel @0@ at the chain's exit, which the
+  -- enclosing context (semidet pred body / if-then-else cond) routes
+  -- through the standard failure handling.
+  --
+  -- This refactor lets 'GoalIfThenElse' single-evaluate cond (the
+  -- chain naturally yields 0 on failure or the bound terminator on
+  -- success), avoiding the previous two-evaluation pattern that
+  -- under-retained inputs and surfaced as "0 · F(...)" / empty
+  -- quotient bugs in surd-elliptic.
+  let envsFor = scanl extendBindingsFor env goals
+      semidetCmpBuiltins = Set.fromList
+        [ "int.>=", "int.>", "int.<", "int.=<"
+        , "int.=:=", "int.=\\=", "int.compare"
+        , "integer.>=", "integer.>", "integer.<", "integer.=<"
+        , "integer.=:=", "integer.=\\=", "integer.is_zero"
+        , "float.>=", "float.>", "float.<", "float.=<"
+        , "float.=:=", "float.=\\="
+        , "rational.>=", "rational.>", "rational.<", "rational.=<"
+        , "rational.=:=", "rational.=\\="
+        , "unify"
+        ] :: Set Text
+      isLitArg t = isJust (readMaybe (T.unpack t) :: Maybe Integer)
+                || isJust (parseMercuryStringLit t)
+                || isJust (parseMercuryCharLit t)
+                || isJust (parseMercuryFloatLit t)
+      threadGoal (g, e) acc = case g of
+        -- Only short-circuit user-defined SEMIDET preds (zero-output
+        -- pure tests, marked by 'semidetPredMarkers').  Comparison
+        -- builtins (int.>=, rational.>, …) are NOT short-circuited
+        -- here even though they could be in principle — many surd
+        -- code paths have comparisons in det positions where the
+        -- result is silently discarded and the program relies on
+        -- the "comparison always succeeds" assumption.  Adding
+        -- short-circuit there regresses q5's Galois group
+        -- identification and other surd-quintic paths.  SEMIDET
+        -- pred markers are narrower (user-defined preds explicitly
+        -- declared semidet) and were already short-circuited in
+        -- test position by 'translateGoalAsTest' — extending them
+        -- to value position is the targeted fix for the
+        -- if-then-else cond re-evaluation problem.
+        GoalCall predName' callArgs
+          | let isBound t = Set.member t e || isLitArg t
+                trailingUnbound =
+                  reverse (takeWhile (not . isBound) (reverse callArgs))
+                -- semidetPredMarkers builds keys with INPUT arity,
+                -- not total arity.  For preds with output bindings
+                -- (semidet-with-output like try_divide(P, F, Q)),
+                -- @length callArgs@ would include the output and
+                -- miss the marker; use the input-only count.
+                inputArity = length callArgs - length trailingUnbound
+          , Set.member
+              ("SEMIDET:" <> predName' <> "__"
+                          <> T.pack (show inputArity))
+              kctors ->
+              let testVarName = case trailingUnbound of
+                    (n:_) -> n
+                    []    -> "_"
+              in translateGoalK kctors e g
+                   (ECase (EVar (Name testVarName 0))
+                     [ Branch (PatLit (LitInt 0)) Nothing (ELit (LitInt 0))
+                     , Branch (PatWild anyTy)     Nothing acc
+                     ])
+        _ -> translateGoalK kctors e g acc
       pairs = zip goals envsFor
-  in foldr go k pairs
+  in foldr threadGoal k pairs
 
 translateGoalK kctors env (GoalDisj goals) k = case goals of
   []     -> EPerform (QName "mercury" (Name "fail" 0)) []

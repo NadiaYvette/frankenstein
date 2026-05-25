@@ -3343,9 +3343,13 @@ int64_t map_det_update(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, i
     return map_set(tinfo_k, tinfo_v, m, k, v);
 }
 
-/* map.delete(M, K, M') — det: remove K from M if present. */
-int64_t map_delete(int64_t tinfo, int64_t m, int64_t k) {
-    (void)tinfo;
+/* Mercury @map.delete(M, K) = M'@ — polymorphic over both K and V, so
+ * HLDS prepends TWO type_info args (TI_K, TI_V).  Same arity-mismatch
+ * pattern as @map_keys@: a one-TI sig drops the second TI off the
+ * stack alignment and shifts the actual map pointer one slot, leaving
+ * the runtime traversing random memory. */
+int64_t map_delete(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k) {
+    (void)tinfo_k; (void)tinfo_v;
     int64_t* keys = NULL;
     int64_t* vals = NULL;
     int64_t cap = 0, n = 0;
@@ -3400,8 +3404,15 @@ int64_t map_values(int64_t tinfo, int64_t m) {
 }
 
 /* map.keys(M, Ks) — det: list of keys in some order. */
-int64_t map_keys(int64_t tinfo, int64_t m) {
-    (void)tinfo;
+/* Mercury @map.keys/1@ is polymorphic over both K and V — the HLDS
+ * prepends TWO type_info args (TI_K, TI_V), not one.  Earlier signature
+ * (tinfo, m) caused the bridge's call to emit the 3-arg version against
+ * a 2-arg runtime decl; the LLVM lowering then treated the actual map
+ * pointer as the result and proceeded with random memory as the keys
+ * list, leading to segfaults in @find_radical_atom@'s @map.keys(As)@.
+ * Accept both TCIs and ignore them. */
+int64_t map_keys(int64_t tinfo_k, int64_t tinfo_v, int64_t m) {
+    (void)tinfo_k; (void)tinfo_v;
     int64_t* ks = NULL;
     int64_t cap = 0, n = 0;
     while (!kk_is_nil(m)) {

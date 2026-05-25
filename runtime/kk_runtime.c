@@ -3616,7 +3616,18 @@ int64_t map_overlay(int64_t tinfo_k, int64_t tinfo_v, int64_t m1, int64_t m2) {
     return m;
 }
 
-/* Mercury map.map_values(F, M, M') — apply F to every value. */
+/* Mercury map.map_values(F, M, M') — apply F to every value.
+ * F is a Mercury @func(K, V) = V'@ — TAKES TWO ARGS (key + value).
+ * Earlier impl passed only the value via @kk_call_closure_1@, leaving
+ * the closure's second slot uninitialised; the lambda's V slot then
+ * received the closure pointer itself (or a garbage i64), which
+ * downstream @rational.'*'@ saw as a malformed rational and (via the
+ * @safe_rational_mul@ shim) substituted with @rational(0,1)@.
+ * normal_form's @norm_scale@'s value-mapping then collapsed every
+ * non-zero entry to zero, @map_filter_nonzero@ stripped them all out,
+ * and @norm_inv@ tripped its "division by zero" guard on the now-empty
+ * map.  Pass BOTH k and v so the lambda's V binding matches the actual
+ * map value. */
 int64_t map_map_values(int64_t tinfo_k, int64_t tinfo_v1, int64_t tinfo_v2,
                        int64_t f, int64_t m) {
     (void)tinfo_k; (void)tinfo_v1; (void)tinfo_v2;
@@ -3633,7 +3644,10 @@ int64_t map_map_values(int64_t tinfo_k, int64_t tinfo_v1, int64_t tinfo_v2,
             vals = (int64_t*)realloc(vals, (size_t)cap * sizeof(int64_t));
         }
         keys[n] = k;
-        vals[n] = kk_call_closure_1(f, v);
+        kk_retain(k);
+        kk_retain(v);
+        kk_retain(f);
+        vals[n] = kk_call_closure_2(f, k, v);
         n++;
         m = kk_field(m, 1);
     }

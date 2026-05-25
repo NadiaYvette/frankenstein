@@ -435,7 +435,7 @@ translatePred knownCtors srcModule pred' = do
       -- a tuple even for degree-2 inputs.  Other contexts keep the
       -- normal translateGoalK which doesn't short-circuit comparisons
       -- (adding it there regresses q5's Galois group identification).
-      translateBody = if isMultiOutputDet && predDet pred' == Semidet
+      translateBody = if predDet pred' == Semidet
                       then translateSemidetBody knownCtors initialEnv
                       else translateGoalK knownCtors initialEnv
       bodyExpr goal

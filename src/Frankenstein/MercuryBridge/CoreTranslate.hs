@@ -1025,11 +1025,23 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
                 || isJust (parseMercuryCharLit t)
                 || isJust (parseMercuryFloatLit t)
       isBound t = Set.member t env || isLitArg t
-      -- Walk args from the right, dropping a contiguous run of unbound
-      -- variable names.  Anything else stays in callInputs.
-      (revBoundPrefix, trailingUnbound) =
-        let (suffix, prefix) = span (not . isBound) (reverse args)
-        in (reverse prefix, reverse suffix)
+      -- Identify ALL unbound args, not just a trailing run.  Most
+      -- Mercury preds list inputs first then outputs, so the trailing
+      -- form catches everything; but multi-output preds whose modes
+      -- INTERLEAVE inputs and outputs (e.g. surd's @reduce_atom(K, V,
+      -- !C, !M)@ at the HLDS level becomes @reduce_atom(K, V, C0, C1,
+      -- M0, M1)@ with C1 and M1 outputs separated by M0) need every
+      -- unbound position picked up — otherwise C1 lands in callInputs
+      -- and the call's arity disagrees with the pred's definition
+      -- (forcing the bridge to emit a goal-text-leak stub for that
+      -- call shape).
+      --
+      -- The original trailing-only heuristic is preserved for the
+      -- normal case because, when inputs precede outputs, ALL unbound
+      -- args ARE the trailing run.
+      allUnboundArgs = [a | a <- args, not (isBound a)]
+      revBoundPrefix = [a | a <- args, isBound a]
+      trailingUnbound = allUnboundArgs
       -- Mercury's `private_builtin.type_info_from_typeclass_info` and
       -- `private_builtin.superclass_from_typeclass_info` are 3-place
       -- predicates @pred(TCI, Idx, Out)@; our runtime stubs are 2-arg

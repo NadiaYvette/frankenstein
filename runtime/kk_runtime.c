@@ -3390,10 +3390,21 @@ int64_t map_set(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t 
  * in our stub.  Real Mercury aborts on key-already-present /
  * key-not-found, but stub behaviour is to silently insert/update.
  * Mercury passes 2 TCIs (K, V types). */
-int64_t map_det_insert(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t v) {
+/* Mercury's @map.det_insert(K, V, !M)@ and @map.det_update(K, V, !M)@
+ * expand at HLDS level to @det_insert(TCI_K, TCI_V, K, V, M_in, M_out)@,
+ * with K and V BEFORE the input map.  Mercury's @map.set@ uses the
+ * @(M0, K, V) = M1@ convention with M FIRST.  The bridge passes args
+ * in HLDS order, so the runtime stubs for det_insert/det_update must
+ * accept @(tinfo_k, tinfo_v, k, v, m)@ — not @(tinfo_k, tinfo_v, m, k, v)@
+ * as previously coded (the original signature was a guess that
+ * silently swallowed surd's surd-elliptic insertions: walking the atom
+ * cell as if it were a cons list produced bogus 3-entry atom maps
+ * which propagated as "no radical" through @from_norm_expr@ and
+ * rendered as "0 · F(...)"). */
+int64_t map_det_insert(int64_t tinfo_k, int64_t tinfo_v, int64_t k, int64_t v, int64_t m) {
     return map_set(tinfo_k, tinfo_v, m, k, v);
 }
-int64_t map_det_update(int64_t tinfo_k, int64_t tinfo_v, int64_t m, int64_t k, int64_t v) {
+int64_t map_det_update(int64_t tinfo_k, int64_t tinfo_v, int64_t k, int64_t v, int64_t m) {
     return map_set(tinfo_k, tinfo_v, m, k, v);
 }
 

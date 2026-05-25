@@ -464,6 +464,25 @@ translatePred knownCtors srcModule pred' = do
             -- semidet-failure sentinel (literal 0), which the CALLER's
             -- @output == 0 → 0; _ → 1@ check correctly interprets as
             -- failure.
+            --
+            -- Refcount note: the two-phase pattern below evaluates
+            -- @goal@ TWICE (once via @translateGoalAsTest@ for the
+            -- test scrutinee, once via @bodyExpr@ for the bound
+            -- output).  Each evaluation reads + drops the pred's
+            -- input parameters as it pattern-matches them.  Perceus'
+            -- usage analyzer treats ECase scrutinee + branch as
+            -- @scrut + max(branches)@, so it counts roughly @1+1=2@
+            -- uses per param — but with the goal's internal drops the
+            -- net effect is still @-1@ per param after both phases.
+            -- Force an extra retain on each input parameter so the
+            -- second evaluation finds the input alive.  Without
+            -- this, surd's @lead_coeff(P, LC)@ called from
+            -- @reduce_integrand@'s @if lead_coeff(Num, N0),
+            -- lead_coeff(Den, D0)@ block re-evaluated lead_coeff in
+            -- the if-then-else's then-body and saw the polynomial
+            -- input freed → returned the semidet-fail sentinel @0@ →
+            -- @rational./(N0, 0) = 0/1@ → surd-elliptic rendered
+            -- every leading coefficient as "0 · F(...)".
             (Just oName, Just goal) ->
               let valueBody = bodyExpr goal
                   testBody  = translateGoalAsTest knownCtors initialEnv goal
@@ -1282,8 +1301,18 @@ translateGoalK _kctors _env (GoalCall predName' args) k =
       -- defaulting the rest to 0.
       multiOutMarker = "MULTIOUT:" <> predName' <> "__"
                                    <> T.pack (show (length callInputs))
-      useTupleConvention = Set.member multiOutMarker _kctors
-                        && length trailingUnbound >= 2
+      -- stdlib HOFs that thread multiple accumulators.  The runtime
+      -- (@map_foldl2@, @list_foldl2_impl@) returns a tuple of the final
+      -- accumulator values; route the call through tuple-deconstruction
+      -- so both outputs reach the call site instead of the second one
+      -- defaulting to literal 0.  Surd's @reduce_monomial@ uses
+      -- @map.foldl2(reduce_atom, ...)@ to thread @(Coeff, Atoms)@ — the
+      -- old single-output convention dropped @Atoms@, collapsing every
+      -- @simplify_rad@-produced surd expression to coefficient 0.
+      isStdlibFoldl2 = predName' `elem` ["map.foldl2", "list.foldl2"]
+      useTupleConvention =
+        (Set.member multiOutMarker _kctors || isStdlibFoldl2)
+        && length trailingUnbound >= 2
   in if useTupleConvention
        then
          let tupleVar = "_tuple_result"
@@ -1456,31 +1485,32 @@ translateGoalK kctors env (GoalConstruct var ctor args) k
 -- last-bound value.  Returns the LHS bound to an ELam — the emitter's
 -- lambda-lift pass already heap-allocates this as a closure with the
 -- captured outer-scope variables in fields 1..n.
-translateGoalK kctors env (GoalLambda lhs params mOut body) k =
+translateGoalK kctors env (GoalLambda lhs params outs body) k =
   let -- Inputs are bound on entry to the lambda body.
       bodyInitialEnv = Set.union env (Set.fromList params)
-      bodyTerminator = case mOut of
-        Just o  -> EVar (Name o 0)
-        Nothing -> ELit (LitInt 1)
-      -- For func-form lambdas, wrap the body in an outer ELet
-      -- defaulting the output to 0 so error-path branches still
-      -- satisfy the terminator's reference (same trick as
-      -- translatePred uses for whole-pred bodies).
-      --
-      -- For pred-form lambdas with no output (semidet test or det
-      -- procedure), use 'translateGoalAsTest' so the body's semidet
-      -- semantics propagate — without this, a filter pred like
-      -- @(pred(R::in) is semidet :- float.abs(im(R)) < 1e-6)@
-      -- translates to @translateGoalK body (ELit 1)@, ignoring the
-      -- @float.<@ result and always returning 1.  Det pred bodies
-      -- always succeed in Mercury, so test-mode translation safely
-      -- returns 1 for them too.
-      bodyExpr = case mOut of
-        Just o  ->
-          ELet [[Bind (Name o 0) anyTy (ELit (LitInt 0)) DefVal]]
-               (translateGoalK kctors bodyInitialEnv body bodyTerminator)
-        Nothing ->
-          translateGoalAsTest kctors bodyInitialEnv body
+      -- Terminator depends on how many outputs the lambda has:
+      --   * 0: semidet/det test — body translates via
+      --        'translateGoalAsTest' below, terminator unused.
+      --   * 1: the usual case — return that var.
+      --   * 2+: return a tuple of all outputs so multi-accumulator
+      --        higher-order callers (@map.foldl2@, etc.) can recover
+      --        every output.  Without this, the lambda dropped every
+      --        output after the first — surd's @reduce_atom@'s @!M@
+      --        was discarded, so @map.foldl2(reduce_atom, …)@ in
+      --        @reduce_monomial@ accumulated only the coefficient and
+      --        lost the atom map, dropping the radical part of every
+      --        simplify_rad-produced expression in elliptic.
+      bodyTerminator = case outs of
+        []  -> ELit (LitInt 1)
+        [o] -> EVar (Name o 0)
+        os  -> EApp (ECon (QName "" (Name "tuple" 0)))
+                    [EVar (Name o 0) | o <- os]
+      defaultOuts = ELet
+        [[Bind (Name o 0) anyTy (ELit (LitInt 0)) DefVal | o <- outs]]
+      bodyExpr = case outs of
+        [] -> translateGoalAsTest kctors bodyInitialEnv body
+        _  -> defaultOuts
+                (translateGoalK kctors bodyInitialEnv body bodyTerminator)
       lamParams = [(Name p 0, anyTy) | p <- params]
       lamExpr   = ELam lamParams bodyExpr
   in ELet [[Bind (Name lhs 0) anyTy lamExpr DefVal]] k

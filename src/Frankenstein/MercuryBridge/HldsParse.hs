@@ -60,10 +60,13 @@ data MercuryGoal
   | GoalSwitch Text [(Text, MercuryGoal)]          -- switch on variable
   | GoalConstruct Text Text [Text]                 -- Var = functor(Args)
   | GoalDeconstruct Text Text [Text]               -- functor(Args) = Var
-  | GoalLambda Text [Text] (Maybe Text) MercuryGoal
+  | GoalLambda Text [Text] [Text] MercuryGoal
     -- ^ LHS = (pred|func(params) :- body).  Binds LHS to a closure
-    -- value.  Last field is the optional output-variable name for
-    -- the func form (which yields the value bound to that var).
+    -- value.  Third field is the list of output variable names —
+    -- empty for semidet/det test lambdas, single for the usual func
+    -- form, multiple for det multi-output preds (e.g. @!C@, @!M@ in
+    -- @reduce_atom@) whose lambda body must yield a tuple so callers
+    -- like @map.foldl2@ can recover both accumulators.
   | GoalForeign Text
   | GoalUnparsed Text
   deriving (Show)
@@ -361,11 +364,11 @@ renameLambdaLhses suffix = goTop Set.empty
   where
     rn renamed v = if Set.member v renamed then v <> suffix else v
     goTop renamed g = case g of
-      GoalLambda lhs ps mOut body ->
+      GoalLambda lhs ps outs body ->
         let renamed' = Set.insert lhs renamed
             lhs' = lhs <> suffix
             body' = goTop renamed body  -- params shadow inside body
-        in GoalLambda lhs' ps mOut body'
+        in GoalLambda lhs' ps outs body'
       GoalConj gs -> GoalConj (snd (foldl step (renamed, []) gs))
       GoalDisj gs -> GoalDisj (map (goTop renamed) gs)
       GoalNot inner -> GoalNot (goTop renamed inner)
@@ -667,8 +670,8 @@ parseGoalLines ls0 =
           GoalConj (map parseGoalLines conjParts)
       -- Recognise an inline lambda binding (now safe — outer
       -- multi-conjunct conjunctions were already split above).
-      | Just (lhs, params, mOut, bodyLs) <- splitLambda stripped ->
-          GoalLambda lhs params mOut (parseGoalLines bodyLs)
+      | Just (lhs, params, outs, bodyLs) <- splitLambda stripped ->
+          GoalLambda lhs params outs (parseGoalLines bodyLs)
       -- Mercury negation `not ( body )`.  HLDS prints `not (` as a
       -- line of its own, then the body, then a closing `)` on its
       -- own line.  Without this catch, the line set falls through
@@ -732,7 +735,7 @@ parseGoalLines ls0 =
 -- optional output-mode parameter name (Just for func form), and the
 -- raw body lines (inside the lambda's outer parens, with the closing
 -- `)` trimmed).
-splitLambda :: [Text] -> Maybe (Text, [Text], Maybe Text, [Text])
+splitLambda :: [Text] -> Maybe (Text, [Text], [Text], [Text])
 splitLambda strippedLs = case strippedLs of
   []       -> Nothing
   (l0 : _) ->
@@ -759,7 +762,7 @@ splitLambda strippedLs = case strippedLs of
                               (T.drop 1 restOfHead))
           (paramText, afterParamsOnL0) = case T.breakOn ")" inside of
               (params, after) -> (params, after)
-          (inputs, mOut) = parseLambdaParams paramText isFunc afterParamsOnL0
+          (inputs, outs) = parseLambdaParams paramText isFunc afterParamsOnL0
           parenDelta t =
             let opens  = T.length (T.filter (== '(') t)
                 closes = T.length (T.filter (== ')') t)
@@ -785,7 +788,7 @@ splitLambda strippedLs = case strippedLs of
           -- gets a clean body — otherwise the `,` separating the inner
           -- conjunction and the wrapper's `)`s confuse the splitter.
           stripped = stripLambdaWrappers rawBody
-      in (lhs, inputs, mOut, stripped)
+      in (lhs, inputs, outs, stripped)
 
     -- | Strip the standard `some [] ( % compiler ... )` and inner
     -- `( % conjunction ... )` wrappers Mercury places around every
@@ -817,42 +820,37 @@ splitLambda strippedLs = case strippedLs of
     -- the list of input variable names.  For the func form, the
     -- header continues "= (LambdaHeadVar__M::out)" — captured here
     -- from the 'afterParens' text following the input-param list.
-    parseLambdaParams :: Text -> Bool -> Text -> ([Text], Maybe Text)
+    parseLambdaParams :: Text -> Bool -> Text -> ([Text], [Text])
     parseLambdaParams paramText isFunc afterParens =
       let chunks = map T.strip (T.splitOn "," paramText)
           extractName ch = T.strip (T.takeWhile (\c -> c /= ':' && c /= ' ') ch)
-          -- Extract the mode marker after "::" — in / out / di / uo /
-          -- unused.  An empty mode means we couldn't see one (probably
-          -- pre-mode-inferred dump or a non-standard form); default to
-          -- treating the param as an input to be safe (matches the
-          -- previous behaviour for forms without explicit modes).
           extractMode ch = case T.breakOn "::" ch of
             (_, rest) | not (T.null rest) -> T.strip (T.drop 2 rest)
             _                             -> T.empty
           isInputMode m = T.null m
                        || m == "in"
                        || m == "di"
-                       || T.isPrefixOf "in(" m  -- HO mode like `in((pred(in) is semidet))`
+                       || T.isPrefixOf "in(" m
           named = [ (extractName c, extractMode c) | c <- chunks
                                                    , not (T.null c) ]
           inputs = [ n | (n, m) <- named, isInputMode m ]
           predOuts = [ n | (n, m) <- named, not (isInputMode m) ]
-          mOut
+          -- For func-form lambdas, the return value is encoded after
+          -- the param list as @= (Var::mode)@.  Pred-form lambdas
+          -- collect their outputs from out/uo-mode params.  Returning
+          -- the FULL list (not just the head) lets multi-output pred
+          -- lambdas — @reduce_atom@'s @!C@ + @!M@ pair, used inside
+          -- @map.foldl2@ — emit a tuple terminator so callers can
+          -- thread both accumulators.
+          outs
             | isFunc =
                 case T.breakOn "(" (T.dropWhile (/= '=') afterParens) of
                   (_, rest) | not (T.null rest) ->
                     let inside = T.takeWhile (/= ')') (T.drop 1 rest)
-                    in Just (extractName inside)
-                  _ -> Nothing
-            -- Pred forms with explicit @out@/@uo@ modes get their
-            -- terminator from the FIRST output param (the predicate's
-            -- "primary" return value, matching translatePred's
-            -- choice of @head outputModes@).  The OTHER pred outputs
-            -- stay live as variables the lambda body must bind on its
-            -- own; we just don't pre-register them as inputs.
-            | (o:_) <- predOuts = Just o
-            | otherwise = Nothing
-      in (inputs, mOut)
+                    in [extractName inside]
+                  _ -> []
+            | otherwise = predOuts
+      in (inputs, outs)
 
 -- | Recognise Mercury HLDS if-then-else block structure.  HLDS prints:
 --   ( if

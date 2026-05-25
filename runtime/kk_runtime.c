@@ -3733,33 +3733,48 @@ int64_t map_map_values(int64_t tinfo_k, int64_t tinfo_v1, int64_t tinfo_v2,
     return acc;
 }
 
-/* Mercury map.foldl2(F, M, A, A', B, B') — fold over (K, V) pairs threading
- * TWO accumulators.  F is a 4-arg closure (K, V, A, B) -> {A', B'}.
- * Since we don't have a clean way to return two values from a closure
- * call, route the call result as the FIRST acc and silently drop the
- * second — surd-mercury's only use of foldl2 is for parallel computations
- * where the second accumulator is informational. */
+/* Mercury map.foldl2(F, M, A0, A, B0, B) — fold over (K, V) pairs
+ * threading TWO accumulators.  F is the closure @pred(K, V, A, A', B, B')
+ * is det@; the bridge's GoalLambda translator emits the closure body
+ * with a @tuple(A', B')@ terminator (multi-output convention), so each
+ * call returns a 2-field tuple cell — field 0 is A', field 1 is B'.
+ *
+ * Returns a @tuple(A, B)@ cell so the call site can recover BOTH final
+ * accumulators.  The bridge's @useTupleConvention@ path
+ * (extended for @map.foldl2@) deconstructs this tuple at the caller.
+ * Without that, the second accumulator (atoms map in surd's
+ * @reduce_monomial@) defaulted to literal 0 → @reduce_nested_roots@
+ * received an empty map → norm_expr collapsed to zero → surd-elliptic's
+ * @simplify_rad@ rendered every leading-coefficient term as "0 · F(...)". */
 int64_t map_foldl2(int64_t tinfo_k, int64_t tinfo_v, int64_t tinfo_a, int64_t tinfo_b,
                    int64_t f, int64_t m, int64_t a, int64_t b) {
     (void)tinfo_k; (void)tinfo_v; (void)tinfo_a; (void)tinfo_b;
-    /* Mercury @map.foldl2(P, M, A0, A, B0, B)@ takes a 4-input/2-output
-     * @pred(K, V, A_in, A_out, B_in, B_out) is det@.  The bridge wraps
-     * this as a closure taking 4 args (K, V, A_in, B_in) and returning
-     * the first output (A_out); the second output (B_out) is
-     * unrepresentable in a single i64 return value.  Call with all
-     * FOUR args so the closure sees the correct (K, V, A, B); the
-     * returned value updates @a@ and we keep @b@ unchanged (best
-     * effort — surd-mercury's only foldl2 use is @reduce_atom@ where
-     * the second accumulator is a map being built in-place, which the
-     * Mercury source handles by re-deriving it from the inputs). */
     while (!kk_is_nil(m)) {
         int64_t p = kk_field(m, 0);
         int64_t k = kk_pair_fst(p);
         int64_t v = kk_pair_snd(p);
-        a = kk_call_closure_4(f, k, v, a, b);
+        kk_retain(k);
+        kk_retain(v);
+        kk_retain(f);
+        int64_t result = kk_call_closure_4(f, k, v, a, b);
+        if (kk_is_heap_ptr(result) && kk_nfields(result) >= 2) {
+            a = kk_field(result, 0);
+            b = kk_field(result, 1);
+            kk_retain(a);
+            kk_retain(b);
+            kk_drop(result);
+        } else {
+            a = result;
+        }
         m = kk_field(m, 1);
     }
-    return a;
+    /* Return tuple(A, B) using the standard "tuple" ctor tag (20379 from
+     * stableConTag("tuple") — matches the bridge's GoalLambda multi-output
+     * terminator and useTupleConvention's PatCon "tuple" deconstruction). */
+    int64_t tup = kk_alloc_con(20379, 2);
+    kk_set_field(tup, 0, a);
+    kk_set_field(tup, 1, b);
+    return tup;
 }
 
 /* Mercury list.foldl2(P, L, A, A', B, B') — list fold threading TWO accs.

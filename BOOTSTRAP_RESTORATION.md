@@ -122,19 +122,51 @@ sanitize_name_c(text)`, matching the plotkin variant's direct ABI.
 Bootstrap fixed-point/E2E still 15/26 + 0/21 — exposed a *deeper* bug:
 stage 1 self-compiler now infinite-recurses on every input in
 `Frankenstein_dszd...$200` (the let-go closure for
-`collectReferencedCtors`'s flattened `(dd, cd)` iteration).  Backtrace:
+`collectReferencedCtors`'s flattened `(dd, cd)` iteration).
 
-```
-#0  getenv() from kk_tag(non-heap ptr)
-#1  kk_tag
-#2..N  dszd...$200  ; infinite stack frames
+### Target D: maybeToList$1 + forM$1 NULL stubs — FIXED
+
+Root cause of dszd200 infinite recursion: `GHC_Internal_Data_Maybe_maybeToList$1`
+was a NULL-returning $1 stub (the $1 family was missed by Target B which
+only handled $0).  In `OrganIR/Consumer.hs:62`:
+
+```haskell
+allData = datas ++ maybeToList (synthSConDataDecl (O.modDefs m))
 ```
 
-Each frame allocates non-tail, so even a few-element list grows the
-stack indefinitely.  Suggests the list traversed isn't terminating —
-field 1 of the cons cell keeps returning a non-nil pointer.  Either
-the JSON parser is producing a circular structure for `progData`, or
-the `kk_field` ABI for cons cells diverges between writer/reader.
+For `examples/effect_state.json` (no data_decls, no SCon defs):
+- `datas = []`
+- `maybeToList Nothing` → NULL (stub)
+- `[] ++ NULL` → NULL (via `kk_haskell_chars_concat`, since b=NULL)
+- `progData = NULL`
+
+`collectReferencedCtors → dszd196(NULL) → kk_field(0,_) → 0 → dszd200(0, dataCons(0)=0)`
+which then loops indefinitely on `kk_field(0, 1) = 0`.
+
+Fix in `self-host/shim_ghc_dicts.c`:
+```c
+int64_t ghc_maybeToList_1(int64_t m) __asm__("GHC_Internal_Data_Maybe_maybeToList$1");
+int64_t ghc_maybeToList_1(int64_t m) {
+    if (!kk_is_heap_ptr(m) || kk_nfields(m) == 0) return kk_nil();
+    return kk_cons(kk_field(m, 0), kk_nil());
+}
+```
+
+Also added `forM$1` (Traversable) to `shim_ghc_list.c` — paralleled
+the existing `forM_$1` (Foldable underscore variant) but keeps results.
+
+**Verification:** `examples/effect_state.json` now end-to-end
+`compile → MLIR → bin → 100` (matches 10*10 from state effect).
+Hellos 25/26 + surd-mercury 9/9 still pass.
+
+**Instrumentation kept:** `runtime/kk_runtime.c` now has env-var-gated
+field/tag trace (`KK_FIELD_TRACE=1`, `KK_TAG_TRACE_MAX=N` etc.).
+`self-host/driver.c` has `FRANKENSTEIN_DUMP_PROGDATA=1` for per-pass
+field[2] inspection.  Both inactive by default.
+
+**Remaining:** 194 NULL `$N` stubs still exist; many are unreached.
+The current next crash signature is in `emitLetBindings_lambda197299`
+→ another NULL `$N` (TBD which) — iterate.
 
 ## Original Two Concrete Restoration Targets
 

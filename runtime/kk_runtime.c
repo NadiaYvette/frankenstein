@@ -183,23 +183,38 @@ int64_t kk_tag(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) {
         if (getenv("KK_TAG_TRACE")) {
             static int n0 = 0;
-            if (n0 < 100) fprintf(stderr, "[kk_tag %d] non-heap ptr=%ld → 0\n", n0++, ptr);
+            int lim = getenv("KK_TAG_TRACE_MAX") ? atoi(getenv("KK_TAG_TRACE_MAX")) : 100;
+            if (n0 < lim) fprintf(stderr, "[kk_tag %d] non-heap ptr=%ld → 0\n", n0++, ptr);
         }
         return 0;
     }
     int64_t t = *(int64_t*)ptr;
     if (getenv("KK_TAG_TRACE")) {
         static int n1 = 0;
-        if (n1 < 100) fprintf(stderr, "[kk_tag %d] heap ptr=%p tag=%ld (0x%lx)\n", n1++, (void*)ptr, t, t);
+        int lim = getenv("KK_TAG_TRACE_MAX") ? atoi(getenv("KK_TAG_TRACE_MAX")) : 100;
+        if (n1 < lim) fprintf(stderr, "[kk_tag %d] heap ptr=%p tag=%ld (0x%lx)\n", n1++, (void*)ptr, t, t);
     }
     return t;
 }
 
 /* Read field[idx] from a boxed value (fields start after the tag) */
 int64_t kk_field(int64_t ptr, int64_t idx) {
-    if (!kk_is_heap_ptr(ptr)) return 0;
+    if (!kk_is_heap_ptr(ptr)) {
+        if (getenv("KK_FIELD_TRACE")) {
+            static int nf0 = 0;
+            int lim = getenv("KK_FIELD_TRACE_MAX") ? atoi(getenv("KK_FIELD_TRACE_MAX")) : 200;
+            if (nf0 < lim) fprintf(stderr, "[kk_field %d] non-heap base=%ld idx=%ld → 0\n", nf0++, ptr, idx);
+        }
+        return 0;
+    }
     int64_t* fields = (int64_t*)(ptr + 8);
-    return fields[idx];
+    int64_t v = fields[idx];
+    if (getenv("KK_FIELD_TRACE")) {
+        static int nf1 = 0;
+        int lim = getenv("KK_FIELD_TRACE_MAX") ? atoi(getenv("KK_FIELD_TRACE_MAX")) : 200;
+        if (nf1 < lim) fprintf(stderr, "[kk_field %d] base=%p tag=0x%lx idx=%ld → 0x%lx\n", nf1++, (void*)ptr, *(int64_t*)ptr, idx, v);
+    }
+    return v;
 }
 
 /* Structural equality for boxed values.

@@ -520,6 +520,35 @@ static int64_t forM_apply(int64_t clos, int64_t f) {
 int64_t ghc_foldable_forM_1(int64_t xs) __asm__("GHC_Internal_Data_Foldable_forM_$1");
 int64_t ghc_foldable_forM_1(int64_t xs) { return make_closure1(&forM_apply, xs); }
 
+/* forM (Traversable, not the underscore version): forM xs f = mapM f xs.
+ * Keeps results — unlike forM_ which discards them.
+ * For the bootstrap path, the only monad in use here is State. */
+static int64_t forM_keep_state_runner(int64_t clos, int64_t s) {
+    int64_t xs = kk_field(clos, 1);
+    int64_t f  = kk_field(clos, 2);
+    kk_retain(f);
+    int64_t *arr = NULL; int64_t cap = 0, n = 0;
+    while (!kk_is_nil(xs)) {
+        kk_retain(f);
+        int64_t action = call1(f, kk_list_head(xs));
+        int64_t pair = call1(action, s);
+        int64_t a = kk_fst(pair);
+        s = kk_snd(pair);
+        if (n >= cap) { cap = cap ? cap * 2 : 16; arr = realloc(arr, (size_t)cap * sizeof(int64_t)); }
+        arr[n++] = a;
+        xs = kk_list_tail(xs);
+    }
+    int64_t result_list = array_to_list(arr, n);
+    free(arr);
+    return kk_pair(result_list, s);
+}
+static int64_t forM_keep_apply(int64_t clos, int64_t f) {
+    int64_t xs = kk_field(clos, 1);
+    return make_closure2(&forM_keep_state_runner, xs, f);
+}
+int64_t ghc_traversable_forM_1(int64_t xs) __asm__("GHC_Internal_Data_Traversable_forM$1");
+int64_t ghc_traversable_forM_1(int64_t xs) { return make_closure1(&forM_keep_apply, xs); }
+
 int64_t ghc_foldable_length_1(int64_t xs) __asm__("GHC_Internal_Data_Foldable_length$1");
 int64_t ghc_foldable_length_1(int64_t xs) {
     int64_t n = 0;

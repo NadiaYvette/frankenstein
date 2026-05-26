@@ -204,3 +204,18 @@ int64_t data_text_dropWhile_1(int64_t pred) {
     kk_set_field(cell, 1, pred);
     return cell;
 }
+
+/* ------------------------------------------------------------------ */
+/*  GHC.Internal.Data.Maybe.maybeToList: Maybe a -> [a]                */
+/*  Nothing  -> []                                                      */
+/*  Just x   -> [x]                                                     */
+/*                                                                      */
+/*  Discriminates by field count, since the tag of `Just` depends on    */
+/*  stableConTag's hash (unstable to read off without recomputing).     */
+/*  Nothing is a 0-field constructor; Just is 1-field.                  */
+/* ------------------------------------------------------------------ */
+int64_t ghc_maybeToList_1(int64_t m) __asm__("GHC_Internal_Data_Maybe_maybeToList$1");
+int64_t ghc_maybeToList_1(int64_t m) {
+    if (!kk_is_heap_ptr(m) || kk_nfields(m) == 0) return kk_nil();
+    return kk_cons(kk_field(m, 0), kk_nil());
+}

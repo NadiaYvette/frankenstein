@@ -84,6 +84,14 @@ extern int64_t Frankenstein_Debug_DumpProgram_dumpProgram(int64_t);
 #endif
 
 static void maybe_dump_ast(const char* label, int64_t prog) {
+    if (getenv("FRANKENSTEIN_DUMP_PROGDATA")) {
+        int64_t f2 = kk_field(prog, 2);
+        fprintf(stderr, "[progData after %s] field[2] = %p heap=%d",
+                label, (void*)f2, kk_is_heap_ptr(f2));
+        if (kk_is_heap_ptr(f2))
+            fprintf(stderr, " tag=%ld nf=%ld", (long)kk_tag(f2), (long)kk_nfields(f2));
+        fprintf(stderr, "\n");
+    }
     if (!getenv("FRANKENSTEIN_DUMP_AST")) return;
     int64_t dump = FRK_dumpProgram(prog);
     if (kk_is_string(dump)) {

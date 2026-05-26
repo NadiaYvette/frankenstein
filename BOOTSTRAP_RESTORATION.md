@@ -1,13 +1,15 @@
-# Bootstrap Restoration Status — 2026-05-26
+# Bootstrap Restoration Status — 2026-05-27
 
 ## Baseline vs Current
 
-| Metric | Baseline (`0c461f7`, May 17) | Current (`885f229`) |
-|---|---|---|
-| Phase 8 E2E (default) | 18/21 (was 21/21 in plotkin) | **0/21** |
-| Phase 9c E2E | 18/21 | **0/21** |
-| Phase 10c E2E | 18/21 | **0/21** |
-| Fixed-point (s2→s3) | **26/26** (`*** REACHED ***`) | **2/26** |
+| Metric | Baseline (`0c461f7`, May 17) | Pre-D (`885f229`) | Post-D (`69e6aad`) |
+|---|---|---|---|
+| Phase 8 E2E (default) | 18/21 (was 21/21 in plotkin) | 0/21 | **15/21** |
+| Phase 9c E2E (stage 2) | 18/21 | 0/21 | 0/21 |
+| Phase 10c E2E (stage 3) | 18/21 | 0/21 | 0/21 |
+| Stage 2 compile | n/a | (crashed) | 26/26 |
+| Stage 3 compile | n/a | (n/a) | 26/26 |
+| Fixed-point (s2→s3) match | **26/26** (`*** REACHED ***`) | 15/26 | 13/26 |
 
 ## Regression Origin
 

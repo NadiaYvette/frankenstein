@@ -53,7 +53,47 @@ Functor instance dictionary), the call dies.
 | `Kind_Kind_*`, `Type_Type_*` | 7 | Type system |
 | Other | ~22 | misc |
 
-## Two Concrete Restoration Targets
+## Progress Log (2026-05-26)
+
+### Target A: Linker case consistency — DONE (`134795a`)
+
+Changed `unifiedName = QName "frankenstein"` → `QName "Frankenstein"` in
+`Linker.hs:101` so multi-program linking's modPrefix is `Frankenstein_`
+(matching single-program linking's prefix-match check on already-mangled
+def names).  Updated PostProcess.hs's hardcoded `frankenstein_` extern
+symbol prefix to match.
+
+**Result**: Fixed-point check (s2 vs s3): **2/26 → 15/26** (matches
+`715169a` baseline).  E2E still 0/21 (different root cause).
+
+### Target B: GHC.Internal stubs — PARTIAL (`ef709a3`)
+
+Provided minimal implementations for the top NULL-returning `$0` stubs
+in new file `self-host/shim_ghc_dicts.c`:
+- Either Monad/Applicative/Functor: return `KK_EITHER_MONAD_MARKER`
+  (existing `shim_ghc_prim.c` dispatches on this for the actual ops)
+- Show dicts for List/Maybe/Tuple2: placeholder closure
+- emptyCallStack, fst, snd, not, dataToTagSmall#, isDigit, isSpace
+- Data.Text.dropWhile$1: predicate-closure that walks bytes
+
+Also: bulk renamed `frankenstein_Frankenstein_*` → `Frankenstein_*` in
+driver.c / main.c / cross_module_aliases.c / A_sanitize_shim.c (these
+hadn't been updated post-Target-A, causing call-to-NULL in main).
+
+Critical fix: `build.sh:Phase 5b` now links shims BEFORE
+Core_*.o / MlirEmit_*.o / etc., matching Phase 9b/10b's order.  Without
+this, the auto-generated NULL-returning $0 stubs in module .o files
+won (under `--allow-multiple-definition`).
+
+**Crash trace movement**:
+- `main → call <0> (unresolved direct)` — fixed
+- `parseJSON → call *%rax (NULL via dropWhile)` — fixed
+- `flattenDef → call *%rax (NULL via ???)` — still open
+
+**Result so far**: Fixed-point still 15/26, E2E still 0/21.  $0 stub
+count: 0 (down from 118 pre-fix).
+
+## Original Two Concrete Restoration Targets
 
 ### Target A: Linker case consistency (highest value)
 

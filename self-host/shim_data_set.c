@@ -26,6 +26,8 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "../runtime/kk_runtime.h"
 
 /* --- Set representation using BST nodes --- */
@@ -50,6 +52,21 @@ static int64_t set_bin(int64_t sz, int64_t elem,
 
 static int set_is_tip(int64_t s) {
     return !kk_is_heap_ptr(s) || kk_tag(s) == SET_TIP_TAG;
+}
+
+/* Force a Set argument that may be a LAZY thunk wrapping the real BST.
+ * Frankenstein's CAF emitter (e.g. `externalRuntimeFns`) returns
+ * `kk_thunk_create(...)` for CAF results; downstream Set.union /
+ * Set.toList walk the cell as a BST without forcing it first,
+ * reading the thunk's closure/eval-flag fields as "tree" pointers
+ * and emitting garbage elements.  Force any LAZY-tagged Set arg here
+ * so set ops always see the real BST. */
+#define KK_THUNK_TAG_S 0x4C415A59LL
+extern int64_t kk_thunk_force(int64_t);
+static inline int64_t set_force(int64_t s) {
+    if (!kk_is_heap_ptr(s)) return s;
+    if (kk_tag(s) == KK_THUNK_TAG_S) return kk_thunk_force(s);
+    return s;
 }
 
 static int64_t set_size(int64_t s) {
@@ -117,6 +134,16 @@ static int64_t set_balanceR(int64_t e, int64_t l, int64_t r) {
 /* Balanced BST insert using weight-balanced tree rotations.
  * Retain shared fields from old node when creating new nodes. */
 static int64_t set_insert(int64_t x, int64_t s) {
+    if (getenv("KK_SET_INSERT_TRACE")) {
+        int64_t magic = (kk_is_heap_ptr(x)) ? *(int64_t*)x : 0;
+        if (magic != 0x4B4B535452494E47LL) {
+            int64_t f0 = (kk_is_heap_ptr(x)) ? *(int64_t*)(x+8) : 0;
+            int64_t f1 = (kk_is_heap_ptr(x)) ? *(int64_t*)(x+16) : 0;
+            int64_t nf = (kk_is_heap_ptr(x)) ? kk_nfields(x) : 0;
+            fprintf(stderr, "[set_insert] non-Text x=%p magic=%#lx nf=%ld f0=%#lx f1=%#lx\n",
+                    (void*)x, (long)magic, (long)nf, (long)f0, (long)f1);
+        }
+    }
     if (set_is_tip(s))
         return set_bin(1, x, set_tip(), set_tip());
     int64_t cmp = kk_compare(x, set_elem(s));
@@ -200,6 +227,10 @@ static int64_t set_to_list_go(int64_t s, int64_t acc) {
     if (set_is_tip(s)) return acc;
     acc = set_to_list_go(set_right(s), acc);
     int64_t e = set_elem(s); kk_retain(e);
+    if (getenv("KK_SET_TOLIST_TRACE")) {
+        int64_t magic = (kk_is_heap_ptr(e)) ? *(int64_t*)e : 0;
+        fprintf(stderr, "[set_to_list] elem=%p magic=%#lx\n", (void*)e, (long)magic);
+    }
     acc = kk_cons(e, acc);
     acc = set_to_list_go(set_left(s), acc);
     return acc;
@@ -276,7 +307,7 @@ int64_t set_singleton_1(int64_t x) {
 int64_t set_insert_2(int64_t x, int64_t s)
     __asm__("Data_Set_Internal_insert$2");
 int64_t set_insert_2(int64_t x, int64_t s) {
-    return set_insert(x, s);
+    return set_insert(x, set_force(s));
 }
 
 /* Closure trampolines for set operations */
@@ -299,7 +330,7 @@ int64_t set_insert_0(void) {
 int64_t set_member_2(int64_t x, int64_t s)
     __asm__("Data_Set_Internal_member$2");
 int64_t set_member_2(int64_t x, int64_t s) {
-    return set_member(x, s);
+    return set_member(x, set_force(s));
 }
 
 /* notMember$0 — function reference */
@@ -322,14 +353,14 @@ int64_t set_delete_0(void) {
 int64_t set_null_1(int64_t s)
     __asm__("Data_Set_Internal_null$1");
 int64_t set_null_1(int64_t s) {
-    return set_is_tip(s) ? 1 : 0;
+    return set_is_tip(set_force(s)) ? 1 : 0;
 }
 
 /* union$2(s1, s2) */
 int64_t set_union_2(int64_t s1, int64_t s2)
     __asm__("Data_Set_Internal_union$2");
 int64_t set_union_2(int64_t s1, int64_t s2) {
-    return set_union(s1, s2);
+    return set_union(set_force(s1), set_force(s2));
 }
 
 /* union$3 — 3-arg variant (first arg is Ord dict, ignored) */
@@ -337,14 +368,14 @@ int64_t set_union_3(int64_t _dict, int64_t s1, int64_t s2)
     __asm__("Data_Set_Internal_union$3");
 int64_t set_union_3(int64_t _dict, int64_t s1, int64_t s2) {
     (void)_dict;
-    return set_union(s1, s2);
+    return set_union(set_force(s1), set_force(s2));
 }
 
 /* difference$2(s1, s2) */
 int64_t set_difference_2(int64_t s1, int64_t s2)
     __asm__("Data_Set_Internal_difference$2");
 int64_t set_difference_2(int64_t s1, int64_t s2) {
-    return set_difference(s1, s2);
+    return set_difference(set_force(s1), set_force(s2));
 }
 
 /* fromList$1(list) */
@@ -366,7 +397,7 @@ int64_t set_fromList_0(void) {
 int64_t set_toList_1(int64_t s)
     __asm__("Data_Set_Internal_toList$1");
 int64_t set_toList_1(int64_t s) {
-    return set_to_asc_list(s);
+    return set_to_asc_list(set_force(s));
 }
 
 /* toList$0 — function reference */
@@ -381,7 +412,7 @@ int64_t set_toList_0(void) {
 int64_t set_toAscList_1(int64_t s)
     __asm__("Data_Set_Internal_toAscList$1");
 int64_t set_toAscList_1(int64_t s) {
-    return set_to_asc_list(s);
+    return set_to_asc_list(set_force(s));
 }
 
 /* unions$1([set]) */

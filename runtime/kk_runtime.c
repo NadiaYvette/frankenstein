@@ -1753,9 +1753,12 @@ int64_t kk_str_flatten(int64_t s_i) {
      * root cause. */
     if (s->magic != KK_STRING_MAGIC) {
         if (getenv("KK_STR_FLATTEN_TRACE")) {
+            extern int kk_arena_maybe_owns(const void* ptr);
+            int in_arena = kk_arena_maybe_owns((const void*)s_i);
             fprintf(stderr,
-                "kk_str_flatten: non-string cell at %p magic=%#lx — returning empty\n",
-                (void*)s_i, (long)s->magic);
+                "kk_str_flatten: non-string cell at %p magic=%#lx arena=%d slot0=%#lx slot1=%#lx — returning empty\n",
+                (void*)s_i, (long)s->magic, in_arena,
+                (long)s->rc, (long)s->byte_len);
         }
         return kk_string_empty();
     }

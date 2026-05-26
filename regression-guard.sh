@@ -34,7 +34,11 @@ echo "########################################"
 echo
 echo "=== Hello-worlds ==="
 HELLOS_OUT=$(bash test-hellos.sh 2>&1)
+# Match either "X passed, Y failed" (mixed run) or "ALL HELLOS PASS (X/Y)" (clean).
 HELLOS_PASS=$(echo "$HELLOS_OUT" | grep -oE '[0-9]+ passed' | head -1 | awk '{print $1}')
+if [ -z "$HELLOS_PASS" ]; then
+    HELLOS_PASS=$(echo "$HELLOS_OUT" | grep -oE 'ALL HELLOS PASS \([0-9]+/[0-9]+\)' | head -1 | grep -oE '\([0-9]+' | grep -oE '[0-9]+')
+fi
 HELLOS_PASS="${HELLOS_PASS:-0}"
 echo "  $HELLOS_PASS passed (baseline: $HELLOS_MIN)"
 

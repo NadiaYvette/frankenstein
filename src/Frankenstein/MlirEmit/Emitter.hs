@@ -380,9 +380,15 @@ emitFnAsValueWithArgs fnName arity suppliedArgs
       -- Arity-0 function (CAF): call it to get the value it produces.
       -- In GHC, top-level functions like `ctorsInExpr = go where go ...`
       -- compile to 0-arity functions that return a closure.
+      -- CAF bodies that end with `kk_thunk_create` (e.g. `externalRuntimeFns`)
+      -- return a LAZY thunk — force it before downstream uses dispatch on
+      -- the value's tag.  kk_thunk_force is a no-op for non-LAZY tags,
+      -- so this is safe for CAFs that return values directly.
+      callName <- freshName "v"
       resultName <- freshName "v"
       pure ([ "// fn-as-value (CAF): call @" <> fnName <> " to get its result"
-            , "%" <> resultName <> " = func.call @" <> fnName <> "() : () -> i64"
+            , "%" <> callName <> " = func.call @" <> fnName <> "() : () -> i64"
+            , "%" <> resultName <> " = func.call @kk_thunk_force(%" <> callName <> ") : (i64) -> i64"
             ], resultName)
   | otherwise = emitPapClosure fnName arity suppliedArgs
 

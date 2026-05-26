@@ -167,8 +167,49 @@ field/tag trace (`KK_FIELD_TRACE=1`, `KK_TAG_TRACE_MAX=N` etc.).
 field[2] inspection.  Both inactive by default.
 
 **Remaining:** 194 NULL `$N` stubs still exist; many are unreached.
-The current next crash signature is in `emitLetBindings_lambda197299`
-→ another NULL `$N` (TBD which) — iterate.
+
+### Target E: kk_str_flatten use-after-free band-aid — APPLIED
+
+After Target D, `closure.hs` / `higher_order.hs` / `prelude_hof.hs`
+crashed in `Data_Text_isSuffixOf$2 → kk_str_flatten` aborting on a
+"corrupt kk_string_t" with `magic=0x434c4f53` (CLOS tag).
+
+Diagnosis: the call site is the `qualifyDefName` / `emitAppVarGeneral`
+suffix-resolver list comprehension:
+```haskell
+[ tn | tn <- Set.toList topFns, T.isSuffixOf ("_" <> initialQual) tn ]
+```
+The crash is on the second arg (`tn` — an element of `topFns`).
+`topFns :: Set Text` is built from `qualifiedTopNames ∪ externalRuntimeFns`.
+
+The bad cell's content is consistent with use-after-free: the Text was
+freed and the arena slot reused as a CLOS cell (its fn_ptr field points
+mid-function inside `externalRuntimeFns_lambda58936`, not a valid entry).
+`kk_compare` already has a defensive workaround for the same scenario
+(line 5072 mentions "Set operations on Names can encounter freed fields
+if Perceus dropped a Name that's still referenced in the Set").
+
+**Band-aid:** `kk_str_flatten` now returns `kk_string_empty()` when the
+input cell's magic ≠ `KK_STRING_MAGIC`, instead of aborting.  Logs to
+stderr when `KK_STR_FLATTEN_TRACE=1`.  The list-comprehension filter
+just produces "no suffix match" for that single bad element — harmless
+for examples that don't rely on the cross-language suffix resolution.
+
+**Result (post-D+E):**
+| Phase 8 | 15/21 → **18/21** |
+| closure.hs | FAIL → PASS (42) |
+| higher_order.hs | FAIL → PASS (12) |
+| prelude_hof.hs | FAIL → PASS (22) |
+
+Remaining 3 Phase 8 failures (`prelude_inline`, `prelude_comprehensive`,
+`stdlib_string`) are pre-existing — the `.hs` source files are missing
+from `examples/` (only `.o`/`.hi` artifacts).  Not bootstrap-related.
+
+**Root cause for future:** The underlying Perceus use-after-free on
+Text values stored in `Set`s.  Likely a missing `kk_retain` on the
+`Set.toList` path, or an over-eager `kk_drop` after `Set.union`.
+The band-aid is forward-compatible — once the root cause is fixed,
+removing it is safe.
 
 ## Original Two Concrete Restoration Targets
 

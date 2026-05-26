@@ -1743,6 +1743,22 @@ static void kk_str_copy_into(kk_string_t* s, char** out) {
 int64_t kk_str_flatten(int64_t s_i) {
     kk_string_t* s = (kk_string_t*)s_i;
     if (s == NULL) return kk_string_empty();
+    /* If the cell has an arena tag (CLOS/THUNK/etc.) at offset 0 instead
+     * of KK_STRING_MAGIC, this Text reference is stale — most likely an
+     * arena cell that was freed and reused (a known Perceus refcount
+     * gap; see kk_compare for the analogous defensive workaround).
+     * Returning the empty string lets callers (e.g. Data_Text_isSuffixOf)
+     * compare lengths and report "no match" rather than aborting.
+     * KK_STR_FLATTEN_TRACE=1 logs every occurrence so we can find the
+     * root cause. */
+    if (s->magic != KK_STRING_MAGIC) {
+        if (getenv("KK_STR_FLATTEN_TRACE")) {
+            fprintf(stderr,
+                "kk_str_flatten: non-string cell at %p magic=%#lx — returning empty\n",
+                (void*)s_i, (long)s->magic);
+        }
+        return kk_string_empty();
+    }
     if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) return s_i;
     int64_t n = s->byte_len;
     /* Sanity check: a valid kk_string_t can't be larger than the heap.

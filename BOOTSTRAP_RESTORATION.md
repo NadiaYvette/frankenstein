@@ -2,14 +2,20 @@
 
 ## Baseline vs Current
 
-| Metric | Baseline (`0c461f7`, May 17) | Pre-D (`885f229`) | Post-D (`69e6aad`) |
-|---|---|---|---|
-| Phase 8 E2E (default) | 18/21 (was 21/21 in plotkin) | 0/21 | **15/21** |
-| Phase 9c E2E (stage 2) | 18/21 | 0/21 | 0/21 |
-| Phase 10c E2E (stage 3) | 18/21 | 0/21 | 0/21 |
-| Stage 2 compile | n/a | (crashed) | 26/26 |
-| Stage 3 compile | n/a | (n/a) | 26/26 |
-| Fixed-point (s2→s3) match | **26/26** (`*** REACHED ***`) | 15/26 | 13/26 |
+| Metric | Baseline (`0c461f7`, May 17) | Pre-D (`885f229`) | Post-D (`69e6aad`) | Post-E (`c57f1f6`) |
+|---|---|---|---|---|
+| Phase 8 E2E (default) | 18/21 (was 21/21 in plotkin) | 0/21 | 15/21 | **18/21 ✓ (matches baseline)** |
+| Phase 9c E2E (stage 2) | 18/21 | 0/21 | 0/21 | 0/21 |
+| Phase 10c E2E (stage 3) | 18/21 | 0/21 | 0/21 | 0/21 |
+| Stage 2 compile | n/a | crashed | 26/26 (fallbacks) | 26/26 (more real, fewer fallbacks) |
+| Stage 3 compile | n/a | n/a | 26/26 | 26/26 (many timeouts → fallback) |
+| Fixed-point (s2→s3) match | **26/26** (`*** REACHED ***`) | 15/26 | 13/26 | 5/26 |
+
+The post-E fixed-point drop (13→5) is artefactual: Target E lets stage 2
+produce more real MLIR for previously-falling-back modules, while stage 3
+times out on those same modules (it's compiled via the slower stage 2
+binary). Real-vs-fallback diff = "differ".  Bumping the per-module
+timeout in build.sh's compile_stage would likely recover most matches.
 
 ## Regression Origin
 

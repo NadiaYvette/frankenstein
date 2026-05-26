@@ -156,8 +156,12 @@ echo "=== Phase 5b: Link self-hosted compiler ==="
 # first symbol seen wins, so shims (real implementations) must precede
 # the Core_*.o / MlirEmit_*.o / etc. files (which contain auto-generated
 # NULL-returning $0 stubs).  Matches Phase 9b/10b's link ordering.
-SHIM_OBJS_5B=$(ls "$OUT"/*.o | grep -vE '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_|main\.o|-self-ir\.o|factorial-self-ir|_standalone\.o)')
-STAGE_OBJS_5B=$(ls "$OUT"/*.o | grep -E '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_)' | grep -v 'self-ir\.o' | grep -v '_standalone\.o')
+# A SHIM is anything matching shim_* / A_sanitize_shim / cross_module_* / driver / stdlib_shims / kk_*.
+# All other .o files are stage objects (compiled from .hs).  Explicit allow-list
+# avoids accidentally including module .o files like Debug_DumpProgram.o that
+# happen to not match the older deny-list regex.
+SHIM_OBJS_5B=$(ls "$OUT"/*.o | grep -E '/(shim_|A_sanitize_shim|cross_module_|driver|stdlib_shims|kk_)' | grep -v 'self-ir\.o' | grep -v 'factorial-self-ir' | grep -v '_standalone\.o')
+STAGE_OBJS_5B=$(ls "$OUT"/*.o | grep -vE '/(shim_|A_sanitize_shim|cross_module_|driver|main|stdlib_shims|kk_|.*self-ir\.o|factorial-self-ir|_standalone\.o)')
 clang -O2 -o self-host/frankenstein-self-compiler $SHIM_OBJS_5B $STAGE_OBJS_5B -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files \
   -Wl,--allow-multiple-definition

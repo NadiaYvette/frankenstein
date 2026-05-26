@@ -18,7 +18,7 @@
 /* ------------------------------------------------------------------ */
 
 /* --- Core/Types.o selectors (module-qualified) --- */
-#define T(name) frankenstein_Frankenstein_Core_Types_##name
+#define T(name) Frankenstein_Core_Types_##name
 extern int64_t T(nameText)(int64_t);
 extern int64_t T(nameUnique)(int64_t);
 extern int64_t T(qnameName)(int64_t);
@@ -83,20 +83,20 @@ extern int64_t T(tvKind)(int64_t);
 #define tvKind        T(tvKind)
 
 /* --- Core/ConTags.o --- */
-extern int64_t frankenstein_Frankenstein_Core_ConTags_conKey(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_ConTags_assignProgramTags(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_ConTags_collectReferencedCtors(int64_t);
+extern int64_t Frankenstein_Core_ConTags_conKey(int64_t);
+extern int64_t Frankenstein_Core_ConTags_assignProgramTags(int64_t);
+extern int64_t Frankenstein_Core_ConTags_collectReferencedCtors(int64_t);
 
 /* --- Core/Perceus.o --- */
-extern int64_t frankenstein_Frankenstein_Core_Perceus_unitType(void);
-extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t);
+extern int64_t Frankenstein_Core_Perceus_unitType(void);
+extern int64_t Frankenstein_Core_Perceus_insertPerceus(int64_t);
 
 /* --- Core/Evidence.o --- */
-extern int64_t frankenstein_Frankenstein_Core_Evidence_anyType(void);
-extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePass(int64_t);
+extern int64_t Frankenstein_Core_Evidence_anyType(void);
+extern int64_t Frankenstein_Core_Evidence_evidencePass(int64_t);
 
 /* --- MlirEmit/Emitter.o --- */
-extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t);
+extern int64_t Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t);
 
 /* --- Data.Map query (from shims, mangled arity suffixes) --- */
 int64_t shim_map_lookup(int64_t key, int64_t map) __asm__("Data_Map_Internal_lookup$2");
@@ -107,26 +107,26 @@ int64_t shim_set_toAscList(int64_t set) __asm__("Data_Set_Internal_toAscList$1")
 
 
 /* --- Core/EffectOpt.o --- */
-extern int64_t frankenstein_Frankenstein_Core_EffectOpt_emptyStats(void);
-extern int64_t frankenstein_Frankenstein_Core_EffectOpt_eosTailRes(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_EffectOpt_eosInlined(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_EffectOpt_eosEliminated(int64_t);
+extern int64_t Frankenstein_Core_EffectOpt_emptyStats(void);
+extern int64_t Frankenstein_Core_EffectOpt_eosTailRes(int64_t);
+extern int64_t Frankenstein_Core_EffectOpt_eosInlined(int64_t);
+extern int64_t Frankenstein_Core_EffectOpt_eosEliminated(int64_t);
 
 /* --- Core/CycleAnalysis.o selectors --- */
-extern int64_t frankenstein_Frankenstein_Core_CycleAnalysis_ciName(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_CycleAnalysis_ciCyclic(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_CycleAnalysis_ciReason(int64_t);
+extern int64_t Frankenstein_Core_CycleAnalysis_ciName(int64_t);
+extern int64_t Frankenstein_Core_CycleAnalysis_ciCyclic(int64_t);
+extern int64_t Frankenstein_Core_CycleAnalysis_ciReason(int64_t);
 
 /* --- MercuryBridge/HldsParse.o selectors --- */
-extern int64_t frankenstein_Frankenstein_MercuryBridge_HldsParse_predName(int64_t);
-extern int64_t frankenstein_Frankenstein_MercuryBridge_HldsParse_predDet(int64_t);
+extern int64_t Frankenstein_MercuryBridge_HldsParse_predName(int64_t);
+extern int64_t Frankenstein_MercuryBridge_HldsParse_predDet(int64_t);
 
 /* --- RustBridge/MirParse.o selectors --- */
-extern int64_t frankenstein_Frankenstein_RustBridge_MirParse_mirName(int64_t);
-extern int64_t frankenstein_Frankenstein_RustBridge_MirParse_mirArgCount(int64_t);
+extern int64_t Frankenstein_RustBridge_MirParse_mirName(int64_t);
+extern int64_t Frankenstein_RustBridge_MirParse_mirArgCount(int64_t);
 
 /* --- MlirEmit/Dialects.o --- */
-extern int64_t frankenstein_Frankenstein_MlirEmit_Dialects_renderOp(int64_t);
+extern int64_t Frankenstein_MlirEmit_Dialects_renderOp(int64_t);
 
 /* ------------------------------------------------------------------ */
 /*  Test infrastructure                                                */
@@ -374,12 +374,12 @@ int main(void) {
     {
         int64_t qn_just = mk_qname("Data.Maybe", "Just", 0);
         kk_retain(qn_just);
-        int64_t key = frankenstein_Frankenstein_Core_ConTags_conKey(qn_just);
+        int64_t key = Frankenstein_Core_ConTags_conKey(qn_just);
         CHECK("conKey(Data.Maybe.Just) == \"Just\"",
               kk_str_eq(key, s("Just")));
 
         int64_t qn_nil = mk_qname("GHC.Types", "[]", 0);
-        int64_t key2 = frankenstein_Frankenstein_Core_ConTags_conKey(qn_nil);
+        int64_t key2 = Frankenstein_Core_ConTags_conKey(qn_nil);
         CHECK("conKey(GHC.Types.[]) == \"[]\"",
               kk_str_eq(key2, s("[]")));
     }
@@ -388,7 +388,7 @@ int main(void) {
     printf("\n[4] Core/EffectOpt.o — emptyStats + selectors\n");
     /* ============================================================== */
     {
-        int64_t stats = frankenstein_Frankenstein_Core_EffectOpt_emptyStats();
+        int64_t stats = Frankenstein_Core_EffectOpt_emptyStats();
         /* emptyStats is a thunk; force it */
         int64_t forced = kk_thunk_force(stats);
         kk_retain(forced);
@@ -408,7 +408,7 @@ int main(void) {
     printf("\n[5] Core/Perceus.o — unitType (lazy thunk)\n");
     /* ============================================================== */
     {
-        int64_t ut = frankenstein_Frankenstein_Core_Perceus_unitType();
+        int64_t ut = Frankenstein_Core_Perceus_unitType();
         /* unitType is a thunk that builds TCon "std/core/types" "()"
          * It needs GHC_Internal_Data_String_fromString — shimmed as
          * identity in stdlib_shims.c */
@@ -423,7 +423,7 @@ int main(void) {
     printf("\n[6] Core/Evidence.o — anyType (lazy thunk)\n");
     /* ============================================================== */
     {
-        int64_t at = frankenstein_Frankenstein_Core_Evidence_anyType();
+        int64_t at = Frankenstein_Core_Evidence_anyType();
         int64_t forced_at = kk_thunk_force(at);
         CHECK("anyType() is a Type value (non-null)",
               forced_at != 0);
@@ -437,17 +437,17 @@ int main(void) {
         /* Each selector consumes its input (drops non-returned fields),
          * so we must use a fresh struct for each call. */
         int64_t ci1 = mk_cycleinfo("demo", "Widget", 1, "self-referential");
-        int64_t ci_name = frankenstein_Frankenstein_Core_CycleAnalysis_ciName(ci1);
+        int64_t ci_name = Frankenstein_Core_CycleAnalysis_ciName(ci1);
         CHECK("ciName.nameText == \"Widget\"",
               kk_str_eq(nameText(qnameName(ci_name)), s("Widget")));
 
         int64_t ci2 = mk_cycleinfo("demo", "Widget", 1, "self-referential");
-        int64_t ci_cyclic = frankenstein_Frankenstein_Core_CycleAnalysis_ciCyclic(ci2);
+        int64_t ci_cyclic = Frankenstein_Core_CycleAnalysis_ciCyclic(ci2);
         CHECK("ciCyclic == 1 (true)",
               ci_cyclic == 1);
 
         int64_t ci3 = mk_cycleinfo("demo", "Widget", 1, "self-referential");
-        int64_t ci_reason = frankenstein_Frankenstein_Core_CycleAnalysis_ciReason(ci3);
+        int64_t ci_reason = Frankenstein_Core_CycleAnalysis_ciReason(ci3);
         CHECK("ciReason == \"self-referential\"",
               kk_str_eq(ci_reason, s("self-referential")));
     }
@@ -457,11 +457,11 @@ int main(void) {
     /* ============================================================== */
     {
         /* Each selector consumes its input */
-        int64_t pn = frankenstein_Frankenstein_MercuryBridge_HldsParse_predName(mk_mercury_pred("append", "det"));
+        int64_t pn = Frankenstein_MercuryBridge_HldsParse_predName(mk_mercury_pred("append", "det"));
         CHECK("predName.nameText == \"append\"",
               kk_str_eq(nameText(qnameName(pn)), s("append")));
 
-        int64_t pd = frankenstein_Frankenstein_MercuryBridge_HldsParse_predDet(mk_mercury_pred("append", "det"));
+        int64_t pd = Frankenstein_MercuryBridge_HldsParse_predDet(mk_mercury_pred("append", "det"));
         CHECK("predDet == \"det\"",
               kk_str_eq(pd, s("det")));
     }
@@ -470,11 +470,11 @@ int main(void) {
     printf("\n[9] RustBridge/MirParse.o — MIR selectors\n");
     /* ============================================================== */
     {
-        int64_t mn = frankenstein_Frankenstein_RustBridge_MirParse_mirName(mk_mir_body("factorial", 1));
+        int64_t mn = Frankenstein_RustBridge_MirParse_mirName(mk_mir_body("factorial", 1));
         CHECK("mirName == \"factorial\"",
               kk_str_eq(mn, s("factorial")));
 
-        int64_t mac = frankenstein_Frankenstein_RustBridge_MirParse_mirArgCount(mk_mir_body("factorial", 1));
+        int64_t mac = Frankenstein_RustBridge_MirParse_mirArgCount(mk_mir_body("factorial", 1));
         CHECK("mirArgCount == 1",
               mac == 1);
     }
@@ -579,7 +579,7 @@ int main(void) {
         {
             int64_t c = mk_condecl("std", "True", nil());
             kk_retain(c);
-            int64_t true_key = frankenstein_Frankenstein_Core_ConTags_conKey(conName(c));
+            int64_t true_key = Frankenstein_Core_ConTags_conKey(conName(c));
             CHECK("conKey(prog.data.Bool.True) == \"True\"",
                   kk_str_eq(true_key, s("True")));
         }
@@ -591,7 +591,7 @@ int main(void) {
     {
         /* Start simple: completely empty program (no data, no defs) */
         int64_t prog0 = mk_program("test", "empty-tags", nil(), nil(), nil());
-        int64_t tagMap0 = frankenstein_Frankenstein_Core_ConTags_assignProgramTags(prog0);
+        int64_t tagMap0 = Frankenstein_Core_ConTags_assignProgramTags(prog0);
         CHECK("assignProgramTags(empty) returns non-null", tagMap0 != 0);
 
         /* Now with DataDecls */
@@ -606,7 +606,7 @@ int main(void) {
 
         int64_t data = cons(bool_dd, cons(maybe_dd, nil()));
         int64_t prog = mk_program("test", "tags", nil(), data, nil());
-        int64_t tagMap = frankenstein_Frankenstein_Core_ConTags_assignProgramTags(prog);
+        int64_t tagMap = Frankenstein_Core_ConTags_assignProgramTags(prog);
         CHECK("assignProgramTags returns a non-null Map",
               tagMap != 0);
 
@@ -637,7 +637,7 @@ int main(void) {
         int64_t prog = mk_program("demo", "perceus-test", nil(), nil(), nil());
         kk_retain(prog);
 
-        int64_t result = frankenstein_Frankenstein_Core_Perceus_insertPerceus(prog);
+        int64_t result = Frankenstein_Core_Perceus_insertPerceus(prog);
         CHECK("insertPerceus returns non-null", result != 0);
         int64_t rn = progName(result);
         CHECK("insertPerceus preserves progName",
@@ -651,7 +651,7 @@ int main(void) {
         int64_t prog = mk_program("demo", "evidence-test", nil(), nil(), nil());
         kk_retain(prog);
 
-        int64_t result = frankenstein_Frankenstein_Core_Evidence_evidencePass(prog);
+        int64_t result = Frankenstein_Core_Evidence_evidencePass(prog);
         CHECK("evidencePass returns non-null", result != 0);
         int64_t rn = progName(result);
         CHECK("evidencePass preserves progName",
@@ -666,7 +666,7 @@ int main(void) {
         kk_retain(prog);
         kk_retain(prog);
 
-        int64_t mlir_text = frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
+        int64_t mlir_text = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
         CHECK("emitProgramText returns non-null", mlir_text != 0);
         CHECK("emitProgramText returns a string", kk_is_string(mlir_text));
         if (kk_is_string(mlir_text)) {
@@ -706,19 +706,19 @@ int main(void) {
                          cons(mk_condecl("std", "False", nil()), nil()))),
                     nil()),
                 nil());
-            int64_t tagged = frankenstein_Frankenstein_Core_ConTags_assignProgramTags(p1);
+            int64_t tagged = Frankenstein_Core_ConTags_assignProgramTags(p1);
             CHECK("pipeline: assignProgramTags succeeds", tagged != 0);
         }
 
         /* Step 2: insertPerceus */
         printf("  ... calling insertPerceus\n"); fflush(stdout);
         int64_t prog = mk_program("demo", "pipeline", defs, data, nil());
-        int64_t perceus_out = frankenstein_Frankenstein_Core_Perceus_insertPerceus(prog);
+        int64_t perceus_out = Frankenstein_Core_Perceus_insertPerceus(prog);
         CHECK("pipeline: insertPerceus succeeds", perceus_out != 0);
 
         /* Step 3: evidencePass */
         printf("  ... calling evidencePass\n"); fflush(stdout);
-        int64_t evidence_out = frankenstein_Frankenstein_Core_Evidence_evidencePass(perceus_out);
+        int64_t evidence_out = Frankenstein_Core_Evidence_evidencePass(perceus_out);
         CHECK("pipeline: evidencePass succeeds", evidence_out != 0);
 
         /* Step 4: emitProgramText on a program with defs */
@@ -733,7 +733,7 @@ int main(void) {
             nil());
         kk_retain(emit_prog);
         kk_retain(emit_prog);
-        int64_t mlir = frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(emit_prog);
+        int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(emit_prog);
         CHECK("pipeline: emitProgramText succeeds", mlir != 0);
         CHECK("pipeline: emitProgramText returns string", kk_is_string(mlir));
         if (kk_is_string(mlir)) {
@@ -792,7 +792,7 @@ int main(void) {
             int64_t p = mk_program("demo", "add-test",
                 cons(add_def, cons(main_def, nil())), nil(), nil());
             for (int i = 0; i < 8; i++) kk_retain(p);
-            int64_t mlir = frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(p);
+            int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(p);
             CHECK("add: emitProgramText succeeds", mlir != 0 && kk_is_string(mlir));
             if (kk_is_string(mlir)) {
                 char* cs = kk_str_dup_cstr(mlir);
@@ -872,7 +872,7 @@ int main(void) {
          * handles shared lazy thunks correctly). */
         for (int i = 0; i < 8; i++) kk_retain(prog);
         printf("  ... calling emitProgramText on factorial\n"); fflush(stdout);
-        int64_t mlir = frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
+        int64_t mlir = Frankenstein_MlirEmit_Emitter_emitProgramText(prog);
         CHECK("factorial: emitProgramText succeeds", mlir != 0);
         CHECK("factorial: emitProgramText returns string", kk_is_string(mlir));
         if (kk_is_string(mlir)) {

@@ -34,53 +34,53 @@ extern void kk_args_init(int argc, char** argv);
  * the driver doesn't have to know about plotkin everywhere. */
 
 #ifdef PLOTKIN_EVIDENCE
-extern int64_t frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(int64_t /*evv*/, int64_t);
-extern int64_t frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t /*evv*/, int64_t);
-extern int64_t frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(int64_t /*evv*/, int64_t /*prog*/);
-extern int64_t frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(int64_t /*evv*/, int64_t);
-extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(int64_t /*evv*/, int64_t, int64_t);
+extern int64_t Frankenstein_OrganIR_Consumer_consumeProgram(int64_t /*evv*/, int64_t);
+extern int64_t Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t /*evv*/, int64_t);
+extern int64_t Frankenstein_Core_EffectOpt_effectOptimize(int64_t /*evv*/, int64_t /*prog*/);
+extern int64_t Frankenstein_Core_Evidence_collectGlobalEffects(int64_t /*evv*/, int64_t);
+extern int64_t Frankenstein_Core_Evidence_evidencePassGlobal(int64_t /*evv*/, int64_t, int64_t);
 /* Plotkin-style evidence pass: single-program variant builds topNames
  * internally from the program's own defs. Symbol provided by
  * Core/EvidenceEvv.hs (added to self-host MODULES). */
-extern int64_t frankenstein_Frankenstein_Core_EvidenceEvv_evidencePassEvv(int64_t /*evv*/, int64_t);
-extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t /*evv*/, int64_t);
-extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t /*evv*/, int64_t);
-extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t /*evv*/, int64_t);
-#define FRK_consumeProgram(s)         frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(0, (s))
-#define FRK_flattenPatterns(p)        frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(0, (p))
-#define FRK_effectOptimize_full(p)    frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(0, (p))
-#define FRK_collectGlobalEffects(p)   frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(0, (p))
+extern int64_t Frankenstein_Core_EvidenceEvv_evidencePassEvv(int64_t /*evv*/, int64_t);
+extern int64_t Frankenstein_Core_Perceus_insertPerceus(int64_t /*evv*/, int64_t);
+extern int64_t Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t /*evv*/, int64_t);
+extern int64_t Frankenstein_Debug_DumpProgram_dumpProgram(int64_t /*evv*/, int64_t);
+#define FRK_consumeProgram(s)         Frankenstein_OrganIR_Consumer_consumeProgram(0, (s))
+#define FRK_flattenPatterns(p)        Frankenstein_Core_FlattenPatterns_flattenPatterns(0, (p))
+#define FRK_effectOptimize_full(p)    Frankenstein_Core_EffectOpt_effectOptimize(0, (p))
+#define FRK_collectGlobalEffects(p)   Frankenstein_Core_Evidence_collectGlobalEffects(0, (p))
 /* In plotkin mode, route to evidencePassEvv (Plotkin/Pretnar) so the
  * emitted MLIR has evv-injected ABI matching the shim layer's
  * -DPLOTKIN_EVIDENCE compile-time arity. The first arg (globalEffects)
  * is unused by the plotkin pass — discarded by the macro. */
-#define FRK_evidencePassGlobal(g,p)   (((void)(g)), frankenstein_Frankenstein_Core_EvidenceEvv_evidencePassEvv(0, (p)))
-#define FRK_insertPerceus(p)          frankenstein_Frankenstein_Core_Perceus_insertPerceus(0, (p))
-#define FRK_emitProgramText(p)        frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(0, (p))
-#define FRK_dumpProgram(p)            frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(0, (p))
+#define FRK_evidencePassGlobal(g,p)   (((void)(g)), Frankenstein_Core_EvidenceEvv_evidencePassEvv(0, (p)))
+#define FRK_insertPerceus(p)          Frankenstein_Core_Perceus_insertPerceus(0, (p))
+#define FRK_emitProgramText(p)        Frankenstein_MlirEmit_Emitter_emitProgramText(0, (p))
+#define FRK_dumpProgram(p)            Frankenstein_Debug_DumpProgram_dumpProgram(0, (p))
 #else
 /* OrganIR/Consumer.o */
-extern int64_t frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram(int64_t);
+extern int64_t Frankenstein_OrganIR_Consumer_consumeProgram(int64_t);
 
 /* Core passes */
-extern int64_t frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_EffectOpt_effectOptimize(void); /* CAF: returns thunk */
-extern int64_t frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects(int64_t);
-extern int64_t frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal(int64_t, int64_t);
-extern int64_t frankenstein_Frankenstein_Core_Perceus_insertPerceus(int64_t);
-extern int64_t frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t);
+extern int64_t Frankenstein_Core_FlattenPatterns_flattenPatterns(int64_t);
+extern int64_t Frankenstein_Core_EffectOpt_effectOptimize(void); /* CAF: returns thunk */
+extern int64_t Frankenstein_Core_Evidence_collectGlobalEffects(int64_t);
+extern int64_t Frankenstein_Core_Evidence_evidencePassGlobal(int64_t, int64_t);
+extern int64_t Frankenstein_Core_Perceus_insertPerceus(int64_t);
+extern int64_t Frankenstein_MlirEmit_Emitter_emitProgramText(int64_t);
 
 /* Debug helper: deterministic show of a Program for host-vs-self-host
  * differential comparison. Enabled by FRANKENSTEIN_DUMP_AST env var. */
-extern int64_t frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram(int64_t);
-#define FRK_consumeProgram(s)         frankenstein_Frankenstein_OrganIR_Consumer_consumeProgram((s))
-#define FRK_flattenPatterns(p)        frankenstein_Frankenstein_Core_FlattenPatterns_flattenPatterns((p))
-#define FRK_effectOptimize()          frankenstein_Frankenstein_Core_EffectOpt_effectOptimize()
-#define FRK_collectGlobalEffects(p)   frankenstein_Frankenstein_Core_Evidence_collectGlobalEffects((p))
-#define FRK_evidencePassGlobal(g,p)   frankenstein_Frankenstein_Core_Evidence_evidencePassGlobal((g), (p))
-#define FRK_insertPerceus(p)          frankenstein_Frankenstein_Core_Perceus_insertPerceus((p))
-#define FRK_emitProgramText(p)        frankenstein_Frankenstein_MlirEmit_Emitter_emitProgramText((p))
-#define FRK_dumpProgram(p)            frankenstein_Frankenstein_Debug_DumpProgram_dumpProgram((p))
+extern int64_t Frankenstein_Debug_DumpProgram_dumpProgram(int64_t);
+#define FRK_consumeProgram(s)         Frankenstein_OrganIR_Consumer_consumeProgram((s))
+#define FRK_flattenPatterns(p)        Frankenstein_Core_FlattenPatterns_flattenPatterns((p))
+#define FRK_effectOptimize()          Frankenstein_Core_EffectOpt_effectOptimize()
+#define FRK_collectGlobalEffects(p)   Frankenstein_Core_Evidence_collectGlobalEffects((p))
+#define FRK_evidencePassGlobal(g,p)   Frankenstein_Core_Evidence_evidencePassGlobal((g), (p))
+#define FRK_insertPerceus(p)          Frankenstein_Core_Perceus_insertPerceus((p))
+#define FRK_emitProgramText(p)        Frankenstein_MlirEmit_Emitter_emitProgramText((p))
+#define FRK_dumpProgram(p)            Frankenstein_Debug_DumpProgram_dumpProgram((p))
 #endif
 
 static void maybe_dump_ast(const char* label, int64_t prog) {

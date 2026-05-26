@@ -107,7 +107,7 @@ static int64_t tram_sanitize(int64_t clos, int64_t s) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Override: frankenstein_Frankenstein_MlirEmit_Emitter_sanitizeName   */
+/*  Override: Frankenstein_MlirEmit_Emitter_sanitizeName   */
 /*                                                                      */
 /*  Inline mode: 0-arg call, returns a forced-thunk wrapping a 1-field   */
 /*  closure (the caller dispatches the closure on the Text arg).        */
@@ -116,14 +116,14 @@ static int64_t tram_sanitize(int64_t clos, int64_t s) {
 /* ------------------------------------------------------------------ */
 #ifdef PLOTKIN_EVIDENCE
 int64_t c_sanitizeName(int64_t evv, int64_t text)
-    __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_sanitizeName");
+    __asm__("Frankenstein_MlirEmit_Emitter_sanitizeName");
 int64_t c_sanitizeName(int64_t evv, int64_t text) {
     (void)evv;
     return sanitize_name_c(text);
 }
 #else
 int64_t c_sanitizeName(void)
-    __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_sanitizeName");
+    __asm__("Frankenstein_MlirEmit_Emitter_sanitizeName");
 int64_t c_sanitizeName(void) {
     int64_t c = kk_alloc_con(CLOS_TAG, 1);
     kk_set_field(c, 0, (int64_t)(intptr_t)&tram_sanitize);
@@ -132,7 +132,7 @@ int64_t c_sanitizeName(void) {
 #endif
 
 /* ------------------------------------------------------------------ */
-/*  Override: frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa      */
+/*  Override: Frankenstein_MlirEmit_Emitter_nameToSsa      */
 /*                                                                      */
 /*  nameToSsa n = sanitizeName (nameText n) <> T.pack (show (nameUnique n))  */
 /*                                                                      */
@@ -140,12 +140,12 @@ int64_t c_sanitizeName(void) {
 /* ------------------------------------------------------------------ */
 #ifdef PLOTKIN_EVIDENCE
 int64_t c_nameToSsa(int64_t evv, int64_t name)
-    __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa");
+    __asm__("Frankenstein_MlirEmit_Emitter_nameToSsa");
 int64_t c_nameToSsa(int64_t evv, int64_t name) {
     (void)evv;
 #else
 int64_t c_nameToSsa(int64_t name)
-    __asm__("frankenstein_Frankenstein_MlirEmit_Emitter_nameToSsa");
+    __asm__("Frankenstein_MlirEmit_Emitter_nameToSsa");
 int64_t c_nameToSsa(int64_t name) {
 #endif
     int64_t text   = kk_field(name, 0);  /* nameText   :: !Text */

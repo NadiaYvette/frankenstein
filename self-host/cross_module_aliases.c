@@ -237,19 +237,19 @@ FALIAS3(Frankenstein_GhcBridge_CoreTranslate_translateProgram)
 /* =================================================================== */
 
 /* GhcBridge/CoreTranslate */
-SFALIAS0(frankenstein_Frankenstein_GhcBridge_CoreTranslate_isStateVar)
-SFALIAS1(frankenstein_Frankenstein_GhcBridge_CoreTranslate_collectArgs)
-SFALIAS1(frankenstein_Frankenstein_GhcBridge_CoreTranslate_collectForAlls)
+SFALIAS0(Frankenstein_GhcBridge_CoreTranslate_isStateVar)
+SFALIAS1(Frankenstein_GhcBridge_CoreTranslate_collectArgs)
+SFALIAS1(Frankenstein_GhcBridge_CoreTranslate_collectForAlls)
 
 /* KokaBridge/CoreTranslate */
-SFALIAS1(frankenstein_Frankenstein_KokaBridge_CoreTranslate_extractCName)
+SFALIAS1(Frankenstein_KokaBridge_CoreTranslate_extractCName)
 
 /* MlirEmit/Dialects selectors */
-SFALIAS0(frankenstein_Frankenstein_MlirEmit_Dialects_valName)
-SFALIAS1(frankenstein_Frankenstein_MlirEmit_Dialects_valName)
-SFALIAS0(frankenstein_Frankenstein_MlirEmit_Dialects_valType)
-SFALIAS1(frankenstein_Frankenstein_MlirEmit_Dialects_valType)
-SFALIAS1(frankenstein_Frankenstein_MlirEmit_Dialects_blockArgs)
-SFALIAS1(frankenstein_Frankenstein_MlirEmit_Dialects_blockLabel)
-SFALIAS1(frankenstein_Frankenstein_MlirEmit_Dialects_blockOps)
-SFALIAS1(frankenstein_Frankenstein_MlirEmit_Dialects_funcBlocks)
+SFALIAS0(Frankenstein_MlirEmit_Dialects_valName)
+SFALIAS1(Frankenstein_MlirEmit_Dialects_valName)
+SFALIAS0(Frankenstein_MlirEmit_Dialects_valType)
+SFALIAS1(Frankenstein_MlirEmit_Dialects_valType)
+SFALIAS1(Frankenstein_MlirEmit_Dialects_blockArgs)
+SFALIAS1(Frankenstein_MlirEmit_Dialects_blockLabel)
+SFALIAS1(Frankenstein_MlirEmit_Dialects_blockOps)
+SFALIAS1(Frankenstein_MlirEmit_Dialects_funcBlocks)

@@ -120,6 +120,8 @@ clang -O2 -c -o "$OUT/shim_data_set.o" self-host/shim_data_set.c -I runtime/
 clang -O2 -c -o "$OUT/shim_data_text.o" self-host/shim_data_text.c -I runtime/
 # GHC primitive + classes shims (Base, Num, Show, State monad, etc.)
 clang -O2 -c -o "$OUT/shim_ghc_prim.o" self-host/shim_ghc_prim.c -I runtime/
+# GHC typeclass dicts (Either Monad/Applicative/Functor, Show list/maybe, etc.)
+clang -O2 -c -o "$OUT/shim_ghc_dicts.o" self-host/shim_ghc_dicts.c -I runtime/
 clang -O2 -c -o "$OUT/shim_data_char.o" self-host/shim_data_char.c -I runtime/
 # GHC list/foldable/traversable/maybe/functor/tuple/IORef/unicode shims
 clang -O2 -c -o "$OUT/shim_ghc_list.o" self-host/shim_ghc_list.c -I runtime/
@@ -150,8 +152,13 @@ echo ""
 echo "=== Phase 5b: Link self-hosted compiler ==="
 # Same objects but with driver.o instead of main.o, and exclude example
 # binaries (they each define their own main symbol).
-COMPILER_OBJS=$(ls "$OUT"/*.o | grep -v main.o | grep -v '\-self-ir\.o' | grep -v 'factorial-self-ir\.o')
-clang -O2 -o self-host/frankenstein-self-compiler $COMPILER_OBJS -lm \
+# Link shims BEFORE stage objects: with --allow-multiple-definition the
+# first symbol seen wins, so shims (real implementations) must precede
+# the Core_*.o / MlirEmit_*.o / etc. files (which contain auto-generated
+# NULL-returning $0 stubs).  Matches Phase 9b/10b's link ordering.
+SHIM_OBJS_5B=$(ls "$OUT"/*.o | grep -vE '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_|main\.o|-self-ir\.o|factorial-self-ir|_standalone\.o)')
+STAGE_OBJS_5B=$(ls "$OUT"/*.o | grep -E '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_)' | grep -v 'self-ir\.o' | grep -v '_standalone\.o')
+clang -O2 -o self-host/frankenstein-self-compiler $SHIM_OBJS_5B $STAGE_OBJS_5B -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files \
   -Wl,--allow-multiple-definition
 echo "Linked: self-host/frankenstein-self-compiler ($(stat -c%s self-host/frankenstein-self-compiler) bytes)"

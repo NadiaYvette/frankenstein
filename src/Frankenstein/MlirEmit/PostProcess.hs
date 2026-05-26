@@ -798,11 +798,13 @@ externPapName :: Text -> Text
 externPapName vn = "pap_extern_frankenstein_" <> vn <> "_0"
 
 -- | Inject a private extern declaration AND a synthesized PAP wrapper for
--- @frankenstein_<vn>@ with the given arity into a module's MLIR text. The
--- wrapper forwards (clos, r0..r_{arity-1}) -> @frankenstein_<vn>(r0..)@.
+-- @Frankenstein_<vn>@ with the given arity into a module's MLIR text. The
+-- wrapper forwards (clos, r0..r_{arity-1}) -> @Frankenstein_<vn>(r0..)@.
+-- The capital-F prefix matches the emitter's modPrefix after the Linker
+-- unifiedName switch from "frankenstein" to "Frankenstein" (Target A).
 injectExternWrapper :: Text -> Int -> Text -> Text
 injectExternWrapper vn arity src =
-  let symbol     = "frankenstein_" <> vn
+  let symbol     = "Frankenstein_" <> vn
       paramTys   = T.intercalate ", " (replicate arity "i64")
       sigStr     = "(" <> paramTys <> ") -> i64"
       papName    = externPapName vn

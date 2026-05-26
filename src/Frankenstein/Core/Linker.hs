@@ -98,7 +98,18 @@ linkProgramsWith requireMain progs =
 
       -- Build unified module name
       modNames = map (qnameToText . progName) progs
-      unifiedName = QName "frankenstein"
+      -- Use "Frankenstein" (capital F) so the emitter's modPrefix matches
+      -- the per-module mangling convention used by single-program linking.
+      -- With "frankenstein" (lowercase) the modPrefix "frankenstein_" is
+      -- not a prefix of mangled names like "Frankenstein.Core.Types_bindExpr"
+      -- (case-sensitive check), so the emitter double-prefixes them to
+      -- "frankenstein_Frankenstein_Core_Types_bindExpr".  Single-program
+      -- linking (e.g. Types.hs which has no Frankenstein imports) keeps
+      -- the original module name "Frankenstein.Core.Types" → modPrefix
+      -- "Frankenstein_Core_Types_" which DOES prefix-match, producing
+      -- just "Frankenstein_Core_Types_bindExpr".  The case mismatch made
+      -- both forms appear as different symbols in the linked binary.
+      unifiedName = QName "Frankenstein"
                           (Name (T.intercalate "+" modNames) 0)
 
       -- Rewrite cross-module name references so that EVar/ECon/PatCon

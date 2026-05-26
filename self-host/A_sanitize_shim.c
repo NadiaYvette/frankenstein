@@ -109,10 +109,9 @@ static int64_t tram_sanitize(int64_t clos, int64_t s) {
 /* ------------------------------------------------------------------ */
 /*  Override: Frankenstein_MlirEmit_Emitter_sanitizeName   */
 /*                                                                      */
-/*  Inline mode: 0-arg call, returns a forced-thunk wrapping a 1-field   */
-/*  closure (the caller dispatches the closure on the Text arg).        */
-/*  Plotkin mode: called as (evv, text), returns sanitized Text directly */
-/*  (the plotkin pass eta-expanded the def, so the call is saturated).  */
+/*  Both inline and plotkin modes: the compiled call sites pass Text    */
+/*  directly in %rdi and use the returned Text directly (no closure     */
+/*  dispatch).  Plotkin mode adds a leading evv arg which we ignore.    */
 /* ------------------------------------------------------------------ */
 #ifdef PLOTKIN_EVIDENCE
 int64_t c_sanitizeName(int64_t evv, int64_t text)
@@ -122,12 +121,10 @@ int64_t c_sanitizeName(int64_t evv, int64_t text) {
     return sanitize_name_c(text);
 }
 #else
-int64_t c_sanitizeName(void)
+int64_t c_sanitizeName(int64_t text)
     __asm__("Frankenstein_MlirEmit_Emitter_sanitizeName");
-int64_t c_sanitizeName(void) {
-    int64_t c = kk_alloc_con(CLOS_TAG, 1);
-    kk_set_field(c, 0, (int64_t)(intptr_t)&tram_sanitize);
-    return kk_thunk_create_forced(c);
+int64_t c_sanitizeName(int64_t text) {
+    return sanitize_name_c(text);
 }
 #endif
 

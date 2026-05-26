@@ -93,6 +93,49 @@ won (under `--allow-multiple-definition`).
 **Result so far**: Fixed-point still 15/26, E2E still 0/21.  $0 stub
 count: 0 (down from 118 pre-fix).
 
+### Target C: sanitizeName C shim ABI mismatch — FIXED
+
+`self-host/A_sanitize_shim.c`'s default-mode (non-plotkin) override
+declared `sanitizeName(void)` returning `kk_thunk_create_forced(closure)`,
+expecting callers to dispatch the closure on the Text arg.  But every
+one of the 18 compiled call sites does:
+
+```
+  call kk_thunk_force         ; force input thunk → Text
+  mov %rax, %rdi              ; Text → arg
+  call sanitizeName           ; treat result as Text directly
+  ; pass result to <> / store in result slot — no closure dispatch
+```
+
+i.e. the compiled callers expect `sanitizeName(text) -> Text`.  When
+the result-as-Text was passed to `<>` (`zlzg$2`), `kk_str_concat`
+forced the thunk, got back the closure cell (tag `CLOS`), and aborted
+with `non-string input magic=0x434c4f53`.
+
+Fix: change default-mode shim to `c_sanitizeName(int64_t text) ->
+sanitize_name_c(text)`, matching the plotkin variant's direct ABI.
+
+**Crash trace movement**:
+- `emitProgramText → qualifyDefName → kk_str_concat (CLOS thunk)` — fixed
+
+**Result**: Hellos 25/26 + surd-mercury 9/9 still pass (no regression).
+Bootstrap fixed-point/E2E still 15/26 + 0/21 — exposed a *deeper* bug:
+stage 1 self-compiler now infinite-recurses on every input in
+`Frankenstein_dszd...$200` (the let-go closure for
+`collectReferencedCtors`'s flattened `(dd, cd)` iteration).  Backtrace:
+
+```
+#0  getenv() from kk_tag(non-heap ptr)
+#1  kk_tag
+#2..N  dszd...$200  ; infinite stack frames
+```
+
+Each frame allocates non-tail, so even a few-element list grows the
+stack indefinitely.  Suggests the list traversed isn't terminating —
+field 1 of the cons cell keeps returning a non-nil pointer.  Either
+the JSON parser is producing a circular structure for `progData`, or
+the `kk_field` ABI for cons cells diverges between writer/reader.
+
 ## Original Two Concrete Restoration Targets
 
 ### Target A: Linker case consistency (highest value)

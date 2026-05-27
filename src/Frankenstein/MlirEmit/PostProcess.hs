@@ -75,12 +75,69 @@ fixIntraModuleCalls :: Text -> Text
 fixIntraModuleCalls src =
   let lns      = T.lines src
       privates = collectPrivateDollarN lns
-      defs     = collectFuncDefs lns
-      (wrappers, removed) = generateWrappers privates defs
-      lns' = filter (\l -> not (isPrivateInSet removed l)) lns
+      stubs    = collectStubDollarN lns
+      -- Real defs exclude stub-shaped @Name$N definitions, so generateWrappers
+      -- sees only the underlying @Name targets it can forward to.
+      stubLines = Set.fromList (concatMap (\(_, _, _, (s, e)) -> [s .. e])
+                                 (Map.elems stubs))
+      defs     = Map.fromList
+                   [ (n, a) | (n, a) <- Map.toList (collectFuncDefs lns)
+                   , not (isStubName stubs n) ]
+      -- Treat stub defs as additional privates for wrapper generation.
+      stubPrivates = Map.map (\(name, suf, n, _) -> (name, suf, n)) stubs
+      (wrappers, removed) = generateWrappers
+                              (Map.union privates stubPrivates) defs
+      lns' = [ l | (i, l) <- zip [0..] lns
+             , not (Set.member i stubLines)
+             , not (isPrivateInSet removed l) ]
   in if null wrappers
        then src
        else insertBeforeFinalBrace wrappers (T.unlines lns')
+
+-- | Detect stub-shaped @\@Name$N@ definitions produced by the emitter's
+-- leak-extern path (@Emitter.hs:535@).  Format is exactly four lines:
+--
+-- @
+--   func.func \@Name$N(%a0: i64, ...) -> i64 {
+--     %z = arith.constant 0 : i64
+--     func.return %z : i64
+--   }
+-- @
+--
+-- Returns @key -> (name, suffix, nargs, (startLine, endLine))@ for each
+-- detected stub.  After split compilation merges parts, these stubs
+-- silently shadow real definitions in sibling parts — replacing them with
+-- forwarding wrappers (via 'generateWrappers') restores the direct call.
+collectStubDollarN :: [Text] -> Map Text (Text, Int, Int, (Int, Int))
+collectStubDollarN lns =
+  let indexed = zip [0..] lns
+      pairs   = [(i, l1, l2, l3, l4)
+                | ((i, l1):(_, l2):(_, l3):(_, l4):_) <- tails indexed
+                , l2 == "    %z = arith.constant 0 : i64"
+                , l3 == "    func.return %z : i64"
+                , l4 == "  }"
+                ]
+  in Map.fromList (mapMaybe parseStubHeader pairs)
+  where
+    tails xs = case xs of
+      []     -> []
+      (_:ys) -> xs : tails ys
+    parseStubHeader (i, l, _, _, _) = do
+      rest1 <- T.stripPrefix "  func.func @" l
+      let (name, rest2) = T.break (== '$') rest1
+      rest3 <- T.stripPrefix "$" rest2
+      let (suffixT, rest4) = T.span isDigit rest3
+      suf <- readInt suffixT
+      rest5 <- T.stripPrefix "(" rest4
+      let (paramsT, rest6) = T.break (== ')') rest5
+      _ <- T.stripPrefix ") -> i64 {" rest6
+      let nargs = countCommaSep paramsT
+          key   = name <> "$" <> suffixT
+      Just (key, (name, suf, nargs, (i, i + 3)))
+
+-- | True when @name@ refers to a detected stub (by key, e.g. @"foo$3"@).
+isStubName :: Map Text a -> Text -> Bool
+isStubName stubs n = Map.member n stubs
 
 -- | Parse @  func.func private \@Name$N(args) -> i64@ — return key
 -- (e.g. "foo$3"), the underlying name, the suffix, and the parameter count.

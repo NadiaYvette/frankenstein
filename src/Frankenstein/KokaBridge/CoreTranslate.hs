@@ -339,15 +339,25 @@ translateExpr = \case
         where
           isExprTrue (KC.Con tname _) = KN.nameStem (KC.getName tname) == "True"
           isExprTrue _ = False
+          -- Eagerly translate (test, body) for all non-last guards
+          -- and the body of the last guard.  The recursion below is
+          -- pure — avoids the where-bound monadic recursion pattern
+          -- that triggers the typeclass-dict-wrapper PAP bug (see
+          -- BOOTSTRAP_RESTORATION.md "Target H").
           desugarGuards [] = Left "no guards"
-          desugarGuards [KC.Guard _ b] = translateExpr b
-          desugarGuards (KC.Guard t b : grest) = do
+          desugarGuards gs = do
+            initPairs <- mapM translateGuardPair (init gs)
+            let KC.Guard _ lastBody = last gs
+            lastB' <- translateExpr lastBody
+            pure (foldr buildECase lastB' initPairs)
+          translateGuardPair (KC.Guard t b) = do
             t' <- translateExpr t
             b' <- translateExpr b
-            r' <- desugarGuards grest
-            pure $ F.ECase t'
+            pure (t', b')
+          buildECase (t', b') restE =
+            F.ECase t'
               [ F.Branch (F.PatLit (F.LitInt 1)) Nothing b'
-              , F.Branch (F.PatWild anyType) Nothing r'
+              , F.Branch (F.PatWild anyType) Nothing restE
               ]
 
   -- Single scrutinee fallback (also handles `scrut:[]` since the
@@ -449,24 +459,35 @@ translateBranchWithScrut scrut (KC.Branch pats guards) = do
     isExprTrue (KC.Con tname _) = KN.nameStem (KC.getName tname) == "True"
     isExprTrue _ = False
 
+    -- Eagerly translate all guards (test+body+isTrue flag), then
+    -- fold purely — sidesteps the where-bound monadic recursion
+    -- typeclass-dict-wrapper PAP bug (see BOOTSTRAP_RESTORATION.md
+    -- "Target H").
     desugarGuards [] = Left "Branch with no guards"
-    desugarGuards [KC.Guard test body] = do
+    desugarGuards gs = do
+      pairs <- mapM translateGuard gs
+      pure (foldGuards pairs)
+    translateGuard (KC.Guard test body) = do
       test' <- translateExpr test
       body' <- translateExpr body
-      if isExprTrue test then pure body'
-      else pure $ F.ECase test'
-        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
-        , F.Branch (F.PatWild anyType) Nothing (F.ELit (F.LitInt 0))
-        ]
-    desugarGuards (KC.Guard test body : krest) = do
-      test' <- translateExpr test
-      body' <- translateExpr body
-      rest' <- desugarGuards krest
-      if isExprTrue test then pure body'
-      else pure $ F.ECase test'
-        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
-        , F.Branch (F.PatWild anyType) Nothing rest'
-        ]
+      pure (isExprTrue test, test', body')
+    -- foldGuards: pure recursive fold.  When a `True` guard appears,
+    -- short-circuit and return its body unconditionally.  The last
+    -- guard's body becomes the fallthrough; if all earlier guards
+    -- fail, use LitInt 0 as the ultimate fallback.
+    foldGuards [] = F.ELit (F.LitInt 0)  -- unreachable; guarded above
+    foldGuards [(isTrue, test', body')]
+      | isTrue    = body'
+      | otherwise = F.ECase test'
+          [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+          , F.Branch (F.PatWild anyType) Nothing (F.ELit (F.LitInt 0))
+          ]
+    foldGuards ((isTrue, test', body'):rest)
+      | isTrue    = body'
+      | otherwise = F.ECase test'
+          [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+          , F.Branch (F.PatWild anyType) Nothing (foldGuards rest)
+          ]
 
 translateBranch :: KC.Branch -> Either Text F.Branch
 translateBranch (KC.Branch pats guards) = do
@@ -493,25 +514,30 @@ translateBranch (KC.Branch pats guards) = do
     isExprTrue (KC.Con tname _) = KN.nameStem (KC.getName tname) == "True"
     isExprTrue _ = False
 
+    -- Eagerly translate all guards then fold purely.  See
+    -- BOOTSTRAP_RESTORATION.md "Target H" for why monadic where-bound
+    -- recursion is risky in Frankenstein's self-compiler.
     desugarGuards [] = Left "Branch with no guards"
-    desugarGuards [KC.Guard test body] = do
+    desugarGuards gs = do
+      pairs <- mapM translateGuard gs
+      pure (foldGuards pairs)
+    translateGuard (KC.Guard test body) = do
       test' <- translateExpr test
       body' <- translateExpr body
-      if isExprTrue test then pure body'
-      else pure $ F.ECase test'
-        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
-        , F.Branch (F.PatWild anyType) Nothing
-            (F.ELit (F.LitInt 0))  -- fallthrough: return 0
-        ]
-    desugarGuards (KC.Guard test body : rest) = do
-      test' <- translateExpr test
-      body' <- translateExpr body
-      rest' <- desugarGuards rest
-      if isExprTrue test then pure body'
-      else pure $ F.ECase test'
-        [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
-        , F.Branch (F.PatWild anyType) Nothing rest'
-        ]
+      pure (isExprTrue test, test', body')
+    foldGuards [] = F.ELit (F.LitInt 0)  -- unreachable; guarded above
+    foldGuards [(isTrue, test', body')]
+      | isTrue    = body'
+      | otherwise = F.ECase test'
+          [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+          , F.Branch (F.PatWild anyType) Nothing (F.ELit (F.LitInt 0))
+          ]
+    foldGuards ((isTrue, test', body'):rest)
+      | isTrue    = body'
+      | otherwise = F.ECase test'
+          [ F.Branch (F.PatLit (F.LitInt 1)) Nothing body'
+          , F.Branch (F.PatWild anyType) Nothing (foldGuards rest)
+          ]
 
 translatePattern :: KC.Pattern -> Either Text F.Pattern
 translatePattern = \case

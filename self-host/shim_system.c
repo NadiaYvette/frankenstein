@@ -316,10 +316,18 @@ int64_t sys_proc_readPWEC_3(int64_t cmd, int64_t args, int64_t stdin_str) {
 /*  Text.Printf                                                         */
 /* ================================================================== */
 
+extern int64_t fromString_1(int64_t s) __asm__("GHC_Internal_Data_String_fromString$1");
+
 int64_t text_printf_2(int64_t fmt, int64_t arg)
     __asm__("Text_Printf_printf$2");
 int64_t text_printf_2(int64_t fmt, int64_t arg) {
-    char *cfmt = kk_str_dup_cstr(fmt);
+    /* `printf :: String -> a -> String` is parameterised on String =
+     * [Char], not Text — so call sites like `printf "%02X" b` in
+     * `MlirEmit/Emitter.escapeMLIRString` actually pass a cons-list
+     * format.  fromString$1 is a no-op on real kk_strings, so this
+     * is safe for both shapes. */
+    int64_t fmt_str = fromString_1(fmt);
+    char *cfmt = kk_str_dup_cstr(fmt_str);
     char buf[256];
     if (kk_is_string(arg)) {
         char *carg = kk_str_dup_cstr(arg);

@@ -4541,17 +4541,24 @@ dedupeQualN qualN _arity = do
   -- global and never restored — it tracks every func.func ever
   -- emitted, so it correctly flags the second arm's bind as a
   -- collision against the first arm's already-emitted body.
-  if Set.notMember qualN topFns && Set.notMember qualN lifted
-    then pure qualN
-    else tryAlt (1 :: Int)
+  --
+  -- The free-name search is *pure* (snapshotted state) — using a
+  -- monadic where-bound recursion here trips Frankenstein's
+  -- self-compiler emitter, which mis-resolves the typeclass-overloaded
+  -- recursive call as a PAP of the dict-passing wrapper (putting the
+  -- Int 'n' into the MonadState dict slot) and the PAP then escapes
+  -- through `<>` as if it were a Text.  See BOOTSTRAP_RESTORATION.md
+  -- "Target H".  Keeping the recursion pure sidesteps the bug.
+  pure $ if Set.notMember qualN topFns && Set.notMember qualN lifted
+         then qualN
+         else findFree topFns lifted 1
   where
-    tryAlt n = do
-      tf <- gets esTopFns
-      lf <- gets esLiftedNames
+    findFree :: Set Text -> Set Text -> Int -> Text
+    findFree tf lf n =
       let alt = qualN <> "_dup" <> T.pack (show n)
-      if Set.member alt tf || Set.member alt lf
-        then tryAlt (n + 1)
-        else pure alt
+      in if Set.member alt tf || Set.member alt lf
+         then findFree tf lf (n + 1)
+         else alt
 
 -- | Compute the qualified name for a let-bound function being promoted
 -- to top-level. Uses module prefix + unique to avoid collisions between

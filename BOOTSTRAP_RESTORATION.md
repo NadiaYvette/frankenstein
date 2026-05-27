@@ -347,6 +347,77 @@ result becomes the do-block result" (which should run the action and
 yield its return value).  The latter case is broken for `tryAlt`'s
 recursive return.
 
+### Target H: refactor dedupeQualN's monadic recursion — APPLIED
+
+Root cause (now confirmed): the emitter generates two versions of
+`tryAlt`:
+- `tryAlt$307643(qualN, n)` — arity-2 monomorphic (correct)
+- `tryAlt$302591(qualN, MonadStateDict, NumDict, ShowDict)` — arity-4
+  typeclass-overloaded wrapper that drops the dicts and returns a
+  PAP for `$307643`
+
+The call site `else tryAlt 1` in `dedupeQualN`'s outer body resolves
+to a PAP of the **arity-4 wrapper** with 2 supplied (qualN + n=1).
+But the 2nd supplied slot is the MonadState dict, not n.  When the
+state monad eventually invokes this "state action", the args end up
+as `$302591(qualN, n=1, state, garbage)` — n drops into the dict slot
+and the function returns yet another partial PAP (not a (Text,State)
+pair).  That PAP escapes through the `<>` chain as if it were a Text;
+`kk_str_concat` sees code bytes as magic and aborts.
+
+**Fix (commit `<pending>`):** refactor `dedupeQualN` so the recursion
+is a pure helper outside the State monad.  Same logic — fetch
+`topFns`/`lifted` once at the start, then iterate purely:
+
+```haskell
+dedupeQualN qualN _arity = do
+  topFns <- gets esTopFns
+  lifted <- gets esLiftedNames
+  pure $ if Set.notMember qualN topFns && Set.notMember qualN lifted
+         then qualN
+         else findFree topFns lifted 1
+  where
+    findFree :: Set Text -> Set Text -> Int -> Text
+    findFree tf lf n =
+      let alt = qualN <> "_dup" <> T.pack (show n)
+      in if Set.member alt tf || Set.member alt lf
+         then findFree tf lf (n + 1)
+         else alt
+```
+
+Semantics-preserving — the original re-fetched state on each iter
+but the state can't change between iterations within a single
+`dedupeQualN` call (no other code runs).
+
+**Bootstrap result after Target H:**
+
+| Metric | Post-G (`7e3eaa0`) | Post-H |
+|---|---|---|
+| Phase 8 E2E | 18/21 | 18/21 (unchanged) |
+| Stage 2 real-compile (no fallback) | ~10/26 | **~14/26** (more modules compile end-to-end without crashing) |
+| Stage 2 `kk_str_concat` crashes | many | **0** (root cause fixed!) |
+| Stage 2 timeouts | few | several (now blocked on slow compiles instead of crashes) |
+| Phase 9c/10c E2E | 0/21 | 0/21 (still blocked: stage 2 falls back → stub functions → stage 3's main NULL-calls consumeProgram) |
+
+The `kk_str_concat` PAP-as-Text root cause is eliminated.  Remaining
+blockers are SLOWNESS-related (900s per-part timeouts on the biggest
+parts of MlirEmit/Emitter.hs and bridge modules), not bugs.
+
+**Why fixed-point match (s2→s3) went down despite the fix:** stage
+1's MLIR output now includes `kk_thunk_force` after every CAF call
+(Target F's Emitter.hs change finally takes effect at scale), so
+stage 1's per-module MLIR is *different from before* — and stage 2
+(built from this new stage 1 MLIR) is itself different.  The
+fixed-point would re-converge only after several bootstrap cycles.
+
+**Follow-up to truly close the bug** (in the emitter, not the source):
+The typeclass-dict wrapper for `tryAlt$302591` shouldn't be generated
+for a where-bound function — it's not exported, only the monomorphic
+inner call site uses it.  Or: the call-site code generation needs to
+correctly distinguish "monomorphic-call-with-args" from "dict-passing-
+call".  Several other where-bound monadic helpers may hit the same
+pattern; auditing them would be Target I.
+
 ## Original Two Concrete Restoration Targets
 
 ### Target A: Linker case consistency (highest value)

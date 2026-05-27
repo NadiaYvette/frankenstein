@@ -933,6 +933,34 @@ on `call NULL`.  Each shim addition unblocks more tests; the
 remaining set looks like a few hours of straightforward
 C-implementation work, not a state-threading mystery.
 
+### Shim cascade work (2026-05-27 ~22:00)
+
+Landed:
+
+| Commit | What |
+|---|---|
+| `2c62bd4` | Real shims: notMember\$2, or\$1, and\$1, concatMap\$2; Show: show\$2, showString\$1/\$2, showSpace\$1, showCommaSpace\$1, showParen\$2, showsPrec\$3; catch-all unresolved_stubs.c (initially abort) |
+| `da4e4ec` | cross_module_aliases_new.c — 54 more Frankenstein \$N→base aliases (companion CU; separate compilation unit lets ALIAS0/ALIAS1 of the same base coexist) |
+| `4948566` | Reverted unresolved_stubs from abort to return-0 — abort broke stage 1 (compiling buildTopFnArity hit `GHC_Internal_Word_zdfNumWord8\$0` which was historically a silent leak-stub; abort killed the part-compile, leaving stage 2 with a NULL buildTopFnArity\$2 alias).  Returns 0 + optional `KK_STUB_TRACE=1` logging now. |
+
+Bootstrap results: Phase 8 stays at 18/21 ✓, Phase 9c stuck at 0/21,
+stage 2→3 MLIR match dropped to 0/26 (was 3/26 after Target L —
+the unresolved_stubs catch-all may be shadowing or destabilizing
+something that was matching before).
+
+Current stage 2 crash on nested.hs is now DEEP in the state-monad
+chain — `bind_runner → bind_runner → mapM_state_runner → bind_runner
+→ runState\$2 → lambda_p17_4519`.  The `KK_STUB_TRACE=1` env var
+shows ZERO catch-all-stub calls — so the NULL fptr is coming from
+elsewhere (closure with NULL field 0).  This is a different class
+of bug than the previous "shim missing" issues.
+
+**Status**: Infrastructure (link cleanliness, alias coverage, stub
+catch-all) is in good shape.  The remaining E2E gap is a separate
+issue from missing stdlib shims — probably a closure-construction
+bug in the state-monad emit, or one of the 11 hand-written Show
+shims doing the wrong thing.  Needs targeted investigation.
+
 ### Audit tool
 
 ```bash

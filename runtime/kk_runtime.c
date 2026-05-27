@@ -1756,17 +1756,37 @@ int64_t kk_str_concat(int64_t a_i, int64_t b_i) {
     return r;
 }
 
-/* Copy a rope into a contiguous buffer at *out, advancing *out. */
+/* Copy a rope into a contiguous buffer at *out, advancing *out.
+ *
+ * Iterative walk to avoid stack overflow on deep left-spines.  The
+ * JSON parser's pStrBody builds `acc <> chunk <> "\n" <> ...` with
+ * one CONCAT node per escape, so a 100 KB string with many escapes
+ * produces a left-spine 100K deep — the recursive version overflowed
+ * the 8 MB user stack while compiling MlirEmit/Emitter_part17. */
 static void kk_str_copy_into(kk_string_t* s, char** out) {
-    if (s == NULL) return;
-    if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) {
-        const char* bytes = kk_str_bytes(s);
-        for (int64_t i = 0; i < s->byte_len; i++) (*out)[i] = bytes[i];
-        *out += s->byte_len;
-    } else {
-        kk_str_copy_into(s->u.cat.l, out);
-        kk_str_copy_into(s->u.cat.r, out);
+    /* Manual stack of right-subtrees yet to visit (in order). */
+    enum { STK_INIT = 64 };
+    kk_string_t** stk = NULL;
+    size_t stk_cap = 0, stk_n = 0;
+    while (s != NULL) {
+        if (s->kind == KK_STR_LEAF || s->kind == KK_STR_SLICE) {
+            const char* bytes = kk_str_bytes(s);
+            for (int64_t i = 0; i < s->byte_len; i++) (*out)[i] = bytes[i];
+            *out += s->byte_len;
+            /* Pop next subtree, if any. */
+            if (stk_n == 0) break;
+            s = stk[--stk_n];
+        } else {
+            /* CONCAT: push right, descend left. */
+            if (stk_n == stk_cap) {
+                stk_cap = stk_cap ? stk_cap * 2 : STK_INIT;
+                stk = (kk_string_t**)realloc(stk, stk_cap * sizeof(*stk));
+            }
+            stk[stk_n++] = s->u.cat.r;
+            s = s->u.cat.l;
+        }
     }
+    free(stk);
 }
 
 int64_t kk_str_flatten(int64_t s_i) {
@@ -4951,8 +4971,13 @@ int64_t kk_thunk_force(int64_t thunk) {
 /* String table must be large enough for ALL strings during program lifetime.
  * The MLIR emitter generates many small strings (SSA names, keywords, etc.)
  * and can easily exceed 65K strings for programs with 20+ definitions.
- * 1M entries × 8 bytes = 8 MB — acceptable for bootstrapping. */
-#define KK_STRING_TABLE_SIZE (1 << 22)  /* 4,194,304 */
+ * 1M entries × 8 bytes = 8 MB — acceptable for bootstrapping.
+ *
+ * JSON parsing of a 3 MB OrganIR file allocates ~3M small Texts (rope
+ * nodes from acc<>chunk concatenation in pStrBody).  With a 4M-entry
+ * table that's 75% load → linear-probing collisions dominate insert.
+ * Bumped to 16M (128 MB).  Memory is fine for bootstrap. */
+#define KK_STRING_TABLE_SIZE (1 << 24)  /* 16,777,216 */
 #define KK_STRING_TOMBSTONE ((int64_t)1) /* deleted entry sentinel (odd → never a valid ptr) */
 static int64_t string_table[KK_STRING_TABLE_SIZE];
 /* Global string address range — O(1) rejection for non-string pointers. */
@@ -4964,7 +4989,7 @@ static uintptr_t g_string_hi = 0;
  * were allocated inside a handler body and should be freed on abort.
  * The hash table (string_table) provides O(1) lookup; the log provides
  * O(1) checkpoint/rollback. */
-#define KK_STRING_LOG_SIZE (1 << 22)
+#define KK_STRING_LOG_SIZE (1 << 24)
 static int64_t string_log[KK_STRING_LOG_SIZE];
 static int64_t string_log_len = 0;
 

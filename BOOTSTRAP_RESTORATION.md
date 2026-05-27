@@ -828,6 +828,111 @@ Next investigation candidates (for user direction):
 3. Add KK_STATE_TRACE instrumentation specifically to the
    consumeProgram call path to catch the corruption point.
 
+### Target L — consumeProgram NULL stub: root cause + fixes
+
+The "consumeProgram returns 0" symptom was actually a chain of three
+distinct bugs in the split-compile / merge / link pipeline.  The
+parseOrganIR\$1 stub call site we'd been staring at was downstream;
+the real culprits sat in PostProcess + build.sh.
+
+**Bug 1: leak-stub definitions silently shadow real defs at merge time.**
+
+When build.sh splits a large OrganIR JSON by def-count, each part is
+compiled in isolation.  The stage-1 emitter doesn't see cross-part
+topFns, so calls to siblings get emitted as @Name\$N — and the
+emitter's `leakExterns` path writes a *stub definition* for them:
+
+```
+  func.func @Name$N(%a0: i64, ...) -> i64 {
+    %z = arith.constant 0 : i64
+    func.return %z : i64
+  }
+```
+
+After merge-mlir-parts.py concatenates the parts, BOTH the real
+@Name def AND the @Name\$N stub coexist in one file.  Callers hit
+the stub; silently get 0.
+
+`PostProcess.fixIntraModuleCalls` *did* handle `func.func private`
+declarations of \$N externs, but the emitter writes stubs as
+*definitions*, so they fell through unprocessed.
+
+**Fix (commit `05bac80`)**: added `collectStubDollarN` to detect the
+4-line stub pattern, and treat it as an additional source of $N
+references for `generateWrappers`.  Intra-module case
+(`@Name` exists as a real def in same file) → replace stub body
+with a forwarding wrapper.
+
+**Bug 2: inter-module stubs shadow C shim implementations.**
+
+Stubs for symbols defined in *other modules' shims* (e.g.
+`GHC_Internal_Data_Tuple_fst\$0`, `GHC_Internal_Base__\$2`) hit the
+same emit path.  After the merge, the stub *definition* coexists
+with the shim's *definition* — linker takes the first one in link
+order, and the local stub wins.  Net effect: every composition,
+every fst-projection silently returned 0.
+
+**Fix (commit `4ca37c8`)**: in PostProcess, stubs whose underlying
+`@Name` is NOT defined in the same merged MLIR are converted to
+`func.func private @Name\$N(args) -> i64` *declarations* (signature
+only, no body).  The shim's real definition is now the only T
+symbol for that name, so the shim wins.
+
+**Bug 3: host-emitted Debug_DumpProgram.o leaks into SHIM_OBJS.**
+
+build.sh's SHIM_OBJS regex excluded `Core_|MlirEmit_|GhcBridge_|…`
+but missed `Debug_`, so the host-emitted `self-host/obj/Debug_DumpProgram.o`
+(which contains its own 3-byte `__\$2` leak-stub from compile-time)
+was linked into the stage 2 binary BEFORE shim_ghc_prim.o.  With
+`--allow-multiple-definition`, the 3-byte stub at link-position-first
+won over the real shim.
+
+**Fix (commit `253c53d`)**: added `Debug_` to the exclusion regex.
+Same commit added a `Data_Text_takeEnd\$1/\$2` shim that surfaced
+once the previous fixes stopped masking it (Frankenstein.endsWith
+uses takeEnd, but no shim was provided — previously the leak-stub
+returned 0, now it'd crash on call).
+
+### Post-Target-L build verification (2026-05-27 ~18:50)
+
+| Metric | Pre-K | Post-K | Post-L |
+|---|---|---|---|
+| Phase 8 E2E (default) | 0/21 | 18/21 ✓ | 18/21 ✓ |
+| Stage 2 compile | crashed | 26/26 | 26/26 |
+| Stage 1→2 MLIR match | 0/26 | 0/26 | 0/26 |
+| Phase 9c E2E (stage 2) | 0/21 | 0/21 | **1/21** |
+| Stage 2→3 MLIR match | 0/26 | 0/26 | **3/26** |
+| Phase 10c E2E (stage 3) | 0/21 | 0/21 | 0/21 |
+
+Phase 9c finally moved off 0 (1/21).  Stage 2→3 fixed-point match
+moved from 0 to 3 modules (Core/Types, Debug/DumpProgram,
+OrganIR/Types — the simplest modules).
+
+### Remaining gap to baseline (Phase 9c: 1→18)
+
+The stage 2 binary still crashes on most tests because more GHC
+stdlib symbols have no shim AND no leak-stub fallback now.  Quick
+audit of `MlirEmit_Emitter.o`'s undefined references (after
+filtering kk_*, Frankenstein_*, and shim-provided symbols):
+
+```
+Data_Set_Internal_notMember$2          GHC_Internal_Show_showCommaSpace$1
+Data_Text_concatMap$2                  GHC_Internal_Show_showParen$2
+GHC_Internal_Classes_compare$2         GHC_Internal_Show_showSpace$1
+GHC_Internal_Data_Foldable_or$1        GHC_Internal_Show_showsPrec$3
+GHC_Internal_Magic_dataToTagzh$2       GHC_Internal_Show_showString$1
+GHC_Internal_Num_fromInteger$2         GHC_Internal_Show_showString$2
+GHC_Internal_Real_fromIntegral$2       GHC_Internal_Show_zdfShowTuple3$0
+                                       GHC_Internal_Word_zdfIntegralWord8$0
+                                       GHC_Internal_Word_zdfNumWord8$0
+```
+
+`Data_Foldable_or\$1` is what nested.organ.json hits at stage 2 right
+now — it lands in `Frankenstein_exprCallsPrint…_dup1` and crashes
+on `call NULL`.  Each shim addition unblocks more tests; the
+remaining set looks like a few hours of straightforward
+C-implementation work, not a state-threading mystery.
+
 ### Audit tool
 
 ```bash

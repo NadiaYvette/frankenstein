@@ -275,6 +275,78 @@ no other CAF-thunk-Set scenarios remain.
   binary is significantly slower than stage 1 due to multi-pass
   drop/retain insertion.
 
+### Target G investigation: stage 2/3 incomplete binaries — RCA documented, fix deferred
+
+Stage 2/3 binaries are 4.8MB / 1.9MB (vs stage 1's 15MB) because
+**stage 1 itself crashes mid-compile on certain `--no-perceus` split
+parts of OrganIR/Consumer.hs**, producing 11-byte stub MLIR files for
+those parts.  E.g., for stage 2's Consumer:
+- part 0 / part 4: ~700KB real MLIR
+- parts 1, 2, 3: 11 bytes (`module { }` — stub from crash)
+
+The merged Consumer.mlir is missing `consumeProgram`, `consumeModule`,
+`consumeDef` etc. — symbols that the stage 2 binary's `main` then
+calls, getting NULL via linker's `--unresolved-symbols=ignore-in-object-files`.
+First call to NULL = SIGSEGV.
+
+Reproduction:
+```
+timeout 30 self-host/frankenstein-self-compiler \
+  self-host/obj/stage2/OrganIR_Consumer_part1.organ.json \
+  --no-perceus -o /tmp/p1.mlir
+```
+Crashes in `kk_str_concat` (input magic = `0x2474894818ec8348` —
+which is x86 code bytes for `sub $0x18,%rsp; mov %rsi,...`, NOT a
+Text magic).  Backtrace via the binary's built-in `kk_dump_backtrace`:
+
+```
+kk_str_concat
+emitAppVarGeneral_lambda190521+0xa7b   ← the chained `<>` call site
+bind_runner (×many)
+mapM_state_runner
+fmap_state_runner2
+```
+
+The "non-string input" address resolves to `pap_Frankenstein_tryAltzd..._a2_1`
+— the PAP wrapper for `tryAlt` (the recursive helper inside
+`dedupeQualN` in `MlirEmit/Emitter.hs:4548`).  So a partially-applied
+function pointer is being passed through `<>` (Text concat) as if it
+were a Text value.
+
+`tryAlt :: Int -> Emit Text` should be arity 1, but the Frankenstein
+emitter registers it as arity 2 (because `Emit a = State EmitState a`
+gets de-monadised into `EmitState -> (a, EmitState)`).  The PAP `a2_1`
+captures `n :: Int` and awaits the state.  Somewhere the calling
+context uses the PAP as if it were already `Text`, leaking the function
+address through `<>`.
+
+A band-aid for `kk_str_concat` (return the other arg on bad input,
+mirroring Target E's `kk_str_flatten`) makes the immediate crash log
++ skip — but the resulting partial Text then breaks `Set.member`
+downstream (kk_tag SEGV on the bad cell).  Multiple band-aid layers
+needed to fully unblock — not committed; root cause is the proper fix.
+
+**Root cause (hypothesis):** Frankenstein's emitter for monadic `do`
+blocks doesn't always thread the State action correctly — when the
+last expression of a `do` block is `tryAlt (n+1)` (a State action),
+the compiled code should keep this as a closure-to-run-later, but
+instead uses the PAP's function address as if it were the result Text.
+
+**Why this doesn't bite earlier stages:** stage 1's emitter (compiled
+by the host) handles this correctly.  Stage 2/3 are compiled FROM
+stage 1's output (which has the bug baked in), so they crash.  But
+the bug ALSO exists in stage 1 when stage 1 compiles ITSELF
+(specifically OrganIR/Consumer parts containing `do`-chains with
+recursive monadic calls).
+
+**Next investigation step (for follow-up):** Look at how the emitter
+handles `tryAlt (n+1)` as the tail of a `do` block — specifically
+how it differentiates between "function value as result" (which would
+be a PAP and *should* be kept as such) and "monadic action whose
+result becomes the do-block result" (which should run the action and
+yield its return value).  The latter case is broken for `tryAlt`'s
+recursive return.
+
 ## Original Two Concrete Restoration Targets
 
 ### Target A: Linker case consistency (highest value)

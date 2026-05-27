@@ -1007,6 +1007,82 @@ branch.  Most likely culprits: branches that delegate to
 chains through Set/Map operations that previously returned
 leak-stub 0s.
 
+### emitExpr interceptor result — type confusion, not branch-specific bug
+
+Added `self-host/emitExpr_intercept.c` (linked into SHIM_OBJS so it
+shadows the stage 2 binary's emitter-emitted `emitExpr$1` wrapper
+via `--allow-multiple-definition`).  On the next run, fired:
+
+```
+[emitExpr ***NULL RETURN***] tag=1129074515 (???) expr=0x... caller=0xbd423d
+  expr nfields=3 tag=0x434c4f53
+  expr.field[0] = 0xc154a0 heap=1   ← &emitDef_lambda_p16_5068
+  expr.field[1] = 0x... heap=1
+  expr.field[2] = 0x... heap=1
+```
+
+Tag `0x434C4F53` = ASCII `"CLOS"` = `KK_CLOSURE_TAG` (the closure
+tag, not an Expr constructor).  `emitExpr` is not bug-in-a-branch —
+it's being called with a **closure where it expects an Expr**.
+
+The closure has `field 0 = &Frankenstein_MlirEmit_Emitter_emitDef_lambda_p16_5068`.
+`lambda_p16_5068` is the **outer continuation closure** of emitDef:
+emitDef builds `v6202 = {field 0 = &lambda_p16_5068, field 1 = def,
+field 2 = stripTypeLam_thunk}` and binds it as the continuation
+after the initial `gets esModulePrefix`.
+
+So somewhere in emitDef's bind chain, the **outer continuation
+closure itself** ends up in the slot that should hold `body`
+(the ELam's body Expr).  Caller PC 0xbd423d = emitBody + 0xd —
+emitBody received this closure as its `expr` arg.
+
+Looking at the source:
+
+```haskell
+emitDef def = do
+  ...
+  case stripTypeLam (defExpr def) of
+    ELam params body -> do                   -- line 1966
+      ...
+      bodyText <- emitBody body mlirRetTy    -- line 1992
+```
+
+The stage 2 MLIR for this dispatches two paths:
+- ELam case (THEN of cmp at line 297196): bind chain calls
+  `emitBody$2(cap5342, v5616)` at line 296734 where `cap5342`
+  is supposed to be `body`
+- Other (ELSE of cmp at line 297244): direct `emitBody$2(v5994, v5995)`
+  at line 297257 where `v5994` is the forced stripped expr
+
+For the ELam case, `body` is extracted via:
+```
+v5172 = kk_thunk_create(v5165)         # thunk for lambda_p16_5152
+v5173 = kk_thunk_force(v5172)          # → stripTypeLam(defExpr def)
+v5180 = kk_field(v5173, 1)             # ELam.body
+```
+
+Then `body` flows through the bind chain as a capture (field 1 of
+each successive lambda's closure) until reaching lambda_p16_5339's
+cap5342.
+
+The structural-identity hypothesis: `v5165` is built with
+`{field 0 = &lambda_p16_5152, field 1 = def, field 2 = stripTypeLam_thunk}`.
+v6202 is built with `{field 0 = &lambda_p16_5068, field 1 = def,
+field 2 = stripTypeLam_thunk}`.  Both have the same fields 1 and 2;
+only field 0 differs.  If a Perceus/arena aliasing bug allowed
+v5165's allocation to land on the same arena slot as a *not-yet-
+released* v6202, the resulting cell would have v6202's field 0
+(`lambda_p16_5068`) when the thunk later reads it.
+
+That matches the observed `field 0 = lambda_p16_5068` exactly.
+
+**Next investigation step**: instrument `kk_thunk_force` to dump
+the cached/computed result tag, and `kk_alloc_con` (with
+`KK_ALLOC_TRACE=1`) to log addresses — verify whether v5165's
+`kk_alloc_con` returns the same address as v6202's.  Alternatively,
+add a tag check in lambda_p16_5152's return to abort if it
+produces a CLOS-tagged value.
+
 ### Audit tool
 
 ```bash

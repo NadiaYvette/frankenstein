@@ -961,6 +961,52 @@ issue from missing stdlib shims — probably a closure-construction
 bug in the state-monad emit, or one of the 11 hand-written Show
 shims doing the wrong thing.  Needs targeted investigation.
 
+### State-monad closure investigation (commit `ef9714d`)
+
+Added bind_runner + call1 NULL diagnostics with `KK_BIND_TRACE=1`.
+Running stage 2 binary on `nested.hs` produces:
+
+```
+[bind#1] enter, m→result, f(a)=g
+[bind#2] enter (g triggered)
+[bind#3] enter (bind#2 m triggered)
+[bind#4] enter, m→result, f(a)=g (returns up)
+[bind#3] m→result
+[ghc_base_bind_2 NULL ARG] m=(nil) f=0x... caller=0xbd3c0b
+[bind#3] f(a)=g
+[bind#5] enter
+[bind#6] enter, m=(nil)  ← CRASH
+```
+
+The `[ghc_base_bind_2 NULL ARG]` event identifies the source:
+caller PC 0xbd3c0b = `Frankenstein_MlirEmit_Emitter_emitBody + 0x5b`,
+just after `emitBody`'s `call ghc_base_bind_2`.  In Haskell:
+
+```haskell
+emitBody expr retTy = do
+  (ops, name) <- emitExpr expr   -- this is the bind that crashes
+  pure (...)
+```
+
+Compiles to `bind_2(emitExpr expr, continuation)`.  When `emitExpr`
+returns 0 (NULL), bind_2 builds a malformed closure that crashes
+when later evaluated.
+
+**Conclusion**: stage 2 binary's `emitExpr` has a code path that
+returns 0 instead of a proper state-monad closure.  Since
+`emitExpr` is a multi-way case dispatch on the Expr constructor,
+one specific Expr type must be falling through to a NULL return.
+
+**Next step**: instrument `emitExpr` (or its $1 wrapper) to log
+the Expr's kk_tag at entry, then identify which constructor's
+emission path produces NULL.  Cross-reference with `emitExpr`'s
+Haskell source — there's no explicit `pure 0` or `return NULL`
+case, so the NULL must come from a deeper sub-call inside one
+branch.  Most likely culprits: branches that delegate to
+`emitAppVarGeneral`, `emitCaseDispatch`, or any branch that
+chains through Set/Map operations that previously returned
+leak-stub 0s.
+
 ### Audit tool
 
 ```bash

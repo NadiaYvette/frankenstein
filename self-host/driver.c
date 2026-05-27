@@ -23,6 +23,7 @@ static double now_sec(void) {
 
 /* Not in kk_runtime.h but defined in kk_runtime.c */
 extern void kk_args_init(int argc, char** argv);
+extern int kk_arena_maybe_owns(const void* ptr);
 
 /* ------------------------------------------------------------------ */
 /*  External declarations for self-hosted functions                    */
@@ -180,6 +181,15 @@ int main(int argc, char** argv) {
      * Note: Haskell String = [Char] — a cons-list of ints, not a kk_string.
      * We extract chars from the cons-list to build the error message. */
     int64_t tag = kk_tag(result);
+    /* Diagnostic: when self-compiler-stage2/3 mis-handle pattern matches
+     * on Either (Target K), `result` ends up as a raw 0 (the default
+     * branch's `arith.constant 0`).  Print the raw pointer & heap-ness
+     * so we can distinguish that case from a real Left/Right tag mismatch. */
+    if (tag != 50386 && tag != 11965) {
+        fprintf(stderr, "  [diag] result=%#lx heap=%d is_string=%d arena=%d\n",
+                (long)result, kk_is_heap_ptr(result), kk_is_string(result),
+                kk_arena_maybe_owns((const void*)(intptr_t)result));
+    }
     if (verbose) fprintf(stderr, "consumeProgram returned tag=%ld\n", (long)tag);
     if (tag == 50386) {
         /* Left error_msg — error_msg is [Char] (Haskell String) */

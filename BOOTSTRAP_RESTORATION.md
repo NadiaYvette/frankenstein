@@ -542,6 +542,54 @@ that links and runs but always returns 0.  The fixed-point
 all 568-byte stubs because stage 2 binary fails on every input,
 forcing the script to fall back to stage 1's MLIR for stage 3.
 
+### Target K investigation: stage 2 `parseJSON$1` NULL-stub call
+
+Diagnostic (commit local in `driver.c`): stage 2 binary's
+`consumeProgram(json)` returns the literal value **0**, not a heap
+pointer.  Stage 2 mlir shows `parseOrganIR` body:
+
+```mlir
+%v5925 = func.call @Frankenstein_OrganIR_Parse_parseJSON$1(%t) : ...
+```
+
+— calling `parseJSON$1` (the arity-mangled extern wrapper), and
+`parseJSON$1` itself is one of the auto-generated NULL stubs:
+
+```mlir
+func.func @Frankenstein_OrganIR_Parse_parseJSON$1(%a0: i64) -> i64 {
+  %z = arith.constant 0 : i64
+  func.return %z : i64
+}
+```
+
+Stage 1 (host-emitted) MLIR for the SAME function calls the
+correct `Frankenstein_OrganIR_Parse_parseJSON` directly (no `$1`).
+
+Both pipelines run the same `emitAppVarGeneral` in `Emitter.hs`,
+and both see the same `topFns` Set Text + the same EVar text
+`"OrganIR.Parse_parseJSON"`.  Yet:
+
+* HOST emitter (GHC-compiled): correctly resolves `Set.member
+  "Frankenstein_OrganIR_Parse_parseJSON" topFns → True` → direct call
+* STAGE 1 emitter (Frankenstein-compiled): the same lookup returns
+  False, falls to the "unresolved extern" path and mangles with
+  `$1` → linker fills in with NULL stub
+
+Some calls inside the same module DO resolve correctly (`skip`,
+`pColon`, etc. emit as direct calls in stage 2's mlir).  So the
+bug is not a global "topFns is empty" — some entries lookup, others
+don't.  Most likely a Frankenstein-codegen issue in compiled
+`Set.member` / `Text` equality (similar in spirit to Target F's
+unforced-CAF-thunk bug, but for a DIFFERENT set / lookup path).
+
+**Next investigation step:** instrument `emitAppVarGeneral` to log
+`(initialQual, "in topFns?")` per call, rebuild stage 1, see
+exactly which names fail the lookup and compare to the actual
+topFns contents.  Or add a Set.toList dump just before the lookup
+loop and compare against the EVar text byte-by-byte.
+
+Phase 8 stays 18/21 (baseline); hellos 26/26; surd 9/9.
+
 ### Audit tool
 
 ```bash

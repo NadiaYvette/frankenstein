@@ -470,6 +470,78 @@ doesn't move measurable behaviour.  The 4 remaining matches
 (HldsParse `go` in IO, plus 4 non-bootstrap helpers) are left
 unrefactored pending evidence they actually trip the bug.
 
+### Target J: stage 2/3 compile "slowness" — three layers fixed
+
+The "slowness" that timed out stage 2 / stage 3 part-compiles at
+600 s+ was actually three separate problems:
+
+#### J1: `text_printf_2` choked on cons-list fmt (commit `0c70e94`)
+
+`MlirEmit.Emitter.escapeMLIRString` calls `printf "%02X" b`.  In
+Haskell `printf :: String -> a -> ...` — String = `[Char]`, NOT
+Text — so the format literal is a cons-list, not a kk_string_t.
+The shim's `kk_str_dup_cstr(fmt)` read `byte_len` off a cons cell
+(getting a huge number from the tail pointer) → malloc/snprintf
+on garbage → SIGSEGV inside `__strchrnul_avx2`.  Looked like a
+timeout because bash's `timeout` reports SIGSEGV as "Speicherauszug".
+
+Fix: call `GHC_Internal_Data_String_fromString$1(fmt)` first;
+it's a no-op on real kk_strings and converts cons-lists to
+kk_strings.  15+ stage-2 part-compiles that "timed out" now
+finish in 3–6 s each.
+
+#### J2: getenv per kk_tag/kk_field (commit `968799a`)
+
+perf showed 60% of CPU in libc `getenv` from
+`kk_tag`/`kk_field`'s env-var-gated trace (added during Target H
+diagnosis).  getenv is O(envp_count) and those primitives fire
+millions of times during emit.
+
+Fix: cache the env state once on first call into static ints
+(`kk_tag_trace`, `kk_field_trace`).  Single int compare per call
+afterward instead of two getenv strncmps.
+
+#### J3: deep-rope stack overflow + small string-table (commit `d964294`)
+
+Re-profile after J2 showed: 40% kk_str_alloc_leaf_owned, 30%
+kk_structural_eq, 17% kk_is_string — all from
+`OrganIR_Parse_decodeExpr`.  Two issues:
+
+(a) `pStrBody` does `acc <> chunk <> "\n" <> chunk' <> ...` per
+    JSON-string escape.  Frankenstein's `<>` builds a CONCAT rope
+    node (not flat copy), so a JSON string with K escapes
+    produces a K-deep left-spine.  `kk_str_copy_into` was
+    recursive and overflowed the 8 MB stack flattening the rope.
+
+(b) String-identity hash table at 4 M entries with 3 M strings
+    (75% load) → long probe chains in `kk_register_string`.
+
+Fixes: iterative `kk_str_copy_into` with malloc'd manual stack;
+bumped `KK_STRING_TABLE_SIZE` and `KK_STRING_LOG_SIZE` to 16 M
+each (~128 MB address space, fine for bootstrap).
+
+**Result of Target J (commit `d964294`):**
+
+| Metric | Before J | After J |
+|---|---|---|
+| `MlirEmit_Emitter_part17` (3 MB) | 600 s timeout (SIGSEGV) | **13 s ✓** |
+| `MlirEmit_Emitter_part20` (2.3 MB) | 600 s timeout (SIGSEGV) | **8 s ✓** |
+| Stage 2 compile crashes | 14+ | **0** |
+| Stage 2 compile timeouts | 11 | **0** |
+| Phase 8 E2E | 18/21 | 18/21 (baseline) |
+| Hellos / surd | 26/26 / 9/9 | 26/26 / 9/9 |
+
+Stage 2 binary now compiles all 26 modules cleanly (no fallback
+.o copies from prev stage).  The remaining bootstrap blocker is
+NOT slowness — it's that **stage 2 binary's `consumeProgram`
+returns 0 even for valid JSON input** (verified by running it
+directly on `examples/effect_state.json`).  Different bug class:
+stage 1's emitter produces incorrect MLIR for `consumeProgram`
+that links and runs but always returns 0.  The fixed-point
+"regression" (5/26 → 0/26) is artefactual — stage 3 modules are
+all 568-byte stubs because stage 2 binary fails on every input,
+forcing the script to fall back to stage 1's MLIR for stage 3.
+
 ### Audit tool
 
 ```bash

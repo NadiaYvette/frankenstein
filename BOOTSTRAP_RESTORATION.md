@@ -738,6 +738,41 @@ This finally rules out Set/State-monad bugs.  The bug is in the
 emit's conditional branching after a successful Set.member.
 Phase 9c/10c E2E remains 0/21.
 
+#### Target K — **RESOLVED**: bug was a STALE stage 1 binary
+
+Re-ran a single-module emit using the **current** stage 1 binary
+(rebuilt 11:32 after Target H refactor of `dedupeQualN`):
+
+```
+./self-host/frankenstein-self-compiler self-host/obj/stage2/OrganIR_Parse.organ.json --emit-mlir > /tmp/fresh.mlir
+grep 'parseJSON\$1' /tmp/fresh.mlir   # 0 hits
+grep 'parseJSON\b' /tmp/fresh.mlir    # only the real direct call:
+  %v16829 = func.call @Frankenstein_OrganIR_Parse_parseJSON(...) : (i64) -> i64
+```
+
+The `stage2/OrganIR_Parse.mlir` we'd been inspecting was timestamped
+06:52 — produced by an **older** stage 1 binary that had the bug.
+After the Target H refactor (replacing where-bound monadic
+recursion in `dedupeQualN` with a pure helper, committed earlier
+2026-05-27), the resulting stage 1 binary correctly emits the
+direct call.
+
+**Confirmed root cause** *(retroactive — fix landed before
+investigation began)*: monadic state-threading bug in the where-bound
+helper `dedupeQualN` corrupted `esTopFns` for some call sites,
+causing `Set.member` to read an empty set and dispatch to the
+extern fallback.  Target H's pure-helper refactor removed the
+unwanted state threading, restoring the lookup.
+
+**Investigation lesson**: when `stage2/*` MLIR contradicts trace
+output of the running stage 1 binary, **always re-emit the module
+fresh** before assuming a deeper bug.  Stale artefacts from prior
+stage 1 builds can survive cabal rebuilds because `obj/stage2/`
+isn't a cabal artefact.
+
+**Action**: rerun `self-host/build.sh` to regenerate stage 2 from
+scratch with the current stage 1 binary and verify Phase 9c E2E.
+
 ### Audit tool
 
 ```bash

@@ -1179,6 +1179,50 @@ regression to HEAD `8d9e6ca`):
 The restoration arc is **complete** modulo the one remaining
 Core/Linker.hs MLIR diff in the fixed-point.
 
+### Target N — **FIXED POINT REACHED** (commit `776d4a3`)
+
+The Core/Linker.hs diff in the stage 2→3 check turned out to be a
+classic unforced-CAF-thunk bug in `map_union`:
+
+  - `externalRuntimeArity` is a Haskell CAF that compiles to a
+    `kk_thunk_create`-wrapped closure.
+  - `esTopFnArity = buildTopFnArity defs \`Map.union\` externalRuntimeArity`
+    passes the unforced thunk as the second arg to `Map.union`.
+  - `map_union`'s `map_is_tip(m2)` checks `kk_tag(m2)`.  For a
+    THUNK cell (tag 0x4C415A59 = LAZY) this returns False (≠ TIP_TAG),
+    so the function proceeds to treat the thunk as a Bin/Tip
+    structure, reading garbage from kk_field offsets.
+  - Net effect: extRtArity's entries silently lost.  For Core/Linker,
+    `findWithDefault 1 "haskell_chars_concat"` returned 1 (the
+    default) instead of 2, producing `pap_haskell_chars_concat_a1_0`
+    where a2_0 was expected.
+
+The fix is defensive: `map_union` now `kk_thunk_force`s both
+arguments before the `map_is_tip` checks.  Stage 1's emit DID
+insert an explicit `kk_thunk_force` before the union (line 250026
+of `obj/MlirEmit_Emitter.mlir`), but stage 1 binary's compiled
+emit emitted `externalRuntimeArity$0()` without the force.  The
+discrepancy in *emitted code* between GHC-built stage 1 and
+self-compiled stage 1 binary is itself a self-host bug worth
+tracking later — but defensively forcing in `map_union` makes
+the runtime robust to either emit shape.
+
+### Final bootstrap results — `*** FIXED POINT REACHED ***`
+
+| Phase | Pre-K | Post-K | Post-L | Post-M | **Post-N (HEAD)** | Baseline |
+|---|---|---|---|---|---|---|
+| Phase 8 E2E (default) | 0/21 | 18/21 | 18/21 | 18/21 | **18/21 ✓** | 18/21 |
+| Stage 2 compile | crashed | 26/26 | 26/26 | 26/26 | **26/26** | n/a |
+| Phase 9c E2E (stage 2) | 0/21 | 0/21 | 1/21 | 18/21 | **18/21 ✓** | 18/21 |
+| Phase 10c E2E (stage 3) | 0/21 | 0/21 | 0/21 | 18/21 | **18/21 ✓** | 18/21 |
+| Stage 2→3 MLIR match | 0/26 | 0/26 | 3/26 | 25/26 | **26/26 ✓** | 26/26 |
+
+**All 26 modules produce identical MLIR in stages 2 and 3 —
+the self-hosted compiler has converged.**  The bootstrap loop
+restoration is COMPLETE; the same 3 pre-existing baseline
+failures (prelude_inline, prelude_comprehensive, stdlib_string)
+remain.
+
 ### Audit tool
 
 ```bash

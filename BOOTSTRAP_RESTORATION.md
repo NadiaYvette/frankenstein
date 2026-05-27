@@ -455,6 +455,21 @@ decrease.  Tracked but not auto-fixed: the user should decide
 case-by-case whether to refactor each (the pattern is risky but
 correctness is fine in stage 1 because the host emitter handles it).
 
+**Target I follow-up (commit `51947dd`):** refactored all 3
+`desugarGuards` instances in `KokaBridge/CoreTranslate.hs` to the
+same pure-helper pattern as `dedupeQualN` (Target H).  Each does:
+1. `mapM` over guards (Either monad) to translate test+body pairs
+2. Pure recursive `foldGuards` helper to build the ECase chain
+
+Result: bootstrap numbers unchanged vs Target H (Phase 8 18/21,
+hellos 26/26, surd 9/9, same fallback/timeout pattern).
+Confirms `desugarGuards` was NOT actually triggering the bug in
+the current bootstrap path — `tryAlt` was the only hot site.
+The refactor is preemptive: it removes a known-risky pattern but
+doesn't move measurable behaviour.  The 4 remaining matches
+(HldsParse `go` in IO, plus 4 non-bootstrap helpers) are left
+unrefactored pending evidence they actually trip the bug.
+
 ### Audit tool
 
 ```bash

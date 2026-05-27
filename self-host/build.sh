@@ -674,7 +674,7 @@ if [ "$S2_OK" -gt 0 ]; then
   # Link stage 2 compiler binary (stage 2 .o files + same shims/runtime + driver)
   STAGE2_OBJS="$STAGE2/*.o"
   # Include all shims, runtime, and driver from stage 1 build
-  SHIM_OBJS=$(ls "$OUT"/*.o | grep -vE '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_|main\.o|-self-ir\.o|factorial-self-ir|_standalone\.o)')
+  SHIM_OBJS=$(ls "$OUT"/*.o | grep -vE '(Core_|MlirEmit_|GhcBridge_|MercuryBridge_|RustBridge_|KokaBridge_|OrganIR_|Debug_|main\.o|-self-ir\.o|factorial-self-ir|_standalone\.o)')
   # Link shims BEFORE stage objects so A_sanitize_shim.o's deterministic
   # sanitizeName wins over the compiled (corrupted) version in MlirEmit_Emitter.o.
   # With --allow-multiple-definition, the first definition wins.

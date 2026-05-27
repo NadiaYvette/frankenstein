@@ -208,6 +208,14 @@ static int64_t text_drop_end(int64_t n, int64_t s) {
     return text_take(keep, s);
 }
 
+static int64_t text_take_end(int64_t n, int64_t s) {
+    /* Keep the last n chars = drop (length - n) from the front */
+    int64_t total = text_length(s);
+    int64_t skip = total - n;
+    if (skip <= 0) { kk_retain(s); return s; }
+    return text_drop(skip, s);
+}
+
 static int64_t text_init(int64_t s) {
     /* All but last char = take (length - 1) */
     int64_t total = text_length(s);
@@ -724,6 +732,21 @@ int64_t text_dropEnd_1(int64_t n) __asm__("Data_Text_dropEnd$1");
 int64_t text_dropEnd_1(int64_t n) {
     int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
     kk_set_field(c, 0, (int64_t)&tram_dropEnd);
+    kk_set_field(c, 1, n);
+    return c;
+}
+
+static int64_t tram_takeEnd(int64_t clos, int64_t s) {
+    return text_take_end(kk_field(clos, 1), s);
+}
+
+int64_t text_takeEnd_2(int64_t n, int64_t s) __asm__("Data_Text_takeEnd$2");
+int64_t text_takeEnd_2(int64_t n, int64_t s) { return text_take_end(n, s); }
+
+int64_t text_takeEnd_1(int64_t n) __asm__("Data_Text_takeEnd$1");
+int64_t text_takeEnd_1(int64_t n) {
+    int64_t c = kk_alloc_con(CLOS_TAG_T, 2);
+    kk_set_field(c, 0, (int64_t)&tram_takeEnd);
     kk_set_field(c, 1, n);
     return c;
 }

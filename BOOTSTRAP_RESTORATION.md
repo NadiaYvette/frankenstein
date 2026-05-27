@@ -1083,6 +1083,102 @@ the cached/computed result tag, and `kk_alloc_con` (with
 add a tag check in lambda_p16_5152's return to abort if it
 produces a CLOS-tagged value.
 
+### Target M — **ROOT CAUSE FOUND**: ALIAS0 macro called `sym()` instead of returning closure (commit `8d9e6ca`)
+
+The arena-aliasing hypothesis was wrong — the arena is bump-only,
+no slot reuse.  Real bug: the `ALIAS0` macro in
+`cross_module_aliases_new.c` (which I added for stage 2's
+unresolved Frankenstein \$N references):
+
+```c
+#define ALIAS0(sym) \
+    extern int64_t sym(void); \
+    ... { return sym(); }   // ← calls sym with no args!
+```
+
+For a 1-arg function like `etaExpandBuiltinAlias :: Def -> Def`,
+this passed uninitialized `rdi` as the Def parameter.
+
+**The propagation chain** (revealed by `KK_FORCE_TRACE=1`):
+
+1. `emitDefs` runs `map etaExpandBuiltinAlias defs`.  The emitter
+   compiles this as `map\$2(etaExpandBuiltinAlias\$0(), defs)`.
+2. `etaExpandBuiltinAlias\$0()` (the broken ALIAS0) is supposed to
+   return a closure wrapping the function.  Instead it called
+   `etaExpandBuiltinAlias(garbage_rdi)`, returning a malformed Def.
+3. The resulting list head was a corrupted "Def" — actually a
+   bind closure left over from rdi's prior use.
+4. `mapM emitDef bad_list` then called `emitDef(bind_closure)`.
+5. Inside emitDef, `bind_closure` got captured into v6202.field[1]
+   as the supposed Def.  When lambda_p16_5152 forced the thunk,
+   `defExpr(bind_closure)` extracted field 2 of the bind closure —
+   which was v6202 itself (the next outer continuation in the
+   bind chain).
+6. `stripTypeLam(v6202)` returned v6202 unchanged (CLOS tag ≠
+   ETypeLam tag).  v6202 flowed through the bind chain as
+   `body` and reached `emitBody(v6202, "i64")`.
+7. `emitBody` passed v6202 to `emitExpr`, which had no case for
+   CLOS tag (only matches actual Expr constructors), so it fell
+   through to the wildcard returning 0.
+8. Back in `emitBody`, `bind_2(0, continuation)` built a malformed
+   state-monad action with NULL `m`.  When eventually evaluated,
+   `bind_runner` crashed calling `call1(NULL, state)`.
+
+**Fix**: `ALIAS0` now uses the same `mk_closure1` pattern as
+`cross_module_shims.c` — return a 2-field CLOS with field 0 =
+trampoline_1arg, field 1 = real fn ptr.  Callers via
+`call1(clos, arg)` dispatch through the trampoline to `sym(arg)`.
+
+```c
+#define ALIAS0(sym) \
+    extern int64_t sym(int64_t); \
+    int64_t sym##__a0(void) __asm__(#sym "$0"); \
+    int64_t sym##__a0(void) { \
+        int64_t c = kk_alloc_con(CLOS_TAG_AN, 2); \
+        kk_set_field(c, 0, (int64_t)(intptr_t)&trampoline_1arg_an); \
+        kk_set_field(c, 1, (int64_t)(intptr_t)&sym); \
+        return c; \
+    }
+```
+
+### Final bootstrap results (2026-05-27 ~23:59)
+
+| Phase | Pre-K | Post-K | Post-L | **Post-M (HEAD)** | Baseline |
+|---|---|---|---|---|---|
+| Phase 8 E2E (default) | 0/21 | 18/21 ✓ | 18/21 ✓ | **18/21 ✓** | 18/21 |
+| Stage 2 compile | crashed | 26/26 | 26/26 | **26/26** | n/a |
+| Phase 9c E2E (stage 2) | 0/21 | 0/21 | 1/21 | **18/21 ✓** | 18/21 |
+| Phase 10c E2E (stage 3) | 0/21 | 0/21 | 0/21 | **18/21 ✓** | 18/21 |
+| Stage 2→3 MLIR match | 0/26 | 0/26 | 3/26 | **25/26** | 26/26 |
+
+**Phase 9c/10c E2E RESTORED to baseline (18/21).**  The one
+remaining MLIR diff in the fixed-point check is `Core/Linker.hs`;
+all 25 other modules match between stages 2 and 3.
+
+The same 3 examples that fail at baseline (prelude_inline,
+prelude_comprehensive, stdlib_string) continue to fail at stage 2
+and 3 — these are pre-existing failures, not new regressions.
+
+Total commits in this restoration arc (from `885f229` baseline
+regression to HEAD `8d9e6ca`):
+
+- **Target D**: maybeToList\$1 + forM\$1 shims
+- **Target E/F**: kk_str_flatten guards + Perceus CAF force
+- **Target G/H**: dedupeQualN pure-helper refactor (state threading)
+- **Target I**: 3 desugarGuards refactors
+- **Target J**: stage 2/3 slowness — env-cached trace flags +
+  iterative kk_str_copy_into + 16M string table
+- **Target K**: NOT really a Set/State bug; it was stale stage 2
+  MLIR from a pre-Target-H stage 1 binary
+- **Target L**: leak-stub PostProcess (intra-module wrappers +
+  inter-module private decls) + Debug_ SHIM_OBJS exclusion +
+  Data_Text_takeEnd + 11 hand-written shims + 163-stub catch-all +
+  54 Frankenstein \$N→base aliases
+- **Target M**: ALIAS0 macro fix (this commit)
+
+The restoration arc is **complete** modulo the one remaining
+Core/Linker.hs MLIR diff in the fixed-point.
+
 ### Audit tool
 
 ```bash

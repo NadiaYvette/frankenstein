@@ -310,6 +310,20 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
     }
     /* Return pointer to the tag slot */
     int64_t ptr = (int64_t)&block[1];
+    static const char* trace = NULL;
+    if (trace == NULL) { trace = getenv("KK_ALLOC_TRACE"); if (!trace) trace = ""; }
+    if (trace[0]) {
+        /* Optional filter on tag (KK_ALLOC_TRACE=CLOS shows only CLOS cells) */
+        const char* tag_match = NULL;
+        if (tag == 0x434C4F53 && (trace[0] == 'C' || trace[0] == '1')) tag_match = "CLOS";
+        else if (tag == 0x4C415A59 && (trace[0] == 'L' || trace[0] == '1')) tag_match = "LAZY";
+        else if (trace[0] == '1') tag_match = "OTHER";
+        if (tag_match) {
+            fprintf(stderr, "[alloc] tag=%s nf=%ld → %p caller=%p\n",
+                    tag_match, (long)nfields, (void*)(uintptr_t)ptr,
+                    __builtin_return_address(0));
+        }
+    }
     return ptr;
 }
 
@@ -4947,13 +4961,53 @@ int64_t kk_thunk_force(int64_t thunk) {
     if (evaluated) {
         int64_t result = kk_field(thunk, 1);
         kk_retain(result);                     /* caller will drop this ref */
+        if (getenv("KK_FORCE_TRACE")) {
+            fprintf(stderr, "[force CACHED] thunk=%p → %p (tag=0x%lx)\n",
+                    (void*)(uintptr_t)thunk, (void*)(uintptr_t)result,
+                    kk_is_heap_ptr(result) ? *(int64_t*)result : 0L);
+            fflush(stderr);
+        }
         return result;
     }
     /* Unevaluated: field 1 holds a closure cell.  Invoke fn(closure). */
     int64_t closure = kk_field(thunk, 1);
     int64_t fn_ptr = kk_field(closure, 0);
+    /* DIAGNOSTIC: dump closure fields before evaluation if KK_FORCE_TRACE is set
+     * and fn is the suspicious lambda_p16_5152 (compile-time addr will vary). */
+    if (getenv("KK_FORCE_TRACE")) {
+        int64_t nf = kk_nfields(closure);
+        fprintf(stderr, "[force NEW pre] thunk=%p closure=%p fn=%p nfields=%ld\n",
+                (void*)(uintptr_t)thunk, (void*)(uintptr_t)closure,
+                (void*)(uintptr_t)fn_ptr, (long)nf);
+        for (int64_t i = 1; i < nf && i < 5; i++) {
+            int64_t fi = kk_field(closure, i);
+            int64_t fi_tag = kk_is_heap_ptr(fi) ? *(int64_t*)fi : 0;
+            fprintf(stderr, "  closure.field[%ld] = %p (tag=0x%lx)",
+                    (long)i, (void*)(uintptr_t)fi, fi_tag);
+            /* If field is a CLOS, also dump its field[0] (fn ptr) and field[1] */
+            if (fi_tag == 0x434C4F53 && kk_is_heap_ptr(fi)) {
+                int64_t fi_nf = kk_nfields(fi);
+                int64_t fi_f0 = kk_field(fi, 0);
+                fprintf(stderr, " nf=%ld f0=%p", (long)fi_nf, (void*)(uintptr_t)fi_f0);
+                if (fi_nf > 1) {
+                    int64_t fi_f1 = kk_field(fi, 1);
+                    int64_t fi_f1_tag = kk_is_heap_ptr(fi_f1) ? *(int64_t*)fi_f1 : 0;
+                    fprintf(stderr, " f1=%p(tag=0x%lx)", (void*)(uintptr_t)fi_f1, fi_f1_tag);
+                }
+            }
+            fprintf(stderr, "\n");
+        }
+        fflush(stderr);
+    }
     typedef int64_t (*thunk_fn_t)(int64_t);
     int64_t result = ((thunk_fn_t)fn_ptr)(closure);
+    if (getenv("KK_FORCE_TRACE")) {
+        fprintf(stderr, "[force NEW post] thunk=%p closure=%p fn=%p → %p (tag=0x%lx)\n",
+                (void*)(uintptr_t)thunk, (void*)(uintptr_t)closure,
+                (void*)(uintptr_t)fn_ptr, (void*)(uintptr_t)result,
+                kk_is_heap_ptr(result) ? *(int64_t*)result : 0L);
+        fflush(stderr);
+    }
     /* Closure has done its job (its captures were extracted/retained by
      * the body's prologue).  Drop it so its captures release one ref. */
     kk_drop(closure);

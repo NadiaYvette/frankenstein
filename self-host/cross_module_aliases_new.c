@@ -6,7 +6,41 @@
 
 #include <stdint.h>
 
-#define ALIAS0(sym) extern int64_t sym(void); int64_t sym##__a0(void) __asm__(#sym "$0"); int64_t sym##__a0(void) { return sym(); }
+extern int64_t kk_alloc_con(int64_t tag, int64_t nfields);
+extern void    kk_set_field(int64_t ptr, int64_t idx, int64_t val);
+extern int64_t kk_field(int64_t ptr, int64_t idx);
+#define CLOS_TAG_AN 0x434C4F53
+
+/* Trampoline for 1-arg closures: extracts the real fn from field 1
+ * and calls fn(arg), discarding the closure pointer.  Matches the
+ * convention in cross_module_shims.c. */
+static int64_t trampoline_1arg_an(int64_t clos, int64_t arg) {
+    int64_t fn = kk_field(clos, 1);
+    typedef int64_t (*raw1_t)(int64_t);
+    return ((raw1_t)(intptr_t)fn)(arg);
+}
+
+/* ALIAS0: function used as a value reference (e.g. `map f xs`).
+ * Return a 2-field CLOS — field 0 = trampoline, field 1 = real fn ptr.
+ * When the caller later does call1(clos, arg), it dispatches via the
+ * trampoline.  This is the SAME pattern as cross_module_shims.c's
+ * frkn_*_0 functions.
+ *
+ * Previously this macro did `return sym()` — wrong: it called sym
+ * with no args, passing uninitialized rdi as if it were the
+ * function's 1-arg parameter.  For 1-arg sym this corrupted the
+ * downstream computation (e.g. etaExpandBuiltinAlias\$0 in stage 2
+ * received a bind-closure as its def parameter via uninitialized rdi).
+ */
+#define ALIAS0(sym) \
+    extern int64_t sym(int64_t); \
+    int64_t sym##__a0(void) __asm__(#sym "$0"); \
+    int64_t sym##__a0(void) { \
+        int64_t c = kk_alloc_con(CLOS_TAG_AN, 2); \
+        kk_set_field(c, 0, (int64_t)(intptr_t)&trampoline_1arg_an); \
+        kk_set_field(c, 1, (int64_t)(intptr_t)&sym); \
+        return c; \
+    }
 #define ALIAS1(sym) extern int64_t sym(int64_t); int64_t sym##__a1(int64_t a) __asm__(#sym "$1"); int64_t sym##__a1(int64_t a) { return sym(a); }
 #define ALIAS2(sym) extern int64_t sym(int64_t, int64_t); int64_t sym##__a2(int64_t a, int64_t b) __asm__(#sym "$2"); int64_t sym##__a2(int64_t a, int64_t b) { return sym(a, b); }
 #define ALIAS3(sym) extern int64_t sym(int64_t, int64_t, int64_t); int64_t sym##__a3(int64_t a, int64_t b, int64_t c) __asm__(#sym "$3"); int64_t sym##__a3(int64_t a, int64_t b, int64_t c) { return sym(a, b, c); }

@@ -377,19 +377,25 @@ int64_t set_insert_0(void) {
 int64_t set_member_2(int64_t x, int64_t s)
     __asm__("Data_Set_Internal_member$2");
 int64_t set_member_2(int64_t x, int64_t s) {
-    /* Diagnose Target K: log tag of the set arg when looking up
-     * KK_SET_MEMBER_TRACE substring. */
+    int trace = 0;
+    char* xs = NULL;
+    void* ret = NULL;
     if (getenv("KK_SET_MEMBER_TRACE") && kk_is_string(x)) {
         const char* needle = getenv("KK_SET_MEMBER_TRACE");
-        char* xs = kk_str_dup_cstr(x);
+        xs = kk_str_dup_cstr(x);
         if (xs && strstr(xs, needle)) {
-            int64_t tag = kk_is_heap_ptr(s) ? *(int64_t*)s : 0;
-            fprintf(stderr, "  [set_member_2 ENTRY] key='%s' set=%p tag=%#lx\n",
-                    xs, (void*)s, (long)tag);
+            trace = 1;
+            ret = __builtin_return_address(0);
         }
-        if (xs) free(xs);
     }
-    return set_member(x, set_force(s));
+    int64_t result = set_member(x, set_force(s));
+    if (trace) {
+        int64_t tag = kk_is_heap_ptr(s) ? *(int64_t*)s : 0;
+        fprintf(stderr, "  [set_member_2] key='%s' set=%p tag=%#lx ret=%p RESULT=%ld\n",
+                xs, (void*)s, (long)tag, ret, (long)result);
+    }
+    if (xs) free(xs);
+    return result;
 }
 
 /* notMember$0 — function reference */

@@ -270,13 +270,41 @@ static int64_t either_bind(int64_t m, int64_t f) {
     return call1(f, a);
 }
 
+/* Target K diagnostic: probe EmitState's esTopFns (field 7) tag.
+ * Returns: 0 if not an EmitState, 1 if real (BIN), -1 if empty (TIP). */
+static int probe_emit_topfns(int64_t s) {
+    extern int64_t kk_nfields(int64_t);
+    if (!kk_is_heap_ptr(s)) return 0;
+    if (kk_nfields(s) != 21) return 0;
+    int64_t topfns = kk_field(s, 7);
+    if (!kk_is_heap_ptr(topfns)) return 0;
+    int64_t tag = *(int64_t*)topfns;
+    if (tag == 0) return -1;   /* SET_TIP — empty */
+    if (tag == 1) return 1;    /* SET_BIN — real */
+    return 0;
+}
+
 /* State monad bind runner */
 static int64_t bind_runner(int64_t clos, int64_t s) {
+    static int total_calls = 0;
+    total_calls++;
+    if (total_calls == 1 || (total_calls % 1000) == 0) {
+        fprintf(stderr, "[bind_runner total=%d]\n", total_calls);
+    }
     int64_t m = kk_field(clos, 1);
     int64_t f = kk_field(clos, 2);
+    int log_state = (getenv("KK_STATE_TRACE") != NULL);
+    int in_topfns = log_state ? probe_emit_topfns(s) : 0;
     int64_t result = call1(m, s);
     int64_t a  = kk_fst(result);
     int64_t s2 = kk_snd(result);
+    if (log_state) {
+        int out_topfns = probe_emit_topfns(s2);
+        if (in_topfns == 1 && out_topfns == -1) {
+            fprintf(stderr, "[bind ***CORRUPT***] s=%p s2=%p esTopFns dropped REAL→empty after m\n",
+                    (void*)s, (void*)s2);
+        }
+    }
     int64_t g = call1(f, a);
     return call1(g, s2);
 }
@@ -636,9 +664,46 @@ int64_t ghc_pushCallStack_2(int64_t info, int64_t cs) { (void)info; return cs; }
 /* ================================================================== */
 
 static int64_t state_get_code(int64_t clos, int64_t s)    { (void)clos; return kk_pair(s, s); }
-static int64_t state_gets_code(int64_t clos, int64_t s)   { return kk_pair(call1(kk_field(clos,1), s), s); }
-static int64_t state_modify_code(int64_t clos, int64_t s) { return kk_pair(0, call1(kk_field(clos,1), s)); }
-static int64_t state_put_code(int64_t clos, int64_t s)    { (void)s; return kk_pair(0, kk_field(clos,1)); }
+static int64_t state_gets_code(int64_t clos, int64_t s)   {
+    int64_t accessor = kk_field(clos, 1);
+    int64_t result = call1(accessor, s);
+    if (getenv("KK_STATE_TRACE")) {
+        int sp = probe_emit_topfns(s);
+        /* If state has real esTopFns but gets returns empty Set,
+         * the accessor is wrong (maybe esLiftedNames instead). */
+        if (sp == 1) {
+            int rp = (kk_is_heap_ptr(result) && *(int64_t*)result == 0) ? -1
+                   : (kk_is_heap_ptr(result) && *(int64_t*)result == 1) ? 1 : 0;
+            if (rp == -1) {
+                static int n = 0; if (n < 10) {
+                    fprintf(stderr, "[gets ***WRONG***] state has REAL esTopFns but gets returns EMPTY (acc=%p)\n",
+                            (void*)accessor); n++;
+                }
+            }
+        }
+    }
+    return kk_pair(result, s);
+}
+static int64_t state_modify_code(int64_t clos, int64_t s) {
+    int64_t s2 = call1(kk_field(clos,1), s);
+    if (getenv("KK_STATE_TRACE")) {
+        int in_tf = probe_emit_topfns(s);
+        int out_tf = probe_emit_topfns(s2);
+        if (in_tf == 1 && out_tf == -1) {
+            fprintf(stderr, "[modify ***CORRUPT***] s=%p s2=%p IN=REAL OUT=empty\n",
+                    (void*)s, (void*)s2);
+        }
+    }
+    return kk_pair(0, s2);
+}
+static int64_t state_put_code(int64_t clos, int64_t s)    {
+    (void)s;
+    int64_t newS = kk_field(clos,1);
+    if (getenv("KK_STATE_TRACE") && probe_emit_topfns(newS) == -1 && probe_emit_topfns(s) == 1) {
+        fprintf(stderr, "[put ***CORRUPT***] putting empty-topFns state over real one\n");
+    }
+    return kk_pair(0, newS);
+}
 
 int64_t state_get_0(void) __asm__("Control_Monad_State_Class_get$0");
 int64_t state_get_0(void) { return make_closure0(&state_get_code); }

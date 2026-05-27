@@ -689,6 +689,55 @@ The diagnostic env vars (KK_SET_MEMBER_TRACE,
 KK_SET_INSERT_KEYS) are committed.  Phase 9c/10c E2E stays at
 0/21 until this is fixed.
 
+#### Target K — final narrowing: NOT a state-monad bug either
+
+Instrumented `bind_runner`, `state_gets_code`, `state_modify_code`,
+`state_put_code` with `KK_STATE_TRACE=1` env-gated probes for
+`esTopFns` corruption (real→empty).  **Zero `[CORRUPT]` events
+across thousands of bind/modify/put operations.**  State threading
+works correctly.
+
+Re-instrumented `set_member_2` to log `(key, set ptr, set tag,
+caller return-address, RESULT)` for every parseJSON lookup.
+Resolved caller addresses:
+
+| Caller (resolved by nm) | Result | Set tag | What it's checking |
+|---|---|---|---|
+| `emitCycleCandidate_lambda99483` | 0 | 0 (empty) | esCyclicDefs (legitimately empty) |
+| `dedupzd...$079007` (Set.dedup) | 0 | 0x1 (size 21) | some dedup set |
+| `emitAppVarGeneral_lambda187257` | 0 | 0x1 | extRtFns — `Set.member "OrganIR_Parse_parseJSON"`  (legitimately false) |
+| `emitAppVarGeneral_lambda187311` | **1** | 0x1 | **topFns — RETURNED TRUE!** |
+| `emitAppVarGeneral_lambda187299` | **1** | 0x1 | **topFns — RETURNED TRUE!** |
+
+**`Set.member` is working correctly.**  All three relevant
+lookups inside `emitAppVarGeneral` return the right answer (the
+extRtFns check correctly returns False; the topFns checks
+correctly return True).
+
+Yet `parseOrganIR`'s body in stage 2 MLIR still calls
+`parseJSON$1` (extern-mangled NULL stub), not the direct
+`parseJSON`.  This means the **if-then-else dispatch following
+Set.member must be wrong** — the compiled stage 1 emitter is
+reaching the *extern* branch despite Set.member returning True.
+
+Likely candidates:
+1. **Compiled `if-then-else` on Bool selects wrong branch**: maybe
+   compiled comparison or branch encoding is inverted.  Test:
+   write a small Haskell file with `if Set.member x s then …
+   else …`, compile via stage 1, inspect the scf.if condition.
+2. **Frankenstein's Bool ↔ i64 conversion is mishandled**: if
+   Set.member returns i64 1 but the if-discriminator expects a
+   boxed Bool, the conversion could drop it to "false".
+3. **A separate code path emits the call**: maybe `emitExpr`
+   dispatches to `emitAppVarGeneral` for some App nodes but to
+   a *different* function (one without the topFns check) for
+   others.  Look at the OrganIR AST node for parseJSON's call
+   site to see which it hits.
+
+This finally rules out Set/State-monad bugs.  The bug is in the
+emit's conditional branching after a successful Set.member.
+Phase 9c/10c E2E remains 0/21.
+
 ### Audit tool
 
 ```bash

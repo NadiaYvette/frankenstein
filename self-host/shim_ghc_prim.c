@@ -64,6 +64,12 @@ static int64_t call1(int64_t clos, int64_t a) {
      * consume it (drop after extracting fields).  The caller's data
      * structure still holds a reference, so we must keep it alive. */
     kk_retain(a);
+    if (clos == 0) {
+        fprintf(stderr, "FATAL: call1(0, %p) — caller %p\n",
+                (void*)a, __builtin_return_address(0));
+        fflush(stderr);
+        abort();
+    }
     clos = resolve_callable(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw1_t)(int64_t);
@@ -287,17 +293,29 @@ static int probe_emit_topfns(int64_t s) {
 /* State monad bind runner */
 static int64_t bind_runner(int64_t clos, int64_t s) {
     static int total_calls = 0;
-    total_calls++;
-    if (total_calls == 1 || (total_calls % 1000) == 0) {
-        fprintf(stderr, "[bind_runner total=%d]\n", total_calls);
+    int n = ++total_calls;  /* capture local — total_calls changes on nested entry */
+    int trace = (getenv("KK_BIND_TRACE") != NULL);
+    if (trace) {
+        fprintf(stderr, "[bind#%d] clos=%p s=%p\n", n, (void*)clos, (void*)s);
+        fflush(stderr);
+    } else if (n == 1 || (n % 1000) == 0) {
+        fprintf(stderr, "[bind_runner total=%d]\n", n);
     }
     int64_t m = kk_field(clos, 1);
     int64_t f = kk_field(clos, 2);
+    if (trace) { fprintf(stderr, "[bind#%d]   m=%p f=%p\n", n, (void*)m, (void*)f); fflush(stderr); }
+    /* Diagnostic: catch NULL closures before we crash on call1. */
+    if (m == 0 || (kk_is_heap_ptr(m) && kk_field(m, 0) == 0)) {
+        fprintf(stderr, "[bind#%d CRASH] m is NULL or has NULL fptr: m=%p\n", n, (void*)m);
+        fprintf(stderr, "[bind#%d CRASH] clos=%p s=%p f=%p\n", n, (void*)clos, (void*)s, (void*)f);
+        abort();
+    }
     int log_state = (getenv("KK_STATE_TRACE") != NULL);
     int in_topfns = log_state ? probe_emit_topfns(s) : 0;
     int64_t result = call1(m, s);
     int64_t a  = kk_fst(result);
     int64_t s2 = kk_snd(result);
+    if (trace) { fprintf(stderr, "[bind#%d]   m→result=%p a=%p s2=%p\n", n, (void*)result, (void*)a, (void*)s2); fflush(stderr); }
     if (log_state) {
         int out_topfns = probe_emit_topfns(s2);
         if (in_topfns == 1 && out_topfns == -1) {
@@ -305,12 +323,27 @@ static int64_t bind_runner(int64_t clos, int64_t s) {
                     (void*)s, (void*)s2);
         }
     }
+    if (f == 0 || (kk_is_heap_ptr(f) && kk_field(f, 0) == 0)) {
+        fprintf(stderr, "[bind#%d CRASH] f is NULL or has NULL fptr: f=%p\n", n, (void*)f);
+        abort();
+    }
     int64_t g = call1(f, a);
+    if (trace) { fprintf(stderr, "[bind#%d]   f(a)=g=%p\n", n, (void*)g); fflush(stderr); }
+    if (g == 0 || (kk_is_heap_ptr(g) && kk_field(g, 0) == 0)) {
+        fprintf(stderr, "[bind#%d CRASH] g is NULL or has NULL fptr: g=%p (continuation result)\n", n, (void*)g);
+        fprintf(stderr, "[bind#%d CRASH] f=%p a=%p s2=%p\n", n, (void*)f, (void*)a, (void*)s2);
+        abort();
+    }
     return call1(g, s2);
 }
 
 int64_t ghc_base_bind_2(int64_t m, int64_t f) __asm__("GHC_Internal_Base_zgzgze$2");
 int64_t ghc_base_bind_2(int64_t m, int64_t f) {
+    if (getenv("KK_BIND_TRACE") && (m == 0 || f == 0)) {
+        fprintf(stderr, "[ghc_base_bind_2 NULL ARG] m=%p f=%p caller=%p\n",
+                (void*)m, (void*)f, __builtin_return_address(0));
+        fflush(stderr);
+    }
     return make_closure2(&bind_runner, m, f);
 }
 

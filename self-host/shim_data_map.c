@@ -223,8 +223,17 @@ static int64_t map_elems(int64_t m) {
 }
 
 /* Union: left-biased.
- * Retain m1 subtrees that get shared into the result. */
+ * Retain m1 subtrees that get shared into the result.
+ *
+ * Force thunked args: when a caller passes an unforced CAF thunk
+ * (e.g. `externalRuntimeArity` from Frankenstein's emitter), our
+ * map_is_tip / kk_field probes would misread the THUNK_TAG'd cell
+ * as a corrupt Bin and produce a malformed union.  Stage 1 binary's
+ * emit sometimes omits the explicit force, so we have to be
+ * defensive here.  kk_thunk_force is a no-op on non-thunk inputs. */
 static int64_t map_union(int64_t m1, int64_t m2) {
+    m1 = kk_thunk_force(m1);
+    m2 = kk_thunk_force(m2);
     if (map_is_tip(m1)) { kk_retain(m2); return m2; }
     if (map_is_tip(m2)) { kk_retain(m1); return m1; }
     /* Insert all of m2 into m1 (simple but O(n*m)) */

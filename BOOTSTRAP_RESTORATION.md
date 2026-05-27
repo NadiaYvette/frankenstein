@@ -217,6 +217,64 @@ Text values stored in `Set`s.  Likely a missing `kk_retain` on the
 The band-aid is forward-compatible — once the root cause is fixed,
 removing it is safe.
 
+### Target F: force CAF thunks — ROOT CAUSE FOUND AND FIXED
+
+Diagnostic via `KK_SET_INSERT_TRACE` + `KK_SET_TOLIST_TRACE` revealed
+the root cause: not a Perceus refcount bug at all.  CAF-bodies that
+end with `kk_thunk_create` (e.g. `externalRuntimeFns :: Set Text` in
+`MlirEmit/Emitter.hs`) return a LAZY thunk wrapping their closure.
+The previous emitter generated `func.call @CAF() : () -> i64` without
+forcing.  Compiled `Set.union extRtFns ...` then treated the thunk as
+a Set BST, reading `field 1` (closure cell) as "element" and
+`fields 2/3` as "left/right children" — emitting the closure itself
+(CLOS-tagged) plus out-of-bounds garbage as "Set elements".  Downstream
+`Set.toList → T.isSuffixOf → kk_str_flatten` aborted on those non-Text
+cells.  The Target E band-aid had been silently absorbing this.
+
+Two complementary fixes (commit `b8a7567`):
+
+* **Source-level** (`Emitter.hs:emitFnAsValueWithArgs`): arity-0 CAF
+  calls now emit a `kk_thunk_force` on the result.  `kk_thunk_force`
+  is a no-op on non-LAZY values, so this is safe for CAFs that already
+  return values directly.
+
+* **Runtime-level** (`shim_data_set.c`): new `set_force(s)` helper
+  forces a LAZY-tagged Set arg before any BST traversal.  Applied at
+  all Set entry points (insert/member/null/union/difference/toList/
+  toAscList).  This protects the *current* self-compiler binary even
+  before it gets re-bootstrapped with the Emitter.hs change.  Both
+  fixes are forward-compatible.
+
+**Result (post-F):**
+| Phase 8 | 18/21 (unchanged) |
+| Hellos | 25/26 → **26/26** (the `--no-perceus` path now also works) |
+| Surd | 9/9 (unchanged) |
+| Fixed-point (s2→s3) | 5/26 (unchanged) |
+| Phase 9c/10c E2E | 0/21 (different bug class — stage 2/3 timeouts) |
+
+Target E's `kk_str_flatten` band-aid still in place but no longer
+triggers for any tested example.  Could be removed once we're certain
+no other CAF-thunk-Set scenarios remain.
+
+**Diagnostic env-vars added (kept for future use):**
+- `KK_SET_INSERT_TRACE=1` — log non-Text elements going into Sets
+- `KK_SET_TOLIST_TRACE=1` — log every element emitted from `Set.toList`
+- `KK_STR_FLATTEN_TRACE=1` — enriched (arena ownership + slot dump)
+- `KK_FIELD_TRACE=1`, `KK_TAG_TRACE=1` (with `_MAX` overrides)
+- `FRANKENSTEIN_DUMP_PROGDATA=1` — driver dumps `prog.field[2]` per pass
+
+### Open work after Target F
+
+* **Phase 9c/10c E2E (stage 2/3): 0/21**.  Stage 2/3 binaries compile
+  but their E2E produce different failures (kk_str_concat type
+  confusion in some, timeouts in others).  Different bug class.
+* **Fixed-point (s2→s3) 5/26 vs baseline 26/26**: many modules fall
+  back to prev-stage MLIR (568-byte stub) because stage-2 compilation
+  hits per-module 120s timeout.  Bumping the timeout would likely
+  recover most matches but doesn't fix the real slowness — the stage 2
+  binary is significantly slower than stage 1 due to multi-pass
+  drop/retain insertion.
+
 ## Original Two Concrete Restoration Targets
 
 ### Target A: Linker case consistency (highest value)

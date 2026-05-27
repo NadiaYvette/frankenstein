@@ -112,6 +112,9 @@ clang -O2 -c -o "$OUT/kk_arena.o" runtime/kk_arena.c -I runtime/
 clang -O2 -c -o "$OUT/cross_module_aliases.o" self-host/cross_module_aliases.c
 # Cross-module shims ($0 closures + false-external stubs)
 clang -O2 -c -o "$OUT/cross_module_shims.o" self-host/cross_module_shims.c -I runtime/
+# Cross-module aliases generation 2 (separate CU to allow ALIAS0/ALIAS1
+# of the same base symbol without clashing extern declarations)
+clang -O2 -c -o "$OUT/cross_module_aliases_new.o" self-host/cross_module_aliases_new.c
 # Minimal Haskell stdlib shims (placeholder)
 clang -O2 -c -o "$OUT/stdlib_shims.o" self-host/stdlib_shims.c
 # Data.Map / Data.Set / Data.Text shims

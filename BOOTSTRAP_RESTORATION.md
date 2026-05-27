@@ -646,6 +646,49 @@ populated yet.
 The investigation is at the "compiler-bug or state-restore-order"
 fork; needs another iteration to confirm which.
 
+#### Further narrowing (still no fix)
+
+Aggregated `KK_SET_MEMBER_TRACE` statistics on stage 1 self-compile
+of OrganIR/Parse.hs:
+
+```
+3509 lookups with tag=0 (SET_TIP / empty)   ← 65% of misses
+1858 lookups with tag=0x1 (real Set bin)
+```
+
+* ONE specific Set pointer accounts for 3507/3509 of the empty
+  lookups — the same empty-Set instance is threaded through many
+  state transitions.
+* The MLIR for `esTopFns` accessor and the EmitState construction
+  in `initState` both place esTopFns at field index 7.  No
+  off-by-one in declaration order.
+* The `kk_set_field` write pattern in compiled record-update sites
+  (freshName) is sequentially 0..20 — no field skipped or
+  misordered.
+
+This is NOT a field-index-mapping bug.  Most likely either:
+
+1. **State monad's `>>=` / `modify` compiles wrong**: the threaded
+   state propagation might pick up the WRONG `s` from the wrong
+   closure capture, returning an old (empty) `EmitState` to
+   downstream `gets`.
+
+2. **`Set.empty` interns globally** in stage 1's compiled output,
+   and ALL `Set.empty` fields in `EmitState` (`esLiftedNames`,
+   `esPapWrappers`, `esScopeSsa`) point to the SAME instance.  If
+   `gets esTopFns` (field 7) somehow gets misrouted to one of
+   those Set.empty fields (e.g. via stale alias / wrong capture
+   slot in a closure), every lookup sees empty.
+
+Investigation lift to do next session: instrument the state-monad
+runners (`bind_runner`, `then_runner` in `shim_ghc_prim.c`) to
+log the state argument's `esTopFns` size at every state
+transition.  Pinpoint the exact transition where it drops to 0.
+
+The diagnostic env vars (KK_SET_MEMBER_TRACE,
+KK_SET_INSERT_KEYS) are committed.  Phase 9c/10c E2E stays at
+0/21 until this is fixed.
+
 ### Audit tool
 
 ```bash

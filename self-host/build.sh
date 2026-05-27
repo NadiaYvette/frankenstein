@@ -127,6 +127,10 @@ clang -O2 -c -o "$OUT/shim_data_char.o" self-host/shim_data_char.c -I runtime/
 clang -O2 -c -o "$OUT/shim_ghc_list.o" self-host/shim_ghc_list.c -I runtime/
 # System.Directory / FilePath / Process / Text.Printf shims
 clang -O2 -c -o "$OUT/shim_system.o" self-host/shim_system.c -I runtime/
+# Catch-all abort-stubs for the remaining ~163 unresolved symbols, so
+# stage 2 links cleanly.  Any reachable call site lands here with a
+# meaningful message instead of jumping to NULL.
+clang -O2 -c -o "$OUT/unresolved_stubs.o" self-host/unresolved_stubs.c
 # C sanitizeName override (fixes non-deterministic encodeChar corruption).
 # Receives DRIVER_CFLAGS so -DPLOTKIN_EVIDENCE flows through and the shim's
 # arity matches the plotkin-injected (evv, …) calling convention.
@@ -160,7 +164,7 @@ echo "=== Phase 5b: Link self-hosted compiler ==="
 # All other .o files are stage objects (compiled from .hs).  Explicit allow-list
 # avoids accidentally including module .o files like Debug_DumpProgram.o that
 # happen to not match the older deny-list regex.
-SHIM_OBJS_5B=$(ls "$OUT"/*.o | grep -E '/(shim_|A_sanitize_shim|cross_module_|driver|stdlib_shims|kk_)' | grep -v 'self-ir\.o' | grep -v 'factorial-self-ir' | grep -v '_standalone\.o')
+SHIM_OBJS_5B=$(ls "$OUT"/*.o | grep -E '/(shim_|A_sanitize_shim|cross_module_|driver|stdlib_shims|kk_|unresolved_stubs)' | grep -v 'self-ir\.o' | grep -v 'factorial-self-ir' | grep -v '_standalone\.o')
 STAGE_OBJS_5B=$(ls "$OUT"/*.o | grep -vE '/(shim_|A_sanitize_shim|cross_module_|driver|main|stdlib_shims|kk_|.*self-ir\.o|factorial-self-ir|_standalone\.o)')
 clang -O2 -o self-host/frankenstein-self-compiler $SHIM_OBJS_5B $STAGE_OBJS_5B -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files \

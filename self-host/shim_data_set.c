@@ -406,6 +406,13 @@ int64_t set_notMember_0(void) {
     return c;
 }
 
+/* notMember$2(elem, set) — direct call form */
+int64_t set_notMember_2(int64_t x, int64_t s)
+    __asm__("Data_Set_Internal_notMember$2");
+int64_t set_notMember_2(int64_t x, int64_t s) {
+    return set_member(x, set_force(s)) ? 0 : 1;
+}
+
 /* delete$0 — function reference */
 int64_t set_delete_0(void) __asm__("Data_Set_Internal_delete$0");
 int64_t set_delete_0(void) {

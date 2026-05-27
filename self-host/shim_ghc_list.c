@@ -388,6 +388,26 @@ int64_t ghc_foldable_any_2(int64_t p, int64_t xs) {
 }
 static int64_t any_apply(int64_t clos, int64_t xs) { return ghc_foldable_any_2(kk_field(clos,1), xs); }
 
+/* or :: Foldable t => t Bool -> Bool */
+int64_t ghc_foldable_or_1(int64_t xs) __asm__("GHC_Internal_Data_Foldable_or$1");
+int64_t ghc_foldable_or_1(int64_t xs) {
+    while (!kk_is_nil(xs)) {
+        if (tobool(kk_list_head(xs))) return 1;
+        xs = kk_list_tail(xs);
+    }
+    return 0;
+}
+
+/* and :: Foldable t => t Bool -> Bool */
+int64_t ghc_foldable_and_1(int64_t xs) __asm__("GHC_Internal_Data_Foldable_and$1");
+int64_t ghc_foldable_and_1(int64_t xs) {
+    while (!kk_is_nil(xs)) {
+        if (!tobool(kk_list_head(xs))) return 0;
+        xs = kk_list_tail(xs);
+    }
+    return 1;
+}
+
 int64_t ghc_foldable_concat_0(void) __asm__("GHC_Internal_Data_Foldable_concat$0");
 int64_t ghc_foldable_concat_0(void) { return make_closure0(&concat_code); }
 int64_t ghc_foldable_concat_1(int64_t xss) __asm__("GHC_Internal_Data_Foldable_concat$1");

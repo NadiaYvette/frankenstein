@@ -840,6 +840,9 @@ int64_t text_concatMap_1(int64_t f) {
     return c;
 }
 
+int64_t text_concatMap_2(int64_t f, int64_t s) __asm__("Data_Text_concatMap$2");
+int64_t text_concatMap_2(int64_t f, int64_t s) { return text_concatMap(f, s); }
+
 int64_t text_intercalate_2(int64_t sep, int64_t list) __asm__("Data_Text_intercalate$2");
 int64_t text_intercalate_2(int64_t sep, int64_t list) { return text_intercalate(sep, list); }
 

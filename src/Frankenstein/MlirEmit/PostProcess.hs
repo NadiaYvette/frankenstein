@@ -87,12 +87,23 @@ fixIntraModuleCalls src =
       stubPrivates = Map.map (\(name, suf, n, _) -> (name, suf, n)) stubs
       (wrappers, removed) = generateWrappers
                               (Map.union privates stubPrivates) defs
+      -- Stubs without a local @Name def: convert to `func.func private`
+      -- declarations.  This lets the C shim layer's symbol win at link
+      -- time instead of the leak-stub def shadowing it.  Without this,
+      -- e.g. `GHC_Internal_Data_Tuple_fst$0` resolves to the local
+      -- 0-returning stub, NULL-ing every fst-based composition.
+      externDecls =
+        [ "  func.func private @" <> key <> "("
+          <> T.intercalate ", " (replicate n "i64") <> ") -> i64"
+        | (key, (name, _, n, _)) <- Map.toList stubs
+        , not (Map.member name defs)
+        ]
       lns' = [ l | (i, l) <- zip [0..] lns
              , not (Set.member i stubLines)
              , not (isPrivateInSet removed l) ]
-  in if null wrappers
+  in if null wrappers && null externDecls
        then src
-       else insertBeforeFinalBrace wrappers (T.unlines lns')
+       else insertBeforeFinalBrace (wrappers ++ externDecls) (T.unlines lns')
 
 -- | Detect stub-shaped @\@Name$N@ definitions produced by the emitter's
 -- leak-extern path (@Emitter.hs:535@).  Format is exactly four lines:

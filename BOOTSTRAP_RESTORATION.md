@@ -590,6 +590,62 @@ loop and compare against the EVar text byte-by-byte.
 
 Phase 8 stays 18/21 (baseline); hellos 26/26; surd 9/9.
 
+#### Target K diagnostic results (commit local in `shim_data_set.c`)
+
+Added env-var-gated tracing (`KK_SET_MEMBER_TRACE=parseJSON`,
+`KK_SET_INSERT_KEYS=parseJSON`) to log every set_member miss and
+every set_insert containing the substring.
+
+**Findings on `OrganIR/Parse.hs` self-compile:**
+
+1. `Frankenstein_OrganIR_Parse_parseJSON` IS inserted into topFns
+   during init (confirmed via insert trace).
+2. Lookups of the same key fire MANY times during emit and all
+   return MISS.
+3. **The set arg to set_member_2 has `tag=0` (SET_TIP_TAG / empty)
+   for the failing lookups** — but other lookups in the same run
+   see sets with size 21 / 478.  So `gets esTopFns` is returning
+   an EMPTY Set for some emit-stack positions and a real Set for
+   others.
+
+```
+[set_member_2 ENTRY] key='...parseJSON' set=0x...730 tag=0  ← empty!
+[set_member_2 ENTRY] key='...parseJSON' set=0x...e48 tag=0x1  ← size 21
+[set_member_2 ENTRY] key='...parseJSON' set=0x...f90 tag=0x1  ← size 478
+```
+
+4. EmitState's `esTopFns` is at field index 7 (verified against
+   declaration order, and the compiled `esTopFns` accessor reads
+   `kk_field(rec, 7)`).  initState passes the union at position 7
+   in the `EmitState 0 [] Set.empty ...` constructor call — also
+   verified to align.
+
+5. Set.union shim (commit `b8a7567`) already forces both args via
+   `set_force`, so a LAZY-wrapped union shouldn't cascade as
+   empty.  But the FAILING lookups see a real `SET_TIP_TAG=0`
+   cell, NOT a LAZY thunk.  Something is explicitly putting an
+   empty Set at field 7 in some state instances.
+
+**Most likely root cause (hypothesis):** Frankenstein's compiled
+record-update syntax (`s { esField = newValue }`) may be
+mis-mapping field indices when the record has many fields (21 in
+EmitState).  When `modify` writes one field, the rebuild could
+overwrite `esTopFns` with the wrong value (e.g., `Set.empty` from
+another field).  Test: write a focused record-update repro
+(record with 8+ fields including two `Set Text`s, update one,
+check the other) and see if compiled-self-compiler corrupts it.
+
+**Alternative hypothesis:** the State monad's compiled `get`
+returns a state from the wrong scope — e.g., a save/restore in
+`emitLetBindings` swaps state with an earlier (empty-topFns)
+version.  Specifically, the line 3439 `modify (\s -> s {
+esAliases = savedA, esTopFns = savedTopFns ... })` could be
+restoring `savedTopFns` from a context where topFns hadn't been
+populated yet.
+
+The investigation is at the "compiler-bug or state-restore-order"
+fork; needs another iteration to confirm which.
+
 ### Audit tool
 
 ```bash

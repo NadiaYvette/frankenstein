@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "../runtime/kk_runtime.h"
 
 /* --- Set representation using BST nodes --- */
@@ -144,6 +145,15 @@ static int64_t set_insert(int64_t x, int64_t s) {
                     (void*)x, (long)magic, (long)nf, (long)f0, (long)f1);
         }
     }
+    /* Target K diagnostic: log inserts matching a needle (env-gated). */
+    if (getenv("KK_SET_INSERT_KEYS") && kk_is_string(x)) {
+        const char* needle = getenv("KK_SET_INSERT_KEYS");
+        char* xs = kk_str_dup_cstr(x);
+        if (xs && strstr(xs, needle)) {
+            fprintf(stderr, "[set_insert] key='%s' (ptr=%p)\n", xs, (void*)x);
+        }
+        if (xs) free(xs);
+    }
     if (set_is_tip(s))
         return set_bin(1, x, set_tip(), set_tip());
     int64_t cmp = kk_compare(x, set_elem(s));
@@ -163,11 +173,48 @@ static int64_t set_insert(int64_t x, int64_t s) {
 }
 
 static int64_t set_member(int64_t x, int64_t s) {
+    int trace_keys = 0;
+    char* nx = NULL;
+    int64_t s_orig = s;
+    if (getenv("KK_SET_MEMBER_TRACE") && kk_is_string(x)) {
+        nx = kk_str_dup_cstr(x);
+        if (nx && strstr(nx, getenv("KK_SET_MEMBER_TRACE"))) trace_keys = 1;
+    }
+    if (trace_keys) {
+        /* Count set size via in-order walk; report set ptr + size. */
+        int64_t sz = 0;
+        if (kk_is_heap_ptr(s)) sz = kk_field(s, 0);  /* size at slot 0 of bin */
+        fprintf(stderr, "  [set_member start] key='%s' setptr=%p size=%ld\n",
+                nx, (void*)s, (long)sz);
+    }
     while (!set_is_tip(s)) {
-        int64_t cmp = kk_compare(x, set_elem(s));
+        int64_t e = set_elem(s);
+        int64_t cmp = kk_compare(x, e);
+        if (trace_keys) {
+            char* ne = kk_is_string(e) ? kk_str_dup_cstr(e) : NULL;
+            fprintf(stderr, "  [cmp] '%s' vs '%s' = %ld\n", nx, ne ? ne : "(non-string)", (long)cmp);
+            if (ne) free(ne);
+        }
         if (cmp < 0) s = set_left(s);
         else if (cmp > 0) s = set_right(s);
-        else return 1;
+        else { if (nx) free(nx); return 1; }
+    }
+    if (nx) free(nx);
+    (void)s_orig;
+    /* Diagnostic for Target K (consumeProgram codegen bug): when env
+     * var KK_SET_MEMBER_TRACE is set to a substring, log every miss
+     * whose key contains that substring.  Helps identify why the emitter's
+     * lookup of "Frankenstein_OrganIR_Parse_parseJSON" returns False
+     * when the same name IS in topFns by qualifyDefName construction. */
+    if (getenv("KK_SET_MEMBER_TRACE") && kk_is_string(x)) {
+        const char* needle = getenv("KK_SET_MEMBER_TRACE");
+        extern int64_t kk_str_len(int64_t);
+        extern char* kk_str_dup_cstr(int64_t);
+        char* xs = kk_str_dup_cstr(x);
+        if (xs && strstr(xs, needle)) {
+            fprintf(stderr, "[set_member MISS] key='%s'\n", xs);
+        }
+        if (xs) free(xs);
     }
     return 0;
 }
@@ -330,6 +377,18 @@ int64_t set_insert_0(void) {
 int64_t set_member_2(int64_t x, int64_t s)
     __asm__("Data_Set_Internal_member$2");
 int64_t set_member_2(int64_t x, int64_t s) {
+    /* Diagnose Target K: log tag of the set arg when looking up
+     * KK_SET_MEMBER_TRACE substring. */
+    if (getenv("KK_SET_MEMBER_TRACE") && kk_is_string(x)) {
+        const char* needle = getenv("KK_SET_MEMBER_TRACE");
+        char* xs = kk_str_dup_cstr(x);
+        if (xs && strstr(xs, needle)) {
+            int64_t tag = kk_is_heap_ptr(s) ? *(int64_t*)s : 0;
+            fprintf(stderr, "  [set_member_2 ENTRY] key='%s' set=%p tag=%#lx\n",
+                    xs, (void*)s, (long)tag);
+        }
+        if (xs) free(xs);
+    }
     return set_member(x, set_force(s));
 }
 

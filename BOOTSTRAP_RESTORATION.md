@@ -418,6 +418,77 @@ correctly distinguish "monomorphic-call-with-args" from "dict-passing-
 call".  Several other where-bound monadic helpers may hit the same
 pattern; auditing them would be Target I.
 
+### Target I: audit other where-bound monadic recursive helpers — IN PROGRESS
+
+Audit pattern: a `where` clause containing a helper function whose
+body uses `do` notation AND makes a recursive call to itself.  The
+typeclass-dict wrapper trips on the same code path.
+
+Found by `python3` AST-shape scan over `src/`:
+
+| File | Line | Helper | Monad | In bootstrap? |
+|---|---|---|---|---|
+| `MercuryBridge/HldsParse.hs` | 176 | `go` | IO | yes |
+| `KokaBridge/CoreTranslate.hs` | 344 | `desugarGuards` | `Either Text` | yes |
+| `KokaBridge/CoreTranslate.hs` | 461 | `desugarGuards` | `Either Text` | yes |
+| `KokaBridge/CoreTranslate.hs` | 506 | `desugarGuards` | `Either Text` | yes |
+| `FutharkBridge/Parser.hs` | 206 | `go` | parser monad | no |
+| `FutharkBridge/Parser.hs` | 390 | `gatherArgs` | parser monad | no |
+| `ErlangBridge/CoreTranslate.hs` | 198 | `foldClauses` | `Either` | yes¹ |
+| `IdrisBridge/Parse.hs` | 191 | `goCmp` | `Either` | no |
+
+¹ ErlangBridge isn't currently in the bootstrap module list but
+gets pulled in transitively via cabal compilation.
+
+After Target H, the bootstrap stops *crashing* on the
+`kk_str_concat` path — all remaining stage 2 failures are 900s
+timeouts (the self-compiler is slow on large parts), not the same
+PAP-as-Text bug.  This means either:
+1. The other helpers above don't actually hit the bug (different
+   monad / dispatch path), OR
+2. The compiles time out before reaching the buggy code.
+
+To distinguish, would need: (a) longer per-part timeouts in
+`build.sh`, or (b) minimal-repro Haskell programs exercising each
+helper pattern, or (c) preemptively refactor + see if timeouts
+decrease.  Tracked but not auto-fixed: the user should decide
+case-by-case whether to refactor each (the pattern is risky but
+correctness is fine in stage 1 because the host emitter handles it).
+
+### Audit tool
+
+```bash
+python3 -c "
+import re
+from pathlib import Path
+for fpath in Path('src').rglob('*.hs'):
+    lines = fpath.read_text().split('\n')
+    i = 0
+    while i < len(lines):
+        m = re.match(r'^(\s+)where\s*$', lines[i])
+        if not m: i += 1; continue
+        wi = len(m.group(1)); j = i + 1
+        while j < len(lines):
+            ll = lines[j]
+            if not ll.strip(): j += 1; continue
+            ci = len(ll) - len(ll.lstrip())
+            if ci <= wi: break
+            hm = re.match(r'^(\s+)([a-z][\w\']*)\s+[^=]*=\s*do\s*$', ll)
+            if hm:
+                hi = len(hm.group(1)); hn = hm.group(2); k = j + 1
+                while k < len(lines):
+                    bl = lines[k]
+                    if not bl.strip(): k += 1; continue
+                    bi = len(bl) - len(bl.lstrip())
+                    if bi <= hi: break
+                    if re.search(r'\b' + hn + r'\b', bl) and not bl.lstrip().startswith('--'):
+                        print(f'{fpath}:{j+1}: {hn}'); break
+                    k += 1
+            j += 1
+        i = j
+"
+```
+
 ## Original Two Concrete Restoration Targets
 
 ### Target A: Linker case consistency (highest value)

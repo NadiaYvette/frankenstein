@@ -773,6 +773,61 @@ isn't a cabal artefact.
 **Action**: rerun `self-host/build.sh` to regenerate stage 2 from
 scratch with the current stage 1 binary and verify Phase 9c E2E.
 
+#### Post-Target-K build verification (2026-05-27 ~12:00)
+
+Re-ran full bootstrap.  Results:
+
+| Phase | Result | Notes |
+|---|---|---|
+| Phase 8 E2E (default) | **18/21 ✓** | matches baseline — host-built stage 1 binary works |
+| Stage 2 compile | 26/26 succeeded | all modules compile |
+| Stage 1→2 MLIR match | 0/26 | every module differs (was: 26/26 at baseline) |
+| Phase 9c E2E (stage 2 binary) | **0/21** | every example fails — stage 2 binary itself is broken |
+| Stage 3 compile | 26/26 succeeded |
+| Stage 2→3 MLIR match | 0/26 | non-stationary, no fixed point |
+| Phase 10c E2E (stage 3 binary) | 0/21 | same as stage 2 |
+
+Quick diagnosis: stage 2 binary fed `nested.organ.json` produces:
+```
+[diag] result=0 heap=0 is_string=0 arena=0
+Unexpected tag from consumeProgram: 0 (expected Left=50386 or Right=11965)
+```
+
+This is the **same shape** as the original Target K diagnosis — but
+in `consumeProgram`, not `parseJSON`.  parseJSON now emits direct
+(verified above), but the next call upstream (`consumeProgram`) is
+still hitting a NULL stub.  There are likely **more sibling
+state-threading bugs** in other parts of the OrganIR parser /
+emitter that the same kind of where-bound monadic recursion
+introduced.
+
+Audit re-run after Target H still flags 5 candidates outside the
+emitter:
+
+| File | Line | Helper | Notes |
+|---|---|---|---|
+| `MercuryBridge/HldsParse.hs` | 176 | `go` | Mercury bridge; only used when target=Mercury |
+| `FutharkBridge/Parser.hs` | 206 | `go` | Futhark bridge |
+| `FutharkBridge/Parser.hs` | 390 | `gatherArgs` | Futhark bridge |
+| `ErlangBridge/CoreTranslate.hs` | 198 | `foldClauses` | Erlang bridge |
+| `IdrisBridge/Parse.hs` | 191 | `goCmp` | Idris bridge |
+
+None of these are on the Haskell compile path that stage 2 uses
+when running `nested.hs`.  The consumeProgram NULL-stub bug must
+live elsewhere — likely in `OrganIR/Parse.hs` or the consumer
+loop itself, or in a recursive helper the audit's `do`-only pattern
+misses (e.g. helpers defined with `where ... where` nesting, or
+`pure` returns instead of `do`).
+
+Next investigation candidates (for user direction):
+1. Re-run audit with looser pattern (catch where-helpers that
+   *use* state via getstate/modify but don't start with `do`).
+2. Dump fresh stage-1-compiled `OrganIR_Parse.mlir` and
+   `Driver.mlir` (or whichever holds `consumeProgram`) and look
+   for `$N`-mangled extern calls that should be direct.
+3. Add KK_STATE_TRACE instrumentation specifically to the
+   consumeProgram call path to catch the corruption point.
+
 ### Audit tool
 
 ```bash

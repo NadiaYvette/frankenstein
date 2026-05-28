@@ -1038,6 +1038,78 @@ multi-shot handlers) and active only when invoked.
 
 ---
 
+## Phase 12: Closure-Capture Ownership in Perceus
+
+**Goal**: Make closure-capture refcount semantics explicit and uniform so
+the arena recycler (`KK_RECYCLE=1`, see `memory/arena_recycle.md`) can be
+turned on by default without losing correctness.
+
+**Background**: `kk_alloc_con(KK_CLOSURE_TAG, n)` + `kk_set_field` doesn't
+retain the captured value, but `kk_drop`'s cascade *does* drop the closure's
+captured fields. To compensate, bridges manually emit `kk_retain` before each
+`kk_set_field`. The retain count has to match the eventual cascade exactly,
+and Perceus's `analyzeUsage` doesn't currently model closure captures
+distinctly from in-scope uses — so the counts are correct under the
+leak-everything arena (extra retains just leak) but go off by one under
+recycle.
+
+Concrete symptom: surd-quintic under `KK_RECYCLE=1` cascades the Range
+typeclass dict to rc=0 mid-recursion through `takeUntil`, and a subsequent
+`kk_field` inside `lambda4088`'s inlined `snd(dict)` reads the recycled
+tag slot. Audit (`KK_RECYCLE_AUDIT=1`) pinpoints it. surd-trig,
+surd-euler, surd-elliptic, surd-mercury (9/9), and all hellos already pass
+under recycle — only surd-quintic's deeper recursion exposes the asymmetry.
+
+### 12a. Perceus closure-capture ownership pass
+
+Make Perceus the source of truth for capture refcount accounting:
+- Treat `kk_set_field(closure, idx, val)` semantically equivalent to
+  passing `val` to a consuming function — `wrapRetains` should account
+  for every closure capture as one consuming use.
+- Or: split `kk_set_field` into `kk_set_field_borrow` (no rc change,
+  no cascade-drop) and `kk_set_field_own` (transfer ownership) and have
+  Perceus pick per call site.
+
+Pros: root-cause fix; uniform across all bridges (Idris2, GHC, Mercury,
+Rust, Koka); aligns with academic Perceus.
+
+Cons: large blast radius — every closure-construction site in every
+bridge needs rechecking; runtime ABI change if we split `kk_set_field`;
+high risk of regressing the currently-passing baselines. Probably wants
+a feature flag during transition.
+
+### 12b. Borrowed-field annotation (depends on 12a)
+
+After 12a establishes "closures own their captures" as the baseline,
+introduce a per-field "borrowed" annotation for the cases where a
+capture genuinely shouldn't take ownership (e.g., dictionary captures
+that are guaranteed by the source language's semantics to outlive the
+closure):
+- Extend `ConDecl` / closure layout with a per-field borrow bit.
+- `kk_drop`'s cascade reads the bit and skips drop for borrowed fields.
+- Bridges that can prove a capture is borrowed (Rust's `&T` is the
+  obvious case; Idris2 `*0` multiplicity another) opt in.
+
+Pros: avoids unnecessary retain/drop pairs for genuinely-borrowed
+captures; matches Rust's actual semantics; opens the door for fine-
+grained sharing.
+
+Cons: depends on (12a) being in place to have a consistent "owned"
+baseline; runtime ABI change to add the bit; requires per-bridge
+inference or annotation; wrong annotation produces silent
+use-after-drop. Hard to validate exhaustively.
+
+### Immediate workaround (in flight)
+
+For surd-quintic specifically, the Idris2 shim can emit explicit `EDrop`
+nodes for closure-capture transfers so the refcount stays balanced
+without depending on the global semantics fix. Local to
+`idris2-shim/src/Main.idr`; lower risk; gets us to 4/4 under
+`KK_RECYCLE=1` without touching Core IR or runtime ABI. This is the
+near-term action while (12a) and (12b) bake.
+
+---
+
 ## Cross-Module Effect Dispatch ✓
 
 **Goal**: Module A performs an effect, Module B handles it — effects work across

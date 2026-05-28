@@ -2,6 +2,7 @@ module Main (main) where
 
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus)
+import Frankenstein.Core.ElideConsumedDrops (elideConsumedDropsProgram)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.Core.Evidence (evidencePassGlobal, collectGlobalEffects)
 import qualified Frankenstein.Core.EvidenceEvv as EvidenceEvv
@@ -562,13 +563,22 @@ handleOutput progRaw flags = do
   let globalEffects = collectGlobalEffects optProg
       progEv = evidencePassGlobal globalEffects optProg
   dumpStage "evidencePass" progEv
-  let prog = insertPerceus progEv
+  -- Phase 12a step 3: elide EDrops on variables already consumed by
+  -- being passed as a direct EVar arg to a constructor application.
+  -- Perceus inserts those drops at scope exits without knowing the
+  -- variable's ownership was already transferred to the constructor's
+  -- cell — the cascade later double-frees.  Runs AFTER insertPerceus
+  -- so it sees the actual EDrop bindings.  Opt-out via
+  -- FRANKENSTEIN_NO_ELIDE_DROPS for A/B comparison.
+  noElide <- lookupEnv "FRANKENSTEIN_NO_ELIDE_DROPS"
+  let prog = (if noElide == Nothing then elideConsumedDropsProgram else id)
+             $ insertPerceus progEv
       config = defaultEmitConfig
         { ecOutputPath = flagOutput flags
         , ecKokaRuntimePath = Just "runtime/kk_runtime.c"
         , ecTarget = flagTarget flags
         }
-  dumpStage "insertPerceus" prog
+  dumpStage "insertPerceus+elide" prog
   -- Print optimization stats if any optimizations fired (not for effect-dialect mode)
   let totalOpts = eosInlined optStats + eosEliminated optStats + eosTailRes optStats
   if totalOpts > 0 && not (flagEmitEffectMlir flags)

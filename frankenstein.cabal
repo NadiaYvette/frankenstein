@@ -22,6 +22,7 @@ library
         Frankenstein.Core.EffectOpt
         Frankenstein.Core.DeriveSelectors
         Frankenstein.Core.FlattenPatterns
+        Frankenstein.Core.ElideConsumedDrops
         Frankenstein.Core.NormalizePatterns
         Frankenstein.Core.CpsConvert
         Frankenstein.Core.TypeCheck

@@ -719,3 +719,4 @@ remapRustIntrinsic n = case n of
   "std::fs::write::<&str, std::string::String>" -> "write_file"
   "std::fs::write"                          -> "write_file"
   _                                 -> n
+

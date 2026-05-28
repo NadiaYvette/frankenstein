@@ -2,18 +2,20 @@
 # Umbrella regression guard for the achievements established before
 # bootstrap-restoration work began.  Refuses if any baseline degrades.
 #
-# Current baseline (session ending 2026-05-26):
-#   test-hellos.sh       — 25/26 PASS (1 known FAIL)
-#   surd-mercury         — 9/9 byte-identical with native
+# Current baseline (session ending 2026-05-28):
+#   test-hellos.sh           — 25/26 PASS (1 known FAIL)
+#   surd-mercury             — 9/9 byte-identical with native
+#   surd-idris2              — 3/4 byte-identical (quintic Galois-group bug)
+#   surd-koka                — 0/4 (missing runtime shims for sin/pow/etc.)
+#   surd-haskell             — 0/4 (multi-module library imports unresolved)
+#
+# Bootstrap (self-host/build.sh) was restored to fixed-point in commits
+# d…→8d9e6ca→776d4a3→3da8f6f; included separately in CI rather than
+# this script because it takes ~30 minutes.
 #
 # Usage:
 #   bash regression-guard.sh         # report counts only
 #   bash regression-guard.sh --strict  # nonzero exit on any degradation
-#
-# The bootstrap (self-host/build.sh) is intentionally NOT here — it's
-# currently regressed (Phase 8: 0/21, fixed-point: 2/26) and restoring
-# it IS the upcoming work.  This guard ensures the restoration arc
-# doesn't accidentally undo what's already passing.
 
 set -uo pipefail
 
@@ -23,7 +25,10 @@ STRICT="no"
 
 # Baselines: minimum acceptable PASS counts.  Increment when achievements grow.
 HELLOS_MIN=25
-SURD_MIN=9
+SURD_MERCURY_MIN=9
+SURD_IDRIS2_MIN=3
+SURD_KOKA_MIN=0
+SURD_HASKELL_MIN=0
 
 cd "$SCRIPT_DIR"
 
@@ -42,16 +47,40 @@ fi
 HELLOS_PASS="${HELLOS_PASS:-0}"
 echo "  $HELLOS_PASS passed (baseline: $HELLOS_MIN)"
 
+# Helper: run a test script, extract "<N> passed" count
+run_suite() {
+    local label="$1"
+    local script="$2"
+    local minvar="$3"
+    local out
+    out=$(bash "$script" 2>&1)
+    local pass
+    pass=$(echo "$out" | grep -oE '[0-9]+ passed' | head -1 | awk '{print $1}')
+    pass="${pass:-0}"
+    local min="${!minvar}"
+    echo "  $pass passed (baseline: $min)"
+    if [ "$pass" -lt "$min" ]; then
+        echo "  details:"
+        echo "$out" | grep 'failing:' | sed 's/^/    /'
+    fi
+    eval "${label}_PASS=$pass"
+}
+
 echo
 echo "=== surd-mercury demos ==="
-SURD_OUT=$(bash test-surd-mercury.sh 2>&1)
-SURD_PASS=$(echo "$SURD_OUT" | grep -oE '[0-9]+ passed' | head -1 | awk '{print $1}')
-SURD_PASS="${SURD_PASS:-0}"
-echo "  $SURD_PASS passed (baseline: $SURD_MIN)"
-if [ "$SURD_PASS" -lt "$SURD_MIN" ]; then
-    echo "  details:"
-    echo "$SURD_OUT" | grep 'failing:' | sed 's/^/    /'
-fi
+run_suite SURD_MERCURY  test-surd-mercury.sh  SURD_MERCURY_MIN
+
+echo
+echo "=== surd-idris2 demos ==="
+run_suite SURD_IDRIS2   test-surd-idris2.sh   SURD_IDRIS2_MIN
+
+echo
+echo "=== surd-koka demos ==="
+run_suite SURD_KOKA     test-surd-koka.sh     SURD_KOKA_MIN
+
+echo
+echo "=== surd-haskell demos ==="
+run_suite SURD_HASKELL  test-surd-haskell.sh  SURD_HASKELL_MIN
 
 echo
 echo "########################################"
@@ -60,8 +89,20 @@ DEGRADED=0
     echo "# REGRESSION: hello-worlds $HELLOS_PASS < baseline $HELLOS_MIN"
     DEGRADED=1
 }
-[ "$SURD_PASS" -lt "$SURD_MIN" ] && {
-    echo "# REGRESSION: surd-mercury $SURD_PASS < baseline $SURD_MIN"
+[ "$SURD_MERCURY_PASS" -lt "$SURD_MERCURY_MIN" ] && {
+    echo "# REGRESSION: surd-mercury $SURD_MERCURY_PASS < baseline $SURD_MERCURY_MIN"
+    DEGRADED=1
+}
+[ "$SURD_IDRIS2_PASS" -lt "$SURD_IDRIS2_MIN" ] && {
+    echo "# REGRESSION: surd-idris2 $SURD_IDRIS2_PASS < baseline $SURD_IDRIS2_MIN"
+    DEGRADED=1
+}
+[ "$SURD_KOKA_PASS" -lt "$SURD_KOKA_MIN" ] && {
+    echo "# REGRESSION: surd-koka $SURD_KOKA_PASS < baseline $SURD_KOKA_MIN"
+    DEGRADED=1
+}
+[ "$SURD_HASKELL_PASS" -lt "$SURD_HASKELL_MIN" ] && {
+    echo "# REGRESSION: surd-haskell $SURD_HASKELL_PASS < baseline $SURD_HASKELL_MIN"
     DEGRADED=1
 }
 if [ "$DEGRADED" = "0" ]; then

@@ -75,16 +75,22 @@ assignProgramTags prog =
         _ -> k
       tagFor k =
         let s = stripArity k
-        in if endsWith "Cons" s || endsWith "(::)" s || endsWith "(:)" s
+        in if endsWithCI "Cons" s || endsWith "(::)" s || endsWith "(:)" s
               || s == ":" || s == "."
            then kkConsTag
-           else if endsWith "Nil" s || endsWith "[]" s
-                   || s == "[]"
+           else if endsWithCI "Nil" s || endsWith "[]" s || s == "[]"
                 then kkNilTag
                 else stableConTag k
       endsWith suf k =
         let n = T.length suf
         in T.length k >= n && T.takeEnd n k == suf
+      -- Case-insensitive endsWith: Idris2's Linker mangles QNames like
+      -- "_builtin/NIL" → "_builtin_NIL" (all-caps NIL/CONS); Haskell/Koka
+      -- produce mixed-case "Nil"/"Cons".  Matching case-insensitively
+      -- catches both without forcing every frontend to normalise.
+      endsWithCI suf k =
+        let n = T.length suf
+        in T.length k >= n && T.toLower (T.takeEnd n k) == T.toLower suf
   in Map.fromList [(k, tagFor k) | k <- Set.toList referenced]
 
 -- | Hardcoded runtime constructor tag for @Cons@ cells produced by

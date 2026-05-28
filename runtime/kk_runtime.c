@@ -277,6 +277,21 @@ int64_t kk_field(int64_t ptr, int64_t idx) {
         }
         return 0;
     }
+    /* Detect use-after-drop via the recycled-cell sentinel.  block[0]=0
+     * (rc=0) is what kk_drop already wrote; if idx=-1 reads it as the
+     * tag slot, the high bit (KK_RECYCLE_FLAG) marks it as a freelist
+     * next-pointer.  In practice idx>=0, but the parent tag word's
+     * high bit is the canonical signal: see kk_tag.  Here we only
+     * surface the case where someone reads field[idx] of a parent
+     * whose tag slot is the sentinel — bit 63 of the tag check. */
+    if (kk_recycle_audit_enabled()) {
+        int64_t parent_tag = *(int64_t*)ptr;
+        if (parent_tag & ((int64_t)1 << 63)) {
+            fprintf(stderr, "[kk_field] USE-AFTER-DROP: ptr=%p tag=0x%lx idx=%ld\n",
+                    (void*)ptr, parent_tag, idx);
+            abort();
+        }
+    }
     int64_t* fields = (int64_t*)(ptr + 8);
     int64_t v = fields[idx];
     if (kk_field_trace > 0) {

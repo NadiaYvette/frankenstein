@@ -18,6 +18,8 @@
 #include <string.h>
 #include <math.h>
 #include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include "kk_runtime.h"
@@ -156,6 +158,26 @@ void kk_drop(int64_t ptr) {
     } else {
         *rc = 0;
         nf = kk_nfields(ptr);
+    }
+    /* Stat: count cells reaching rc=0 (for leak hunting; export at exit). */
+    extern int64_t kk_n_drops_to_zero;
+    kk_n_drops_to_zero++;
+
+    /* Periodic cycle collection currently disabled — the Bacon-Rajan
+     * collector is built but calling it from inside kk_drop leads to
+     * re-entrant SIGSEGVs.  Needs careful integration (deferred until
+     * after the cascade unwinds).  Opt in via KK_CYCLE_INTERVAL=N (the
+     * interval in drops between collection attempts) once that work
+     * lands.  See ROADMAP Phase 12c. */
+    {
+        static int64_t cycle_interval = -1;
+        if (cycle_interval == -1) {
+            const char* v = getenv("KK_CYCLE_INTERVAL");
+            cycle_interval = (v && v[0]) ? atoll(v) : 0;  /* default OFF */
+        }
+        if (cycle_interval > 0 && (kk_n_drops_to_zero % cycle_interval) == 0) {
+            kk_cycle_collect();
+        }
     }
 
     int64_t tag = kk_tag(ptr);
@@ -2443,6 +2465,25 @@ int64_t kk_getenv(int64_t name_str) {
 static int   kk_g_argc = 0;
 static char** kk_g_argv = NULL;
 
+int64_t kk_n_drops_to_zero = 0;
+
+static void kk_print_stats(void) {
+    extern int64_t kk_n_alloc_bumped;
+    extern int64_t kk_n_alloc_recycled;
+    fprintf(stderr, "[kk stats] drops_to_zero=%ld bumped=%ld recycled=%ld arena_bytes_alloc=%ld\n",
+            (long)kk_n_drops_to_zero,
+            (long)kk_n_alloc_bumped,
+            (long)kk_n_alloc_recycled,
+            (long)kk_arena_bytes_allocated());
+    fflush(stderr);
+}
+
+static void kk_print_stats_sigterm(int sig) {
+    (void)sig;
+    kk_print_stats();
+    _exit(128 + sig);
+}
+
 void kk_args_init(int argc, char** argv) {
     kk_g_argc = argc;
     kk_g_argv = argv;
@@ -2452,6 +2493,11 @@ void kk_args_init(int argc, char** argv) {
      * output (PASS / FAIL lines) only appears once everything completes
      * — defeating the purpose of incremental reporting. */
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (getenv("KK_STATS")) {
+        atexit(kk_print_stats);
+        signal(SIGTERM, kk_print_stats_sigterm);
+        signal(SIGINT, kk_print_stats_sigterm);
+    }
 }
 
 int64_t kk_args_count(void) {

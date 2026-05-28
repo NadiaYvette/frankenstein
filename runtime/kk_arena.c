@@ -76,6 +76,9 @@ static kk_slab* new_slab(size_t payload_cap) {
     return s;
 }
 
+int64_t kk_n_alloc_bumped = 0;
+int64_t kk_n_alloc_recycled = 0;
+
 void* kk_arena_alloc(size_t size) {
     if (!arena_enabled()) return NULL;
     if (size == 0) size = KK_ARENA_ALIGN;
@@ -85,7 +88,8 @@ void* kk_arena_alloc(size_t size) {
      * previously-dropped cell of the same size, keeping the pointer
      * inside [g_arena_lo, g_arena_hi). */
     void* recycled = kk_arena_recycle(size);
-    if (recycled) return recycled;
+    if (recycled) { kk_n_alloc_recycled++; return recycled; }
+    kk_n_alloc_bumped++;
 
     /* Oversized: dedicated slab sized exactly for the request. */
     if (size > KK_ARENA_SLAB_SIZE / 2) {

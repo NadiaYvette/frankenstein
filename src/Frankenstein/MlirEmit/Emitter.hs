@@ -920,6 +920,9 @@ emitProgramText prog =
     , ""
     , "  // Idris2 bridge runtime stubs"
     , "  func.func private @idris2_putStr(i64, i64) -> i64"
+    , "  func.func private @idris2_fastUnpack(i64) -> i64"
+    , "  func.func private @idris2_fastPack(i64) -> i64"
+    , "  func.func private @idris2_fastConcat(i64) -> i64"
     , "  func.func private @idris_str_head(i64) -> i64"
     , "  func.func private @idris_crash(i64, i64) -> i64"
     , "  func.func private @_raise(i64) -> i64"
@@ -1552,6 +1555,9 @@ emitProgramWasm prog =
     , ""
     , "  // Idris2 bridge runtime stubs"
     , "  func.func private @idris2_putStr(i64, i64) -> i64"
+    , "  func.func private @idris2_fastUnpack(i64) -> i64"
+    , "  func.func private @idris2_fastPack(i64) -> i64"
+    , "  func.func private @idris2_fastConcat(i64) -> i64"
     , "  func.func private @idris_str_head(i64) -> i64"
     , "  func.func private @idris_crash(i64, i64) -> i64"
     , "  func.func private @_raise(i64) -> i64"
@@ -4633,6 +4639,7 @@ externalRuntimeFns = Set.fromList
   , "mercury_exn_fail", "mercury_fail"
   -- Idris2 bridge runtime stubs
   , "idris2_putStr", "idris_str_head"
+  , "idris2_fastUnpack", "idris2_fastPack", "idris2_fastConcat"
   , "idris_crash", "_raise"
   , "idris_double_sin", "idris_double_cos", "idris_double_tan"
   , "idris_double_asin", "idris_double_acos", "idris_double_atan"
@@ -4799,6 +4806,7 @@ externalRuntimeArity = Map.fromList
   , ("mercury_choose", 0), ("mercury_collect_choices", 1)
   , ("mercury_exn_fail", 0), ("mercury_fail", 0)
   , ("idris2_putStr", 2), ("idris_str_head", 1)
+  , ("idris2_fastUnpack", 1), ("idris2_fastPack", 1), ("idris2_fastConcat", 1)
   , ("idris_crash", 2), ("_raise", 1)
   , ("idris_double_sin", 1), ("idris_double_cos", 1), ("idris_double_tan", 1)
   , ("idris_double_asin", 1), ("idris_double_acos", 1), ("idris_double_atan", 1)
@@ -4978,9 +4986,15 @@ compileToExecutableLink config llPath =
       let rtDir = reverse . dropWhile (/= '/') . reverse $ rtPath
           cyclePath = rtDir ++ "kk_cycle.c"
           arenaPath = rtDir ++ "kk_arena.c"
+          -- Idris2 RefC string-primitive shims (fastUnpack / fastPack /
+          -- fastConcat). Always linked so binaries containing idris2-shim
+          -- output resolve those symbols; the three functions are unused
+          -- by other frontends and cost a few KB.
+          idris2ShimPath = rtDir ++ "../self-host/shim_idris2_str.c"
           rtObjPath = ecOutputPath config ++ ".rt.o"
           cycleObjPath = ecOutputPath config ++ ".cycle.o"
           arenaObjPath = ecOutputPath config ++ ".arena.o"
+          idris2ShimObjPath = ecOutputPath config ++ ".idris2.o"
           optFlag = "-O" ++ show (ecOptLevel config)
           includeFlag = "-I" ++ rtDir
       r1 <- runCmd (ecClangPath config)
@@ -4998,21 +5012,27 @@ compileToExecutableLink config llPath =
               case r3 of
                 Left e -> pure (Left e)
                 Right _ -> do
-                  -- Allow link-time unresolved symbols to remain as
-                  -- weak references — they'll trap on first call at
-                  -- runtime (via the dynamic-loader's lazy-binding
-                  -- fault) but the binary itself builds.  Lets larger
-                  -- surd-mercury demos reach an executable even when
-                  -- a handful of obscure call shapes the bridge
-                  -- doesn't yet recognise leak as goal-text symbols.
-                  r4 <- runCmd (ecClangPath config)
-                    ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath,
-                     "-o", ecOutputPath config, optFlag, "-lm"
-                    , "-Wl,--unresolved-symbols=ignore-in-object-files"]
-                    "" "clang (link)"
-                  case r4 of
-                    Left e  -> pure (Left e)
-                    Right _ -> pure (Right (ecOutputPath config))
+                  r3b <- runCmd (ecClangPath config)
+                    ["-c", idris2ShimPath, "-o", idris2ShimObjPath, includeFlag, optFlag]
+                    "" "clang (idris2-shim)"
+                  case r3b of
+                    Left e -> pure (Left e)
+                    Right _ -> do
+                      -- Allow link-time unresolved symbols to remain as
+                      -- weak references — they'll trap on first call at
+                      -- runtime (via the dynamic-loader's lazy-binding
+                      -- fault) but the binary itself builds.  Lets larger
+                      -- surd-mercury demos reach an executable even when
+                      -- a handful of obscure call shapes the bridge
+                      -- doesn't yet recognise leak as goal-text symbols.
+                      r4 <- runCmd (ecClangPath config)
+                        ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath, idris2ShimObjPath,
+                         "-o", ecOutputPath config, optFlag, "-lm"
+                        , "-Wl,--unresolved-symbols=ignore-in-object-files"]
+                        "" "clang (link)"
+                      case r4 of
+                        Left e  -> pure (Left e)
+                        Right _ -> pure (Right (ecOutputPath config))
 
 -- | Compile to WebAssembly (.wasm)
 -- Pipeline: MLIR → mlir-opt → mlir-translate → llc (wasm32) → wasm-ld

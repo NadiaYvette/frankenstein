@@ -240,12 +240,23 @@ externPrimName n =
 -- | Parse Idris2's foreign-call descriptor list.
 -- A CCS entry has the form "backend:opt1,opt2,opt3" — for the C
 -- target the first opt is the function name (see Compiler.Common.parseCC).
--- Try "C:" then "RefC:" then "scheme:" prefixes; return the basename only.
+-- Try "C:" then "RefC:" prefixes; return the basename only.
+--
+-- IMPORTANT: the returned name MUST NOT collide with the Idris2
+-- declaration's basename (e.g. Prelude.Types.fastUnpack defined via
+-- `%foreign "RefC:fastUnpack"`), because Frankenstein's emitter does
+-- suffix-matching on unqualified names — a call to "fastUnpack" would
+-- otherwise resolve to the enclosing definition itself, compiling to
+-- self-recursion (clang lowers the tail-call to a `jmp $` infinite
+-- loop).  RefC:foo therefore becomes `idris2_foo` so the call resolves
+-- to a Frankenstein runtime shim instead.  Plain C:foo names are
+-- assumed to refer to user-provided C functions whose names are already
+-- under the user's control, so we leave them unchanged.
 parseCName : List String -> String
 parseCName []          = ""
 parseCName (s :: rest) =
     if isPrefixOf "C:" s     then takeUntilComma (substr 2 (length s) s)
-    else if isPrefixOf "RefC:" s then takeUntilComma (substr 5 (length s) s)
+    else if isPrefixOf "RefC:" s then "idris2_" ++ takeUntilComma (substr 5 (length s) s)
     else parseCName rest
   where
     takeUntilComma : String -> String

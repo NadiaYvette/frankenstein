@@ -130,6 +130,11 @@ clang -O2 -c -o "$OUT/shim_data_char.o" self-host/shim_data_char.c -I runtime/
 clang -O2 -c -o "$OUT/shim_ghc_list.o" self-host/shim_ghc_list.c -I runtime/
 # System.Directory / FilePath / Process / Text.Printf shims
 clang -O2 -c -o "$OUT/shim_system.o" self-host/shim_system.c -I runtime/
+# Idris2 RefC string primitives (fastUnpack, fastPack, fastConcat).
+# Bridges Idris2 stdlib's %foreign "RefC:..." declarations to the
+# Frankenstein runtime — idris2-shim renames the foreign target to
+# idris2_<name> so calls don't suffix-match the Idris2 declaration.
+clang -O2 -c -o "$OUT/shim_idris2_str.o" self-host/shim_idris2_str.c -I runtime/
 # Catch-all abort-stubs for the remaining ~163 unresolved symbols, so
 # stage 2 links cleanly.  Any reachable call site lands here with a
 # meaningful message instead of jumping to NULL.

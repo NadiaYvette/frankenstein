@@ -1078,7 +1078,31 @@ bridge needs rechecking; runtime ABI change if we split `kk_set_field`;
 high risk of regressing the currently-passing baselines. Probably wants
 a feature flag during transition.
 
-### 12b. Borrowed-field annotation (depends on 12a)
+### 12a step 2. Fix kk_drop's cascade
+
+**Discovered while implementing 12b's test harness**: `kk_drop` sets
+`*rc = 0` BEFORE reading `nf` from the same word, so `kk_nfields`
+returns 0 and the cascade loop never executes.  Cascades have been
+silently no-op'd in production all along.
+
+Fix is one line — capture `nf` before the dead-marker write:
+```c
+int64_t nf = kk_nfields(ptr);   // BEFORE
+*rc = 0;
+int64_t tag = kk_tag(ptr);
+```
+
+Effect on surd-quintic-under-recycle: RSS drops 15× (16 GiB → 1 GiB
+at 60s).  But the fix exposes 2 buggy hellos (rust-dbg-adt,
+rust-dbg-enum) that depend on the cascade not running — Rust struct
+Debug printing reads fields after kk_drop and would otherwise see
+garbage, but with no cascade the fields stayed valid.  Those need
+real fixes before the cascade fix can land at the baseline.
+
+The Phase 12b test harness (test/runtime/test_closbor.c) has an
+XFAIL-by-design test for this case until the fix ships.
+
+### 12b. Borrowed-field annotation ✓ (runtime foundation)
 
 After 12a establishes "closures own their captures" as the baseline,
 introduce a per-field "borrowed" annotation for the cases where a

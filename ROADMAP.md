@@ -1078,7 +1078,7 @@ bridge needs rechecking; runtime ABI change if we split `kk_set_field`;
 high risk of regressing the currently-passing baselines. Probably wants
 a feature flag during transition.
 
-### 12a step 2. Fix kk_drop's cascade ✓ (gated)
+### 12a step 2. Fix kk_drop's cascade ✓ (default ON)
 
 **Discovered while implementing 12b's test harness**: `kk_drop` set
 `*rc = 0` BEFORE reading `nf` from the same word, so `kk_nfields`
@@ -1110,10 +1110,13 @@ still fires.  Without the cascade running the drops were silent and
 memory and the Debug printer reads `nfields = 0` from the
 recycle-sentinel and prints `()`.
 
-**The proper bridge fix (Phase 12a step 3)**: track per-variable
-consumption in `RustBridge.CoreTranslate`.  When a variable is
-passed to a constructor (`std.tuple` or any other), mark it
-consumed; skip subsequent `TermDrop` emissions for consumed vars.
+**Phase 12a step 3 (✓ landed `e13f1fe`)**: a Core IR pass
+`Frankenstein.Core.ElideConsumedDrops` runs after `insertPerceus`
+and elides `EDrop` bindings for variables already consumed via
+`EApp (ECon _) [EVar n, …]` patterns.  Drops on `ERetain`-wrapped
+EVars are left alone.  Mercury-bridge / Idris2-shim / GHC bridge
+all unaffected.  Allowed cascade to flip default ON; all baselines
+green (hellos 26/26, mercury 9/9, idris2 3/4).
 
 The Phase 12b test harness (test/runtime/test_closbor.c) has an
 XFAIL-by-design test for the cascade-off path.

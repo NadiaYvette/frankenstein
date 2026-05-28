@@ -114,6 +114,21 @@ int64_t kk_rust_struct_8(int64_t name, int64_t names, int64_t a, int64_t b, int6
 int64_t kk_alloc_con(int64_t tag, int64_t nfields);
 void    kk_set_field(int64_t ptr, int64_t idx, int64_t value);
 
+/* Phase 12b: borrow-closure tags.  A KK_CLOSBOR_TAG'd cell has the
+ * same layout as a regular CLOS (field 0 = fn ptr, fields 1..n = captures)
+ * but kk_drop's cascade SKIPS the captures — they're borrowed from a
+ * caller that retains ownership.  Bridges that can statically prove
+ * a capture outlives the closure (e.g. a typeclass dictionary held by
+ * an enclosing scope) can opt closures in via this tag.  See ROADMAP
+ * Phase 12b.  Allocates an arena cell with the borrow tag; field 0
+ * should be set to the fn pointer after the call. */
+int64_t kk_alloc_closbor(int64_t nfields);
+
+/* In-place retag of an existing regular CLOS cell into a CLOB cell.
+ * Safe on non-closure cells (no-op).  Does NOT undo any retains the
+ * bridge already emitted at construction. */
+int64_t kk_closure_to_borrow(int64_t closure);
+
 /* First-class strings — rope-based, UTF-8.
  *
  * A Frankenstein string is an int64_t holding the address of a

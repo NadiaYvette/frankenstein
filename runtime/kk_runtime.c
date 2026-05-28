@@ -84,8 +84,14 @@ void kk_retain(int64_t ptr) {
 int64_t kk_tag(int64_t ptr);  /* forward decl */
 
 /* Special tags — must be defined before kk_drop which dispatches on them. */
-#define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" — field 0 is raw fn ptr */
-#define KK_THUNK_TAG   0x4C415A59  /* "LAZY" — field 0: eval flag, field 1: fn/result */
+#define KK_CLOSURE_TAG  0x434C4F53  /* "CLOS" — field 0 is raw fn ptr; cascade drops captures */
+#define KK_CLOSBOR_TAG  0x434C4F42  /* "CLOB" — closure with BORROWED captures; identical
+                                     * layout to CLOS (field 0 = fn ptr, fields 1..n = captures)
+                                     * but kk_drop skips field drops on cascade.  Caller
+                                     * remains responsible for the captures' lifetimes.
+                                     * Used by bridges that can prove a capture outlives
+                                     * the closure (Phase 12b — see ROADMAP). */
+#define KK_THUNK_TAG    0x4C415A59  /* "LAZY" — field 0: eval flag, field 1: fn/result */
 #define KK_EVV_TAG     0x45565630  /* "EVV0" — all fields are handler fn ptrs */
 #define KK_EVV2_TAG    0x45565632  /* "EVV2" — Plotkin evidence stack: (eff_id, op_table) pairs */
 #define KK_OPTAB_TAG   0x4F505442  /* "OPTB" — operation table for one effect */
@@ -138,6 +144,14 @@ void kk_drop(int64_t ptr) {
          * Fields 1..nfields-1 are captured values — drop them. */
         for (int64_t i = 1; i < nf; i++)
             kk_drop(fields[i]);
+    } else if (tag == KK_CLOSBOR_TAG) {
+        /* Borrow closures (Phase 12b): identical layout to KK_CLOSURE_TAG,
+         * but captures at fields 1..n are BORROWED — the caller retains
+         * ownership and is responsible for the captures' lifetimes.  We
+         * just free the closure cell itself without recursing into
+         * captures.  Used by bridges that can statically prove a
+         * capture outlives the closure (e.g. dictionary captures whose
+         * scope encloses every closure that references them). */
     } else if (tag == KK_THUNK_TAG) {
         /* Thunks: field 0 = evaluated flag (integer, skip).
          * Field 1 = fn_ptr if unevaluated, cached result if evaluated.
@@ -390,6 +404,29 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
         }
     }
     return ptr;
+}
+
+/* Phase 12b: allocate a borrow-closure cell.  Same layout as kk_alloc_con
+ * with KK_CLOSURE_TAG, but kk_drop's cascade skips field drops on this
+ * tag — captures are borrowed and stay owned by the allocator's scope. */
+int64_t kk_alloc_closbor(int64_t nfields) {
+    return kk_alloc_con(KK_CLOSBOR_TAG, nfields);
+}
+
+/* Phase 12b: in-place retag of an existing CLOS cell into a CLOB cell.
+ * Lets bridges build a closure with the regular emitter path, then opt
+ * the captures into borrow semantics via a single retag.  Safe to call
+ * on non-closure cells (no-op).  Does NOT undo retains the bridge
+ * already emitted at construction — callers must adjust those
+ * separately when migrating to borrow semantics. */
+int64_t kk_closure_to_borrow(int64_t closure) {
+    if (!kk_is_heap_ptr(closure)) return closure;
+    if (!kk_arena_maybe_owns((const void*)(intptr_t)closure)) return closure;
+    int64_t* tag_ptr = (int64_t*)closure;
+    if (*tag_ptr == KK_CLOSURE_TAG) {
+        *tag_ptr = KK_CLOSBOR_TAG;
+    }
+    return closure;
 }
 
 /* Print an ADT-valued result as an s-expression.

@@ -82,12 +82,13 @@ static void roots_ensure_cap(void) {
 #define KK_PAP_TAG     0x50415030  /* "PAP0" — partially applied fn */
 #define KK_THUNK_TAG   0x4C415A59  /* "LAZY" */
 #define KK_CLOSURE_TAG 0x434C4F53  /* "CLOS" — field 0 is a raw fn ptr */
+#define KK_CLOSBOR_TAG 0x434C4F42  /* "CLOB" — closure w/ borrowed captures (Phase 12b) */
 
 int kk_can_be_cyclic(int64_t tag) {
     /* Thunks, evidence vectors, op tables, PAPs, and closures have acyclic layouts */
     if (tag == KK_THUNK_TAG || tag == KK_EVV_TAG || tag == KK_EVV2_TAG
         || tag == KK_OPTAB_TAG || tag == KK_PAP_TAG
-        || tag == KK_CLOSURE_TAG) return 0;
+        || tag == KK_CLOSURE_TAG || tag == KK_CLOSBOR_TAG) return 0;
     /* Constructor tags below 0x10000 are user-defined ADT constructors
      * that could potentially contain back-references */
     return 1;
@@ -136,7 +137,12 @@ static void for_each_child(int64_t ptr, void (*fn)(int64_t child)) {
     if (!kk_is_heap_ptr(ptr)) return;
     int64_t nf = kk_nfields(ptr);
     int64_t* fields = (int64_t*)(ptr + 8);
-    int64_t start = (*(int64_t*)ptr == KK_CLOSURE_TAG) ? 1 : 0;
+    int64_t tag_w = *(int64_t*)ptr;
+    /* Borrow closures (CLOB) skip ALL captures during traversal —
+     * they don't own them.  Regular closures (CLOS) skip field 0
+     * (raw fn ptr) and walk captures. */
+    if (tag_w == KK_CLOSBOR_TAG) return;
+    int64_t start = (tag_w == KK_CLOSURE_TAG) ? 1 : 0;
     for (int64_t i = start; i < nf; i++) {
         int64_t child = fields[i];
         if (kk_is_heap_ptr(child)) {
@@ -210,7 +216,12 @@ static void collect_white(int64_t ptr) {
     /* Recursively collect children first */
     int64_t nf = kk_nfields(ptr);
     int64_t* fields = (int64_t*)(ptr + 8);
-    int64_t start = (*(int64_t*)ptr == KK_CLOSURE_TAG) ? 1 : 0;
+    int64_t tag_w = *(int64_t*)ptr;
+    /* Borrow closures (CLOB) skip ALL captures during traversal —
+     * they don't own them.  Regular closures (CLOS) skip field 0
+     * (raw fn ptr) and walk captures. */
+    if (tag_w == KK_CLOSBOR_TAG) return;
+    int64_t start = (tag_w == KK_CLOSURE_TAG) ? 1 : 0;
     for (int64_t i = start; i < nf; i++) {
         int64_t child = fields[i];
         collect_white(child);

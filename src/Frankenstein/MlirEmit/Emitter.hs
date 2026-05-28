@@ -924,6 +924,7 @@ emitProgramText prog =
     , "  func.func private @idris2_fastPack(i64) -> i64"
     , "  func.func private @idris2_fastConcat(i64) -> i64"
     , "  func.func private @idris_str_head(i64) -> i64"
+    , "  func.func private @idris_str_cons(i64, i64) -> i64"
     , "  func.func private @idris_crash(i64, i64) -> i64"
     , "  func.func private @_raise(i64) -> i64"
     , "  func.func private @idris_double_sin(i64) -> i64"
@@ -1559,6 +1560,7 @@ emitProgramWasm prog =
     , "  func.func private @idris2_fastPack(i64) -> i64"
     , "  func.func private @idris2_fastConcat(i64) -> i64"
     , "  func.func private @idris_str_head(i64) -> i64"
+    , "  func.func private @idris_str_cons(i64, i64) -> i64"
     , "  func.func private @idris_crash(i64, i64) -> i64"
     , "  func.func private @_raise(i64) -> i64"
     , "  func.func private @idris_double_sin(i64) -> i64"
@@ -4638,7 +4640,7 @@ externalRuntimeFns = Set.fromList
   , "mercury_choose", "mercury_collect_choices"
   , "mercury_exn_fail", "mercury_fail"
   -- Idris2 bridge runtime stubs
-  , "idris2_putStr", "idris_str_head"
+  , "idris2_putStr", "idris_str_head", "idris_str_cons"
   , "idris2_fastUnpack", "idris2_fastPack", "idris2_fastConcat"
   , "idris_crash", "_raise"
   , "idris_double_sin", "idris_double_cos", "idris_double_tan"
@@ -4805,7 +4807,7 @@ externalRuntimeArity = Map.fromList
   , ("kk_println_con", 3)
   , ("mercury_choose", 0), ("mercury_collect_choices", 1)
   , ("mercury_exn_fail", 0), ("mercury_fail", 0)
-  , ("idris2_putStr", 2), ("idris_str_head", 1)
+  , ("idris2_putStr", 2), ("idris_str_head", 1), ("idris_str_cons", 2)
   , ("idris2_fastUnpack", 1), ("idris2_fastPack", 1), ("idris2_fastConcat", 1)
   , ("idris_crash", 2), ("_raise", 1)
   , ("idris_double_sin", 1), ("idris_double_cos", 1), ("idris_double_tan", 1)

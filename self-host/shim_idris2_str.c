@@ -109,9 +109,9 @@ int64_t idris2_fastPack(int64_t chars) {
         }
         cur = kk_list_tail(cur);
     }
-    int64_t result = kk_str_alloc_leaf_owned(buf, total);
-    free(buf);
-    return result;
+    /* kk_str_alloc_leaf_owned retains the pointer and frees it when
+     * the leaf is dropped — do NOT free here. */
+    return kk_str_alloc_leaf_owned(buf, total);
 }
 
 /* idris2_fastConcat : List String -> String

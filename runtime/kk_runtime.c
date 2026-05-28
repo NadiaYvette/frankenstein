@@ -1916,6 +1916,22 @@ int64_t idris_str_head(int64_t s_i) {
     return (int64_t)(unsigned char)kk_str_bytes(flat)[0];
 }
 
+/* Idris2 StrCons primitive: prepend a Char (i64 Unicode codepoint) to a
+ * String.  Encodes the codepoint as 1..4 UTF-8 bytes, allocates a leaf
+ * string for them (heap-owned, freed when the leaf is dropped), then
+ * concats with the input (O(1) rope concat). */
+int64_t idris_str_cons(int64_t cp, int64_t s_i) {
+    char* buf = (char*)malloc(4);
+    if (!buf) return s_i;
+    int64_t n;
+    if (cp < 0x80)        { buf[0] = (char)cp;                                                                                                  n = 1; }
+    else if (cp < 0x800)  { buf[0] = (char)(0xC0 | (cp >> 6));   buf[1] = (char)(0x80 | (cp & 0x3F));                                          n = 2; }
+    else if (cp < 0x10000){ buf[0] = (char)(0xE0 | (cp >> 12));  buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[2] = (char)(0x80 | (cp & 0x3F)); n = 3; }
+    else                  { buf[0] = (char)(0xF0 | (cp >> 18));  buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F)); buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[3] = (char)(0x80 | (cp & 0x3F)); n = 4; }
+    int64_t head = kk_str_alloc_leaf_owned(buf, n);
+    return kk_str_concat(head, s_i);
+}
+
 /* Idris2 Crash primitive: print the message and abort. */
 int64_t idris_crash(int64_t msg_i, int64_t _ignored) {
     (void)_ignored;

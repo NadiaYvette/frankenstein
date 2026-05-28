@@ -3555,16 +3555,48 @@ emitLambdaLift params body = do
                    , esScopeSsa = lambdaScope
                    })
   -- Build prologue ops that extract captured fields from %closure.
-  -- Each capture must be retained: if the closure is called multiple times
-  -- (e.g. as a callback in mapM/map), the Perceus-inserted drops in the body
-  -- would free the capture after the first call without this retain.
-  let allCapFresh = capFresh ++ extraCapFresh
+  -- Each capture must be retained ONCE PER CONSUMING USE in the body: if
+  -- the body uses a capture in N consuming positions, the per-invocation
+  -- refcount needs +N to match.  Without it the capture's rc drifts down
+  -- by (N-1) every call, eventually reaching zero — manifests as
+  -- use-after-drop under KK_RECYCLE=1.  Count via a per-name occurrence
+  -- count on the lambda body; restrict to the already-computed `captured`
+  -- list so we don't accidentally retain top-level fn refs (which appear
+  -- as EVars but aren't heap cells).  See ROADMAP Phase 12a for the
+  -- broader cleanup that would let Perceus own this analysis instead.
+  let countUses :: Name -> Expr -> Int
+      countUses tgt = go
+        where
+          tgtT = nameText tgt
+          go (EVar n)         = if nameText n == tgtT then 1 else 0
+          go (ELit _)         = 0
+          go (ECon _)         = 0
+          go (EFunRef _)      = 0
+          go (EApp f as)      = go f + sum (map go as)
+          go (ELam _ b)       = go b
+          go (ELet bgs b)     =
+            go b + sum [go (bindExpr bd) | bg <- bgs, bd <- bg]
+          go (ECase s brs)    =
+            go s + maximum (0 : [go (branchBody br) | br <- brs])
+          go (ERetain e)      = go e
+          go (ERelease e)     = go e
+          go (EDrop e)        = go e
+          go (EReuse a b)     = go a + go b
+          go (EDelay e)       = go e
+          go (EForce e)       = go e
+          go (ETypeApp e _)   = go e
+          go (ETypeLam _ e)   = go e
+          go (EPerform _ as)  = sum (map go as)
+          go (EHandle _ h b)  = go h + go b
+      capCounts = [ max 1 (countUses n body) | n <- captured ]
+      extraCounts = [ 1 | _ <- extraCapsUniq ]
+      allCounts = capCounts ++ extraCounts
+      allCapFresh = capFresh ++ extraCapFresh
       prologue = concat
         [ [ "%idx_" <> cfn <> " = arith.constant " <> T.pack (show i) <> " : i64"
           , "%" <> cfn <> " = func.call @kk_field(%" <> closFresh <> ", %idx_" <> cfn <> ") : (i64, i64) -> i64"
-          , "func.call @kk_retain(%" <> cfn <> ") : (i64) -> ()"
-          ]
-        | (i, cfn) <- zip [(1::Int)..length allCapFresh] allCapFresh
+          ] ++ replicate cnt ("func.call @kk_retain(%" <> cfn <> ") : (i64) -> ()")
+        | (i, cfn, cnt) <- zip3 [(1::Int)..length allCapFresh] allCapFresh allCounts
         ]
   (bodyOps, bodyResult) <- emitExpr body
   -- Restore alias map and scope set (body-local context shouldn't leak out).

@@ -18,12 +18,12 @@
                  U ftell
                  U getc
                  U __isoc23_sscanf
+                 U __isoc23_strtol
                  U __isoc23_strtoll
                  U log
                  U log10
                  U log2
                  U longjmp
-                 U __modti3
                  U pow
                  U putc
                  U rewind

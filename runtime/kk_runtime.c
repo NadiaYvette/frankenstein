@@ -64,7 +64,17 @@ void kk_retain(int64_t ptr) {
     if (kk_is_string(ptr)) { kk_str_retain(ptr); return; }
     if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
-    int64_t count = (*rc & KK_RC_MASK) + 1;
+    int64_t cur = *rc & KK_RC_MASK;
+    /* Refuse to revive a cell whose refcount has already reached zero.
+     * Under KK_RECYCLE=1 such a cell is on the arena freelist with its
+     * tag-slot reused as a next-pointer; incrementing the rc would let
+     * a subsequent kk_drop decrement it back to zero, recurse into
+     * the no-longer-valid "children", and re-push the block onto the
+     * freelist — corrupting the chain (the classic double-recycle).
+     * The same guard is harmless when recycling is off: rc=0 cells
+     * never get retained on a correctly-counted code path. */
+    if (cur == 0) return;
+    int64_t count = cur + 1;
     *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | count;
     *rc = (*rc & (KK_RC_MASK | KK_NFIELDS_MASK)) | KK_COLOR_BLACK;
 }

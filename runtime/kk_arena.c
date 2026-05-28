@@ -18,6 +18,7 @@
 
 #include "kk_arena.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -221,6 +222,23 @@ void* kk_arena_recycle(size_t size) {
 void kk_arena_recycle_put(void* block, size_t size) {
     size_t cls = size / 8;
     if (cls >= KK_RECYCLE_CLASSES) return;  /* too big, let it leak */
+    /* Audit: walk the chain looking for `block`.  A second push of an
+     * already-freed cell signals double-drop in the caller; surface it
+     * loudly instead of corrupting the freelist next pointer when set
+     * to KK_RECYCLE_AUDIT=1. */
+    static int audit = -1;
+    if (audit == -1) {
+        const char* v = getenv("KK_RECYCLE_AUDIT");
+        audit = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    if (audit) {
+        for (void* p = g_free_lists[cls]; p != NULL; p = ((void**)p)[1]) {
+            if (p == block) {
+                fprintf(stderr, "[kk_arena_recycle_put] DOUBLE-RECYCLE: block=%p size=%zu\n", block, size);
+                abort();
+            }
+        }
+    }
     ((int64_t*)block)[0] = 0;                /* rc word: dead sentinel */
     ((void**)block)[1]   = g_free_lists[cls];/* tag slot: next ptr */
     g_free_lists[cls] = block;

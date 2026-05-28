@@ -18,6 +18,8 @@
 #include <string.h>
 #include <math.h>
 #include <execinfo.h>
+#define _GNU_SOURCE
+#include <dlfcn.h>
 #include "kk_runtime.h"
 #include "kk_cycle.h"
 #include "kk_arena.h"
@@ -287,8 +289,16 @@ int64_t kk_field(int64_t ptr, int64_t idx) {
     if (kk_recycle_audit_enabled()) {
         int64_t parent_tag = *(int64_t*)ptr;
         if (parent_tag & ((int64_t)1 << 63)) {
-            fprintf(stderr, "[kk_field] USE-AFTER-DROP: ptr=%p tag=0x%lx idx=%ld\n",
-                    (void*)ptr, parent_tag, idx);
+            int64_t* fields = (int64_t*)(ptr + 8);
+            fprintf(stderr,
+                "[kk_field] USE-AFTER-DROP: ptr=%p tag=0x%lx idx=%ld field[0]=0x%lx field[1]=0x%lx\n",
+                (void*)ptr, parent_tag, idx, fields[0], fields[1]);
+            /* If field[0] is in the text segment, it was a closure — show
+             * the function name with addr2line for easier root-cause. */
+            Dl_info info;
+            if (dladdr((void*)(uintptr_t)fields[0], &info) && info.dli_sname) {
+                fprintf(stderr, "  field[0] resolves to: %s\n", info.dli_sname);
+            }
             abort();
         }
     }

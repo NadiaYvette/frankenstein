@@ -250,6 +250,14 @@ int64_t kk_tag(int64_t ptr) {
         return 0;
     }
     int64_t t = *(int64_t*)ptr;
+    /* Detect use-after-drop: a recycled cell has its tag slot overwritten
+     * with (KK_RECYCLE_FLAG | next-ptr) where bit 63 is set.  No valid
+     * tag or user-space pointer has bit 63 set, so this is unambiguous.
+     * Under KK_RECYCLE_AUDIT=1 we abort so gdb shows the calling fn. */
+    if ((t & ((int64_t)1 << 63)) && kk_recycle_audit_enabled()) {
+        fprintf(stderr, "[kk_tag] USE-AFTER-DROP: ptr=%p tag=0x%lx\n", (void*)ptr, t);
+        abort();
+    }
     if (kk_tag_trace > 0) {
         static int n1 = 0;
         if (n1 < kk_tag_trace) fprintf(stderr, "[kk_tag %d] heap ptr=%p tag=%ld (0x%lx)\n", n1++, (void*)ptr, t, t);

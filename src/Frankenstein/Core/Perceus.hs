@@ -165,24 +165,30 @@ perceusExpr scope expr = case expr of
   -- drop merely decrements without freeing, so the children stay alive for
   -- the next selector call.
   ECase scrut branches ->
-    -- Normalize EForce scrutinees: introduce a named binding so the
-    -- Koka-style ownership path can retain used fields and drop the
-    -- forced result (instead of dropping individual pattern fields,
-    -- which frees shared fields prematurely in selector thunks).
+    -- Normalize ANY non-EVar scrutinee by binding it to a fresh name
+    -- and recurring.  The Koka-style ownership path (perceusBranch's
+    -- mScrutVar=Just case) retains used fields and then drops the
+    -- scrutinee, letting the recursive kk_drop cascade unused fields.
+    -- When the scrutinee is a complex expression, mScrutVar would
+    -- otherwise be Nothing and we'd take the "drop individual unused
+    -- fields" fallback — which over-drops borrowed-from-field refs
+    -- (kk_field returns a borrowed pointer, not a retained one).
+    -- That manifests under KK_RECYCLE=1 as kk_thunk_force reading the
+    -- KK_RECYCLE_FLAG sentinel of a recycled thunk cell.
     case scrut of
-      EForce (EVar thunkVar) ->
-        let dsName = Name "_forced" 0
-            dsType = TCon (TypeCon (QName "" (Name "any" 0)) KindValue)
-            dsBind = Bind dsName dsType (EForce (EVar thunkVar)) DefVal
-            innerCase = ECase (EVar dsName) branches
-        in perceusExpr scope (ELet [[dsBind]] innerCase)
-      _ ->
+      EVar _ ->
         let scrut' = perceusExpr scope scrut
             mScrutVar = case scrut of
               EVar n -> Just n
               _      -> Nothing
             branches' = map (perceusBranch scope mScrutVar) branches
         in ECase scrut' branches'
+      _ ->
+        let dsName = Name "_scrutinee" 0
+            dsType = TCon (TypeCon (QName "" (Name "any" 0)) KindValue)
+            dsBind = Bind dsName dsType scrut DefVal
+            innerCase = ECase (EVar dsName) branches
+        in perceusExpr scope (ELet [[dsBind]] innerCase)
 
   -- Retain/Drop/Release already present: recurse
   ERetain e -> ERetain (perceusExpr scope e)

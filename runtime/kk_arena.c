@@ -205,41 +205,50 @@ int kk_arena_in_rollback_region(const void* ptr, kk_arena_checkpoint_t cp) {
 
 static void* g_free_lists[KK_RECYCLE_CLASSES] = {0};
 
-/* Freelist layout: blocks chain through their *second* 8-byte slot
- * (the "tag" position of the dead cell).  The first slot (rc word) is
- * kept as 0 — matches what kk_drop has already written before calling
- * recycle_put.  That way, a stale drop on a recycled cell sees rc=0
- * and early-returns via the "already freed or corrupt" guard instead
- * of treating the next pointer as a refcount and walking children. */
+/* Freelist layout: dead blocks chain through the tag slot (block[1]),
+ * with bit 63 set as KK_RECYCLE_FLAG to make a read of the tag slot
+ * recognisably-dead.  Valid tags (KK_CLOSURE_TAG, etc.) and pointers
+ * on x86-64 leave bit 63 clear, so the flag is unambiguous.  rc word
+ * (block[0]) stays at 0 so the existing kk_drop "already freed" guard
+ * and the new kk_retain rc=0 bail both kick in on stray accesses.
+ *
+ * Under KK_RECYCLE_AUDIT=1, kk_tag (and any caller that pokes block[1])
+ * can detect the flag and abort with a backtrace — turns a silent
+ * use-after-drop into a loud failure pinpointing the bad call site. */
+#define KK_RECYCLE_FLAG ((int64_t)1 << 63)
+
 void* kk_arena_recycle(size_t size) {
     size_t cls = size / 8;
     if (cls >= KK_RECYCLE_CLASSES || !g_free_lists[cls]) return NULL;
     void* block = g_free_lists[cls];
-    g_free_lists[cls] = ((void**)block)[1];
+    int64_t marker = ((int64_t*)block)[1];
+    g_free_lists[cls] = (void*)(uintptr_t)(marker & ~KK_RECYCLE_FLAG);
     return block;
 }
 
-void kk_arena_recycle_put(void* block, size_t size) {
-    size_t cls = size / 8;
-    if (cls >= KK_RECYCLE_CLASSES) return;  /* too big, let it leak */
-    /* Audit: walk the chain looking for `block`.  A second push of an
-     * already-freed cell signals double-drop in the caller; surface it
-     * loudly instead of corrupting the freelist next pointer when set
-     * to KK_RECYCLE_AUDIT=1. */
+int kk_recycle_audit_enabled(void) {
     static int audit = -1;
     if (audit == -1) {
         const char* v = getenv("KK_RECYCLE_AUDIT");
         audit = (v && v[0] && v[0] != '0') ? 1 : 0;
     }
-    if (audit) {
-        for (void* p = g_free_lists[cls]; p != NULL; p = ((void**)p)[1]) {
+    return audit;
+}
+
+void kk_arena_recycle_put(void* block, size_t size) {
+    size_t cls = size / 8;
+    if (cls >= KK_RECYCLE_CLASSES) return;  /* too big, let it leak */
+    if (kk_recycle_audit_enabled()) {
+        for (void* p = g_free_lists[cls]; p != NULL; ) {
             if (p == block) {
                 fprintf(stderr, "[kk_arena_recycle_put] DOUBLE-RECYCLE: block=%p size=%zu\n", block, size);
                 abort();
             }
+            int64_t m = ((int64_t*)p)[1];
+            p = (void*)(uintptr_t)(m & ~KK_RECYCLE_FLAG);
         }
     }
-    ((int64_t*)block)[0] = 0;                /* rc word: dead sentinel */
-    ((void**)block)[1]   = g_free_lists[cls];/* tag slot: next ptr */
+    ((int64_t*)block)[0] = 0;
+    ((int64_t*)block)[1] = KK_RECYCLE_FLAG | (int64_t)(uintptr_t)g_free_lists[cls];
     g_free_lists[cls] = block;
 }

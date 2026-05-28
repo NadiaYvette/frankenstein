@@ -91,4 +91,8 @@ void* kk_arena_recycle(size_t size);
 /* Push a dead arena block onto the free list for its size class. */
 void kk_arena_recycle_put(void* block, size_t size);
 
+/* True iff KK_RECYCLE_AUDIT=1.  Used by kk_tag (and others) to detect
+ * reads of recycled cells and abort on use-after-drop. */
+int kk_recycle_audit_enabled(void);
+
 #endif /* KK_ARENA_H */

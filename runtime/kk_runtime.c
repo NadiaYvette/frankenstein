@@ -133,10 +133,29 @@ void kk_drop(int64_t ptr) {
      * kk_thunk_force retains cached results on every read, so lazy
      * selector thunk sharing is properly refcounted.  It is now safe
      * to recursively drop children and free the object. */
-    *rc = 0;  /* mark dead first — prevents re-entrant double-free */
+    /* The nfields field shares the rc word; *rc = 0 zeros it too,
+     * which would make the cascade loop below skip every field.
+     * KK_CASCADE=1 enables the proper read-before-clear ordering,
+     * making cascades actually drop captured fields.  See ROADMAP
+     * Phase 12a step 2.  Default off because the cascade exposes
+     * pre-existing refcount-accounting bugs in bridge-emitted code
+     * (rust_dbg_adt and rust_dbg_enum hellos depend on Rust MIR
+     * drops not actually running for shared-reference patterns). */
+    static int cascade = -1;
+    if (cascade == -1) {
+        const char* v = getenv("KK_CASCADE");
+        cascade = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    int64_t nf;
+    if (cascade) {
+        nf = kk_nfields(ptr);
+        *rc = 0;
+    } else {
+        *rc = 0;  /* legacy: nf reads as 0, cascade is a no-op */
+        nf = kk_nfields(ptr);
+    }
 
     int64_t tag = kk_tag(ptr);
-    int64_t nf = kk_nfields(ptr);
     int64_t* fields = (int64_t*)(ptr + 8);
 
     if (tag == KK_CLOSURE_TAG) {

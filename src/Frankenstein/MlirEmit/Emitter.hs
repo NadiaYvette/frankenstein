@@ -3564,6 +3564,12 @@ emitLambdaLift params body = do
   -- list so we don't accidentally retain top-level fn refs (which appear
   -- as EVars but aren't heap cells).  See ROADMAP Phase 12a for the
   -- broader cleanup that would let Perceus own this analysis instead.
+  -- Count consuming uses of `tgt` in an expression.  An EVar reference
+  -- inside ERetain / ERelease doesn't consume — those are pure rc ops
+  -- the emitter lowers to kk_retain / kk_release without touching
+  -- ownership.  EDrop *does* consume (it lowers to kk_drop, which is
+  -- the canonical consume).  EApp args and EApp head both consume
+  -- (the called function takes ownership of every operand).
   let countUses :: Name -> Expr -> Int
       countUses tgt = go
         where
@@ -3578,8 +3584,9 @@ emitLambdaLift params body = do
             go b + sum [go (bindExpr bd) | bg <- bgs, bd <- bg]
           go (ECase s brs)    =
             go s + maximum (0 : [go (branchBody br) | br <- brs])
-          go (ERetain e)      = go e
-          go (ERelease e)     = go e
+          -- ERetain / ERelease: rc ops, NOT consuming the value
+          go (ERetain _)      = 0
+          go (ERelease _)     = 0
           go (EDrop e)        = go e
           go (EReuse a b)     = go a + go b
           go (EDelay e)       = go e

@@ -118,6 +118,7 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
                                     * need to know the function was plotkin-transformed.
                                     */
 
+void kk_tag_stats_drop(int64_t tag);  /* forward decl */
 void kk_drop(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
     if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
@@ -182,6 +183,7 @@ void kk_drop(int64_t ptr) {
 
     int64_t tag = kk_tag(ptr);
     int64_t* fields = (int64_t*)(ptr + 8);
+    kk_tag_stats_drop(tag);
 
     if (tag == KK_CLOSURE_TAG) {
         /* Closures: field 0 is a raw function pointer — skip it.
@@ -414,7 +416,75 @@ int64_t kk_structural_eq(int64_t a, int64_t b) {
 /* Allocate a constructor: tag + nfields payload slots.
  * Returns pointer to the tag (not the refcount).
  * Layout: [rc=1] [tag] [f0] [f1] ... */
+/* Per-tag allocation/drop counters for leak hunting (KK_STATS=1).
+ * Records counts in a small open-addressed table keyed on tag, with
+ * a fallback bucket for overflow.  Lazy: only updates when stats are
+ * enabled to avoid runtime cost on default builds. */
+#define KK_TAG_STATS_CAP 64
+static struct { int64_t tag; int64_t alloc; int64_t drop; } kk_tag_stats[KK_TAG_STATS_CAP];
+static int kk_tag_stats_inited = 0;
+static int kk_tag_stats_enabled(void) {
+    static int en = -1;
+    if (en == -1) {
+        const char* v = getenv("KK_STATS");
+        en = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return en;
+}
+static int kk_tag_stats_slot(int64_t tag) {
+    int h = (int)(((uint64_t)tag * 11400714819323198485ULL) >> 58) & (KK_TAG_STATS_CAP - 1);
+    for (int i = 0; i < KK_TAG_STATS_CAP; i++) {
+        int s = (h + i) & (KK_TAG_STATS_CAP - 1);
+        if (kk_tag_stats[s].tag == tag) return s;
+        if (kk_tag_stats[s].tag == 0) { kk_tag_stats[s].tag = tag; return s; }
+    }
+    return 0;  /* fallback: overflow bucket */
+}
+void kk_tag_stats_alloc(int64_t tag) {
+    if (!kk_tag_stats_enabled()) return;
+    kk_tag_stats[kk_tag_stats_slot(tag)].alloc++;
+}
+void kk_tag_stats_drop(int64_t tag) {
+    if (!kk_tag_stats_enabled()) return;
+    kk_tag_stats[kk_tag_stats_slot(tag)].drop++;
+}
+void kk_tag_stats_print(void) {
+    /* Sort by live (alloc - drop) descending; print top entries. */
+    int idxs[KK_TAG_STATS_CAP];
+    int n = 0;
+    for (int i = 0; i < KK_TAG_STATS_CAP; i++) {
+        if (kk_tag_stats[i].alloc > 0) idxs[n++] = i;
+    }
+    /* Insertion sort by live count desc */
+    for (int i = 1; i < n; i++) {
+        int j = i;
+        while (j > 0) {
+            int64_t lv_a = kk_tag_stats[idxs[j-1]].alloc - kk_tag_stats[idxs[j-1]].drop;
+            int64_t lv_b = kk_tag_stats[idxs[j]].alloc - kk_tag_stats[idxs[j]].drop;
+            if (lv_b <= lv_a) break;
+            int tmp = idxs[j-1]; idxs[j-1] = idxs[j]; idxs[j] = tmp;
+            j--;
+        }
+    }
+    fprintf(stderr, "[kk tag stats] %-12s %12s %12s %12s\n", "tag", "alloc", "drop", "live");
+    for (int i = 0; i < n && i < 16; i++) {
+        int64_t alloc = kk_tag_stats[idxs[i]].alloc;
+        int64_t drop = kk_tag_stats[idxs[i]].drop;
+        int64_t live = alloc - drop;
+        int64_t tag = kk_tag_stats[idxs[i]].tag;
+        char buf[16];
+        if (tag == KK_CLOSURE_TAG) snprintf(buf, sizeof buf, "CLOS");
+        else if (tag == KK_CLOSBOR_TAG) snprintf(buf, sizeof buf, "CLOB");
+        else if (tag == KK_THUNK_TAG)   snprintf(buf, sizeof buf, "LAZY");
+        else if (tag == KK_NIL_TAG)     snprintf(buf, sizeof buf, "NIL");
+        else if (tag == KK_CONS_TAG)    snprintf(buf, sizeof buf, "CONS");
+        else snprintf(buf, sizeof buf, "0x%lx", (long)tag);
+        fprintf(stderr, "[kk tag stats] %-12s %12ld %12ld %12ld\n", buf, (long)alloc, (long)drop, (long)live);
+    }
+}
+
 int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
+    kk_tag_stats_alloc(tag);
     int64_t total = (2 + nfields) * 8;  /* rc + tag + fields */
     /* Constructor cells go into the bump arena by default. The arena
      * returns NULL when KK_NO_ARENA is set, in which case we fall back
@@ -2470,11 +2540,13 @@ int64_t kk_n_drops_to_zero = 0;
 static void kk_print_stats(void) {
     extern int64_t kk_n_alloc_bumped;
     extern int64_t kk_n_alloc_recycled;
+    extern void kk_tag_stats_print(void);
     fprintf(stderr, "[kk stats] drops_to_zero=%ld bumped=%ld recycled=%ld arena_bytes_alloc=%ld\n",
             (long)kk_n_drops_to_zero,
             (long)kk_n_alloc_bumped,
             (long)kk_n_alloc_recycled,
             (long)kk_arena_bytes_allocated());
+    kk_tag_stats_print();
     fflush(stderr);
 }
 

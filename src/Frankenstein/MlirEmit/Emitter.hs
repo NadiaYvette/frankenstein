@@ -3617,10 +3617,20 @@ emitLambdaLift params body = do
       allParams = ("%" <> closFresh <> ": i64") : regularParams
       mlirArgs = T.intercalate ", " allParams
       mlirRetTy = "i64"
+      -- Drop the closure-arg before returning.  Perceus assumes consume
+      -- convention for function args: each EApp consumes its function
+      -- value (one rc), so the called body must release one ref of its
+      -- closure-self before returning.  Without this every closure
+      -- invocation leaks 1 ref of the closure, producing the
+      -- 7.6M-allocated / 7k-dropped CLOS gap that surd-quintic shows
+      -- under KK_STATS=1.  HOFs and recursive callers already emit
+      -- (count-1) retains before each invocation, matching this drop.
+      closureDrop = "    func.call @kk_drop(%" <> closFresh <> ") : (i64) -> ()"
       fnText = T.unlines $
         [ "  func.func @" <> liftedName <> "(" <> mlirArgs <> ") -> " <> mlirRetTy <> " {" ] ++
         map ("    " <>) (prologue ++ bodyOps) ++
-        [ "    func.return %" <> bodyResult <> " : " <> mlirRetTy
+        [ closureDrop
+        , "    func.return %" <> bodyResult <> " : " <> mlirRetTy
         , "  }" ]
   addLiftedFn fnText
   -- Allocate the closure as a boxed heap value via kk_alloc_con.

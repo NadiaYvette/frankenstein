@@ -2056,6 +2056,19 @@ int64_t cast_Double_String(int64_t d) {
             tmp[n++] = '0';
             tmp[n]   = '\0';
         }
+        /* Chez Scheme appends |<precision> to subnormal (denormal) flonums,
+         * where precision is the bit-length of the stored 52-bit mantissa
+         * (1..52).  Idris2's native chez backend inherits this, so byte-
+         * identical surd output requires matching here. */
+        uint64_t bits;
+        memcpy(&bits, &v, sizeof bits);
+        int exp_bits  = (int)((bits >> 52) & 0x7FF);
+        uint64_t mant = bits & (((uint64_t)1 << 52) - 1);
+        if (exp_bits == 0 && mant != 0) {
+            int prec = 0;
+            for (uint64_t m = mant; m != 0; m >>= 1) prec++;
+            n += snprintf(tmp + n, sizeof tmp - (size_t)n, "|%d", prec);
+        }
     }
     if (n < 0) n = 0;
     /* Copy onto the heap and hand ownership to the string (owns=1)

@@ -1078,29 +1078,45 @@ bridge needs rechecking; runtime ABI change if we split `kk_set_field`;
 high risk of regressing the currently-passing baselines. Probably wants
 a feature flag during transition.
 
-### 12a step 2. Fix kk_drop's cascade
+### 12a step 2. Fix kk_drop's cascade ✓ (gated)
 
-**Discovered while implementing 12b's test harness**: `kk_drop` sets
+**Discovered while implementing 12b's test harness**: `kk_drop` set
 `*rc = 0` BEFORE reading `nf` from the same word, so `kk_nfields`
-returns 0 and the cascade loop never executes.  Cascades have been
+returned 0 and the cascade loop never executed.  Cascades had been
 silently no-op'd in production all along.
 
-Fix is one line — capture `nf` before the dead-marker write:
-```c
-int64_t nf = kk_nfields(ptr);   // BEFORE
-*rc = 0;
-int64_t tag = kk_tag(ptr);
+Landed in commit `fb14ba4` gated behind `KK_CASCADE=1`.  Default
+behavior unchanged (cascade still no-op'd, baselines all green).
+With both `KK_CASCADE=1 KK_RECYCLE=1`, surd-quintic's RSS drops 18×
+(16 GiB → 916 MiB at 60s) and output stays byte-identical with
+native through every printed line.
+
+The fix exposes 2 hellos (rust-dbg-adt, rust-dbg-enum) that depend
+on the cascade not running: the Rust bridge translates MIR's
+basic-block-ordered drops as Core `EDrop`s placed BEFORE the next
+block uses the extracted fields.  Specifically:
+```
+_6 = retain(_1)        // _1 = struct, _6 = retained ref
+_5 = std.tuple(_6)      // consumes _6 (transfers ownership)
+_19 = field_safe(_5, 0) // borrowed extract
+drop(_1); drop(_6); drop(_5)   // bridge emits all three drops
+... use _19 ...                 // _19 now points to freed memory
 ```
 
-Effect on surd-quintic-under-recycle: RSS drops 15× (16 GiB → 1 GiB
-at 60s).  But the fix exposes 2 buggy hellos (rust-dbg-adt,
-rust-dbg-enum) that depend on the cascade not running — Rust struct
-Debug printing reads fields after kk_drop and would otherwise see
-garbage, but with no cascade the fields stayed valid.  Those need
-real fixes before the cascade fix can land at the baseline.
+The std.tuple constructor doesn't retain its arg (no Frankenstein
+constructor does), so `_6` is consumed by the tuple but `drop(_6)`
+still fires.  Without the cascade running the drops were silent and
+`_19` stayed valid; with the cascade running `_19` points to freed
+memory and the Debug printer reads `nfields = 0` from the
+recycle-sentinel and prints `()`.
+
+**The proper bridge fix (Phase 12a step 3)**: track per-variable
+consumption in `RustBridge.CoreTranslate`.  When a variable is
+passed to a constructor (`std.tuple` or any other), mark it
+consumed; skip subsequent `TermDrop` emissions for consumed vars.
 
 The Phase 12b test harness (test/runtime/test_closbor.c) has an
-XFAIL-by-design test for this case until the fix ships.
+XFAIL-by-design test for the cascade-off path.
 
 ### 12b. Borrowed-field annotation ✓ (runtime foundation)
 

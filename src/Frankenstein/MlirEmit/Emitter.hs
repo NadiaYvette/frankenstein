@@ -4999,23 +4999,30 @@ compileToExecutableLink config llPath =
           idris2ShimObjPath = ecOutputPath config ++ ".idris2.o"
           optFlag = "-O" ++ show (ecOptLevel config)
           includeFlag = "-I" ++ rtDir
+          -- Emit LLVM bitcode for the runtime + shim TUs so the final
+          -- link can inline tiny hot helpers (kk_retain, kk_drop,
+          -- kk_arena_maybe_owns) into user code.  These three account
+          -- for ~50% of execution time on the surd-quintic degree-7
+          -- root finder; LTO inlining is the single biggest available
+          -- win short of redesigning the refcount ABI.
+          ltoFlag = "-flto"
       r1 <- runCmd (ecClangPath config)
-        ["-c", rtPath, "-o", rtObjPath, includeFlag, optFlag] "" "clang (runtime)"
+        ["-c", rtPath, "-o", rtObjPath, includeFlag, optFlag, ltoFlag] "" "clang (runtime)"
       case r1 of
         Left e -> pure (Left e)
         Right _ -> do
           r2 <- runCmd (ecClangPath config)
-            ["-c", cyclePath, "-o", cycleObjPath, includeFlag, optFlag] "" "clang (cycle)"
+            ["-c", cyclePath, "-o", cycleObjPath, includeFlag, optFlag, ltoFlag] "" "clang (cycle)"
           case r2 of
             Left e -> pure (Left e)
             Right _ -> do
               r3 <- runCmd (ecClangPath config)
-                ["-c", arenaPath, "-o", arenaObjPath, includeFlag, optFlag] "" "clang (arena)"
+                ["-c", arenaPath, "-o", arenaObjPath, includeFlag, optFlag, ltoFlag] "" "clang (arena)"
               case r3 of
                 Left e -> pure (Left e)
                 Right _ -> do
                   r3b <- runCmd (ecClangPath config)
-                    ["-c", idris2ShimPath, "-o", idris2ShimObjPath, includeFlag, optFlag]
+                    ["-c", idris2ShimPath, "-o", idris2ShimObjPath, includeFlag, optFlag, ltoFlag]
                     "" "clang (idris2-shim)"
                   case r3b of
                     Left e -> pure (Left e)
@@ -5029,7 +5036,7 @@ compileToExecutableLink config llPath =
                       -- doesn't yet recognise leak as goal-text symbols.
                       r4 <- runCmd (ecClangPath config)
                         ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath, idris2ShimObjPath,
-                         "-o", ecOutputPath config, optFlag, "-lm"
+                         "-o", ecOutputPath config, optFlag, ltoFlag, "-lm"
                         , "-Wl,--unresolved-symbols=ignore-in-object-files"]
                         "" "clang (link)"
                       case r4 of

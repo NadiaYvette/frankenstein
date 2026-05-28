@@ -39,6 +39,13 @@ static int64_t  g_total_slab_bytes  = 0;
 static uintptr_t g_arena_lo = (uintptr_t)-1;  /* lowest arena byte */
 static uintptr_t g_arena_hi = 0;              /* one past highest arena byte */
 
+/* Per-size freelists for recycling dropped cells live further down,
+ * in the "Free-list recycling" section.  kk_arena_alloc pulls from
+ * them via kk_arena_recycle(); kk_drop pushes via kk_arena_recycle_put
+ * when a refcount hits zero on an arena-owned cell.  Surd-quintic's
+ * degree-7 root finder allocates ~2.4M cells/sec; without recycling
+ * the arena grew to 51 GiB before OOM, with it RSS stays bounded. */
+
 static int arena_enabled(void) {
     if (g_disabled == -1) {
         const char* v = getenv("KK_NO_ARENA");
@@ -72,6 +79,12 @@ void* kk_arena_alloc(size_t size) {
     if (!arena_enabled()) return NULL;
     if (size == 0) size = KK_ARENA_ALIGN;
     size = round_up(size, KK_ARENA_ALIGN);
+
+    /* Try the freelist first (see kk_arena_recycle below) — pops a
+     * previously-dropped cell of the same size, keeping the pointer
+     * inside [g_arena_lo, g_arena_hi). */
+    void* recycled = kk_arena_recycle(size);
+    if (recycled) return recycled;
 
     /* Oversized: dedicated slab sized exactly for the request. */
     if (size > KK_ARENA_SLAB_SIZE / 2) {
@@ -115,7 +128,9 @@ int kk_arena_maybe_owns(const void* ptr) {
 
 void kk_arena_free(void* ptr) {
     if (ptr == NULL) return;
-    if (kk_arena_maybe_owns(ptr)) return;  /* O(1) range check — arena cells outlive individual frees */
+    if (kk_arena_maybe_owns(ptr)) return;  /* arena-owned: kk_drop calls
+                                            * kk_arena_recycle_put instead;
+                                            * see runtime/kk_runtime.c. */
     free(ptr);
 }
 
@@ -189,17 +204,24 @@ int kk_arena_in_rollback_region(const void* ptr, kk_arena_checkpoint_t cp) {
 
 static void* g_free_lists[KK_RECYCLE_CLASSES] = {0};
 
+/* Freelist layout: blocks chain through their *second* 8-byte slot
+ * (the "tag" position of the dead cell).  The first slot (rc word) is
+ * kept as 0 — matches what kk_drop has already written before calling
+ * recycle_put.  That way, a stale drop on a recycled cell sees rc=0
+ * and early-returns via the "already freed or corrupt" guard instead
+ * of treating the next pointer as a refcount and walking children. */
 void* kk_arena_recycle(size_t size) {
     size_t cls = size / 8;
     if (cls >= KK_RECYCLE_CLASSES || !g_free_lists[cls]) return NULL;
     void* block = g_free_lists[cls];
-    g_free_lists[cls] = *(void**)block;
+    g_free_lists[cls] = ((void**)block)[1];
     return block;
 }
 
 void kk_arena_recycle_put(void* block, size_t size) {
     size_t cls = size / 8;
     if (cls >= KK_RECYCLE_CLASSES) return;  /* too big, let it leak */
-    *(void**)block = g_free_lists[cls];
+    ((int64_t*)block)[0] = 0;                /* rc word: dead sentinel */
+    ((void**)block)[1]   = g_free_lists[cls];/* tag slot: next ptr */
     g_free_lists[cls] = block;
 }

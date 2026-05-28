@@ -158,8 +158,30 @@ void kk_drop(int64_t ptr) {
     }
 
     kk_unregister_nfields(ptr);
-    /* kk_arena_free: no-op for arena-owned, free() for malloc'd */
-    kk_arena_free((void*)(intptr_t)(ptr - 8));
+    /* Reclaim the cell.  For arena-owned blocks, push onto the
+     * size-bucketed freelist so the next same-size allocation can
+     * reuse the bytes (keeps RSS bounded on long-running workloads
+     * like surd-quintic's degree-7 root finder).  For malloc'd
+     * blocks (oversized / KK_NO_ARENA), kk_arena_free still calls
+     * free().
+     *
+     * The freelist is opt-in via KK_RECYCLE=1 because surd-quintic
+     * (and likely other Idris2-shim workloads) has at least one
+     * use-after-drop path that the leak-everything arena masks;
+     * enabling recycle naïvely segfaults within seconds. */
+    void* block = (void*)(intptr_t)(ptr - 8);
+    if (kk_arena_maybe_owns(block)) {
+        static int recycle_enabled = -1;
+        if (recycle_enabled == -1) {
+            const char* v = getenv("KK_RECYCLE");
+            recycle_enabled = (v && v[0] && v[0] != '0') ? 1 : 0;
+        }
+        if (recycle_enabled) {
+            kk_arena_recycle_put(block, (size_t)((2 + nf) * 8));
+        }
+    } else {
+        kk_arena_free(block);
+    }
 }
 
 void kk_release(int64_t ptr) {

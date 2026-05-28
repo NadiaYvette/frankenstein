@@ -208,8 +208,18 @@ mkSimpleAlias key name n =
       tyList = T.intercalate ", " (replicate n "i64")
   in if n == 0
        then T.unlines
+              -- $0 references are emitted by the "unresolved external"
+              -- path when split-compilation can't find the target in the
+              -- current part's topFns.  The proper emit (CAF branch in
+              -- emitFnAsValueWithArgs, source line 387-392) forces the
+              -- returned thunk with kk_thunk_force.  Mirror that here so
+              -- callers receive the forced result regardless of which
+              -- code path produced the $0 reference.  kk_thunk_force is
+              -- a no-op on non-thunk inputs, so non-CAF callees stay
+              -- unaffected.
               [ "  func.func @" <> key <> "() -> i64 {"
-              , "    %r = func.call @" <> name <> "() : () -> i64"
+              , "    %raw = func.call @" <> name <> "() : () -> i64"
+              , "    %r = func.call @kk_thunk_force(%raw) : (i64) -> i64"
               , "    func.return %r : i64"
               , "  }"
               ]

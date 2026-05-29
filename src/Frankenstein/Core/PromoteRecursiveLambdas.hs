@@ -124,8 +124,17 @@ handleLet scope capMap (bg : rest) body =
       -- miss them, the emitter still promotes-with-captures but Perceus
       -- sees implicit captures and inserts the same spurious drop the
       -- pass is meant to eliminate.
-      isRecLam b = isLambdaExpr (bindExpr b) && isRecursive bg b
-      (recLams, otherBinds) = partitionBy isRecLam bg
+      -- Only RECURSIVE let-bound lambdas get capture-promoted here.
+      -- Non-recursive let-bound lambdas are also promoted by the
+      -- emitter (@isLambda@ predicate), but rewriting their call
+      -- sites in the Core IR breaks non-trivial programs (verified:
+      -- show_derived segfaults under the promote-everything variant).
+      -- The closure model handles non-recursive lambdas' refcount
+      -- accounting correctly; only the recursive case has the
+      -- per-branch-balance / captures-as-args mismatch this pass
+      -- exists to fix.
+      isPromotableLam b = isLambdaExpr (bindExpr b) && isRecursive bg b
+      (recLams, otherBinds) = partitionBy isPromotableLam bg
   in if null recLams
      then
        -- No recursive lambdas in this group; recurse normally.

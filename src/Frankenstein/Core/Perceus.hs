@@ -239,7 +239,7 @@ perceusBranch scope mScrutVar br =
                    , Map.findWithDefault Many n scope' /= Linear
                    , not (isUnboxedType t) ]
   in case mScrutVar of
-    Just sv | not (null patVars) ->
+    Just sv ->
       -- Koka-style: retain used fields FIRST, then drop the scrutinee.
       -- Order matters: retain must precede drop because kk_drop is
       -- recursive and would free the fields before retain bumps their rc.
@@ -249,6 +249,13 @@ perceusBranch scope mScrutVar br =
       -- and the scrutinee drop (which recursively decrements children by
       -- 1), the field has refcount N.  For @cnt@ consuming uses we need
       -- final rc = cnt, hence N = cnt retains via @wrapRetains n (cnt+1)@.
+      --
+      -- Even when patVars is empty (e.g. the Nil branch of a list
+      -- match), the scrutinee must still be dropped — otherwise empty
+      -- list values (and any 0-arity constructor) leak forever, which
+      -- showed up under KK_STATS=1 as 27.9M live NIL cells on
+      -- surd-quintic.  usedPats is empty in that case so the retain
+      -- wrapping is a no-op.
       let -- First: drop the scrutinee (innermost — emitted AFTER retains)
           droppedBody = ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar sv)) DefVal]]
                              body'
@@ -257,9 +264,9 @@ perceusBranch scope mScrutVar br =
             (\(n, cnt) e -> wrapRetains n (cnt + 1) e)
             droppedBody usedPats
       in br { branchBody = retainedBody }
-    _ ->
-      -- Fallback: no scrutinee variable (complex expression) or no pattern vars
-      -- (literal/wildcard pattern).  Drop unused pattern variables individually.
+    Nothing ->
+      -- No scrutinee variable (complex expression).  Drop unused pattern
+      -- variables individually.
       let droppedBody = foldr
             (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
             body' unusedPats

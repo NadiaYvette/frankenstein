@@ -119,16 +119,32 @@ int64_t kk_tag(int64_t ptr);  /* forward decl */
                                     */
 
 void kk_tag_stats_drop(int64_t tag);  /* forward decl */
+
+/* Periodic Bacon-Rajan cycle collection.
+ *
+ * Triggered when the user-facing kk_drop call returns to depth 0 (i.e.
+ * the outer drop's cascade has fully unwound) and roots_buf has at
+ * least KK_CYCLE_THRESHOLD candidates queued.  Re-entry guard via the
+ * depth counter — kk_cycle_collect calls kk_drop internally on white
+ * (garbage) cells; running from inside an active cascade segfaults.
+ *
+ * Default threshold 100k candidates (≈ 1 ms collection on
+ * surd-quintic-scale heaps); tune via KK_CYCLE_THRESHOLD=N.  Set N=0
+ * to disable. */
+static __thread int kk_drop_depth = 0;
+
 void kk_drop(int64_t ptr) {
-    if (!kk_is_heap_ptr(ptr)) return;
-    if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
-    if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) return;
+    kk_drop_depth++;
+    if (!kk_is_heap_ptr(ptr)) { kk_drop_depth--; return; }
+    if (kk_is_string(ptr)) { kk_str_drop(ptr); kk_drop_depth--; return; }
+    if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) { kk_drop_depth--; return; }
     int64_t* rc = kk_rc_ptr(ptr);
     int64_t count = *rc & KK_RC_MASK;
-    if (count == 0) return;  /* already freed or corrupt — don't double-free */
+    if (count == 0) { kk_drop_depth--; return; }  /* already freed or corrupt — don't double-free */
     if (count > 1) {
         /* Shared — just decrement (preserve color and nfields) */
         *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | (count - 1);
+        kk_drop_depth--;
         return;
     }
     /* Sole owner (rc == 1) — drop children, then free.
@@ -262,6 +278,22 @@ void kk_drop(int64_t ptr) {
         }
     } else {
         kk_arena_free(block);
+    }
+    kk_drop_depth--;
+    /* If we've unwound to the top-level user kk_drop call and the
+     * cycle-candidate buffer is large, run a collection cycle.  The
+     * depth check prevents re-entry into the collector from inside a
+     * cascade (which segfaults).  Disabled by default; opt in via
+     * KK_CYCLE_THRESHOLD=N (collect when roots_buf hits N candidates). */
+    if (kk_drop_depth == 0) {
+        static int64_t threshold = -1;
+        if (threshold == -1) {
+            const char* v = getenv("KK_CYCLE_THRESHOLD");
+            threshold = (v && v[0]) ? atoll(v) : 0;  /* default OFF */
+        }
+        if (threshold > 0 && kk_cycle_roots_count() >= threshold) {
+            kk_cycle_collect();
+        }
     }
 }
 

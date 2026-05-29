@@ -200,10 +200,19 @@ void kk_drop(int64_t ptr) {
          * scope encloses every closure that references them). */
     } else if (tag == KK_THUNK_TAG) {
         /* Thunks: field 0 = evaluated flag (integer, skip).
-         * Field 1 = fn_ptr if unevaluated, cached result if evaluated.
-         * Only drop field 1 when evaluated (cached result is a heap value). */
-        if (fields[0] != 0)  /* evaluated */
-            kk_drop(fields[1]);
+         * Field 1 = closure ptr (unevaluated) or cached result (evaluated)
+         * — heap pointer in BOTH states.  Always drop it.  The old
+         * comment + code only dropping when evaluated leaked every
+         * unevaluated thunk's closure forever; surd-quintic's stream
+         * thunks built by countFrom hit this every cons-cell-cascade
+         * (every parent CONS that drops to rc=0 sees its tail thunk
+         * stay alive because the thunk's closure stays alive,
+         * keeping the thunk's rc above zero indirectly).
+         *
+         * Stat measured on surd-quintic-under-recycle: LAZY tag had
+         * 5187 allocations and 0 cascade-drops — every single thunk
+         * leaked its closure. */
+        kk_drop(fields[1]);
     } else if (tag == KK_EVV_TAG) {
         /* Evidence vectors (legacy): all fields are handler fn pointers — skip */
     } else if (tag == KK_EVV2_TAG) {

@@ -134,19 +134,24 @@ void kk_tag_stats_drop(int64_t tag);  /* forward decl */
 static __thread int kk_drop_depth = 0;
 
 void kk_drop(int64_t ptr) {
-    kk_drop_depth++;
-    if (!kk_is_heap_ptr(ptr)) { kk_drop_depth--; return; }
-    if (kk_is_string(ptr)) { kk_str_drop(ptr); kk_drop_depth--; return; }
-    if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) { kk_drop_depth--; return; }
+    /* Fast prologue — no depth tracking on early returns since they
+     * don't cascade.  TLS writes on the hot path (every non-heap drop,
+     * every shared rc>1 drop, every freelist hit) added ~10% to total
+     * runtime on surd-quintic. */
+    if (!kk_is_heap_ptr(ptr)) return;
+    if (kk_is_string(ptr)) { kk_str_drop(ptr); return; }
+    if (!kk_arena_maybe_owns((const void*)(intptr_t)ptr)) return;
     int64_t* rc = kk_rc_ptr(ptr);
     int64_t count = *rc & KK_RC_MASK;
-    if (count == 0) { kk_drop_depth--; return; }  /* already freed or corrupt — don't double-free */
+    if (count == 0) return;  /* already freed or corrupt — don't double-free */
     if (count > 1) {
         /* Shared — just decrement (preserve color and nfields) */
         *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | (count - 1);
-        kk_drop_depth--;
         return;
     }
+    /* From here on: cell is going to rc=0 and we cascade.  This is the
+     * only path that needs depth tracking for the cycle-collect trigger. */
+    kk_drop_depth++;
     /* Sole owner (rc == 1) — drop children, then free.
      *
      * kk_thunk_force retains cached results on every read, so lazy
@@ -262,10 +267,12 @@ void kk_drop(int64_t ptr) {
      * blocks (oversized / KK_NO_ARENA), kk_arena_free still calls
      * free().
      *
-     * The freelist is opt-in via KK_RECYCLE=1 because surd-quintic
-     * (and likely other Idris2-shim workloads) has at least one
-     * use-after-drop path that the leak-everything arena masks;
-     * enabling recycle naïvely segfaults within seconds. */
+     * The freelist is opt-in via KK_RECYCLE=1.  The Idris2-shim
+     * emit path is now clean enough to enable it (surd-trig/euler/
+     * elliptic/quintic all byte-clean under recycle), but the GHC
+     * bridge still has refcount imbalances that the leak-everything
+     * arena masks (show-derived shows garbled output under recycle).
+     * Default-on awaits a GHC-bridge audit. */
     void* block = (void*)(intptr_t)(ptr - 8);
     if (kk_arena_maybe_owns(block)) {
         static int recycle_enabled = -1;

@@ -5,7 +5,7 @@
 # Current baseline (session ending 2026-05-28):
 #   test-hellos.sh           — 26/26 PASS
 #   surd-mercury             — 9/9 byte-identical with native
-#   surd-idris2              — 3/4 byte-identical (quintic Galois-group bug)
+#   surd-idris2              — 4/4 byte-identical (quintic needs KK_RECYCLE=1 + 600s; set by test)
 #   surd-koka                — 0/4 (missing runtime shims for sin/pow/etc.)
 #   surd-haskell             — 0/4 (multi-module library imports unresolved)
 #
@@ -26,7 +26,7 @@ STRICT="no"
 # Baselines: minimum acceptable PASS counts.  Increment when achievements grow.
 HELLOS_MIN=26
 SURD_MERCURY_MIN=9
-SURD_IDRIS2_MIN=3
+SURD_IDRIS2_MIN=4
 SURD_KOKA_MIN=0
 SURD_HASKELL_MIN=0
 

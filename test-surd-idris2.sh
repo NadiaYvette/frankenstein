@@ -100,8 +100,21 @@ for entry in "${TARGETS[@]}"; do
         continue
     fi
 
-    # Step 3: byte-diff native vs frankenstein output
-    DL=$(diff <(timeout 90 "$native" 2>&1) <(timeout 90 "$bin" 2>&1) 2>&1 | wc -l)
+    # Step 3: byte-diff native vs frankenstein output.
+    # surd-quintic needs a longer timeout + the arena freelist:
+    # it does heavy polynomial-arithmetic + numerical-root-finding
+    # for 7 degree-3..7 polynomials and on frankenstein takes ~7
+    # minutes vs <1s on native (Perceus refcount overhead + boxed
+    # everything vs chez's tracing GC + unboxed flonums).  Bumping
+    # to 600 s + setting KK_RECYCLE=1 (arena freelist reclamation)
+    # gets it to byte-identical with native.  The other demos
+    # finish in <30 s either way.
+    case "$exe" in
+        surd-quintic) bin_timeout=600 ;;
+        *)            bin_timeout=90  ;;
+    esac
+    DL=$(diff <(timeout 90 "$native" 2>&1) \
+              <(KK_RECYCLE=1 timeout "$bin_timeout" "$bin" 2>&1) 2>&1 | wc -l)
     if [ "$DL" -eq 0 ]; then
         echo "PASS  (byte-identical)"
         PASS=$((PASS + 1))

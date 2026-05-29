@@ -64,8 +64,14 @@ promoteRecursiveLambdas scope capMap expr = case expr of
   EApp f args ->
     let f'    = promoteRecursiveLambdas scope capMap f
         args' = map (promoteRecursiveLambdas scope capMap) args
-    in case f' of
-      EVar n | Just caps <- Map.lookup n capMap ->
+        -- The callee may be EVar n directly OR ETypeApp (EVar n) ts.
+        -- Both refer to the same name n; treat them uniformly.
+        mTarget = case f' of
+          EVar n                -> Just n
+          ETypeApp (EVar n) _   -> Just n
+          _                     -> Nothing
+    in case mTarget of
+      Just n | Just caps <- Map.lookup n capMap ->
         -- Prepend the captures as explicit args.  Subsequent passes
         -- (Perceus, then the emitter) see a fully-saturated call.
         EApp f' ([EVar c | c <- caps] ++ args')
@@ -111,9 +117,14 @@ handleLet scope capMap [] body =
 handleLet scope capMap (bg : rest) body =
   let groupNames = Set.fromList [bindName b | b <- bg]
       scope'     = scope `Set.union` groupNames
-      isRecLam b = case bindExpr b of
-        ELam _ _ -> isRecursive bg b
-        _        -> False
+      -- The MLIR emitter's @isLambda@ predicate (which decides whether
+      -- to promote a binding to a top-level func.func) unwraps through
+      -- @ETypeLam@ and @EDelay@.  Mirror that here so polymorphic and
+      -- delayed recursive lambdas also get capture-promoted.  If we
+      -- miss them, the emitter still promotes-with-captures but Perceus
+      -- sees implicit captures and inserts the same spurious drop the
+      -- pass is meant to eliminate.
+      isRecLam b = isLambdaExpr (bindExpr b) && isRecursive bg b
       (recLams, otherBinds) = partitionBy isRecLam bg
   in if null recLams
      then
@@ -128,20 +139,24 @@ handleLet scope capMap (bg : rest) body =
 
            rewriteRecLam b =
              let caps = Map.findWithDefault [] (bindName b) newCapMap
-                 (params, lamBody) = case bindExpr b of
-                   ELam ps lb -> (ps, lb)
-                   _          -> error "PromoteRecursiveLambdas: rewriteRecLam non-lambda"
-                 -- Prepend captures as new leading params.  TAny is a
-                 -- conservative type — the MLIR emitter ignores per-param
-                 -- types and flows everything as i64.
+                 -- @bindExpr b@ may be @ELam …@ or wrapped in @ETypeLam@/
+                 -- @EDelay@ (the emitter's @unwrapLambda@ peels those).
+                 -- Rewrite only the innermost ELam; preserve the outer
+                 -- wrappers so the type abstraction / delay semantics
+                 -- survive.
                  capParams = [(c, anyType) | c <- caps]
-                 newParams = capParams ++ params
                  innerScope = scope
                               `Set.union` Set.fromList caps
-                              `Set.union` Set.fromList (map fst params)
                               `Set.union` groupNames
-                 newBody = promoteRecursiveLambdas innerScope newCapMap lamBody
-             in b { bindExpr = ELam newParams newBody }
+                 rewriteInner expr = case expr of
+                   ELam ps lb ->
+                     let innerScope' = innerScope `Set.union` Set.fromList (map fst ps)
+                         newBody = promoteRecursiveLambdas innerScope' newCapMap lb
+                     in ELam (capParams ++ ps) newBody
+                   ETypeLam tvs inner -> ETypeLam tvs (rewriteInner inner)
+                   EDelay inner       -> EDelay (rewriteInner inner)
+                   _                  -> error "PromoteRecursiveLambdas: rewriteRecLam expected lambda after unwrap"
+             in b { bindExpr = rewriteInner (bindExpr b) }
 
            recLams'    = map rewriteRecLam recLams
            otherBinds' = map (\b -> b { bindExpr = promoteRecursiveLambdas scope' newCapMap (bindExpr b) })
@@ -149,6 +164,21 @@ handleLet scope capMap (bg : rest) body =
            bg'         = recLams' ++ otherBinds'
            rest'       = handleLet scope' newCapMap rest body
        in ELet [bg'] rest'
+
+-- | Does an expression denote a lambda once @ETypeLam@/@EDelay@
+-- wrappers are peeled?  Mirrors the MLIR emitter's @isLambda@.
+isLambdaExpr :: Expr -> Bool
+isLambdaExpr (ELam _ _)     = True
+isLambdaExpr (ETypeLam _ e) = isLambdaExpr e
+isLambdaExpr (EDelay e)     = isLambdaExpr e
+isLambdaExpr _              = False
+
+-- | Peel @ETypeLam@/@EDelay@ wrappers to reach the underlying @ELam@.
+-- Mirrors the MLIR emitter's @unwrapLambda@.
+unwrapLambdaExpr :: Expr -> Expr
+unwrapLambdaExpr (ETypeLam _ e) = unwrapLambdaExpr e
+unwrapLambdaExpr (EDelay e)     = unwrapLambdaExpr e
+unwrapLambdaExpr e              = e
 
 -- | A binding is recursive in its group if its body references any
 -- name bound by the group.
@@ -164,7 +194,11 @@ isRecursive bg b =
 computeCapturesFixpoint :: Set Name -> Set Name -> Map Name [Name] -> [Bind] -> Map Name [Name]
 computeCapturesFixpoint scope groupNames priorCaps recLams =
   let directCapsOf b =
-        let (params, body) = case bindExpr b of
+        -- Peel @ETypeLam@/@EDelay@ to reach the inner @ELam@ — same
+        -- treatment as @rewriteRecLam@.  Free-var analysis on the
+        -- @ETypeLam@-wrapped form already skips type variables; what
+        -- we want is the value-level params of the inner lambda.
+        let (params, body) = case unwrapLambdaExpr (bindExpr b) of
               ELam ps bd -> (ps, bd)
               _          -> error "PromoteRecursiveLambdas: directCapsOf non-lambda"
             paramNames = Set.fromList (map fst params)

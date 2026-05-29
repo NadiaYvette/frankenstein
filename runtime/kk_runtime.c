@@ -283,13 +283,16 @@ void kk_drop(int64_t ptr) {
     /* If we've unwound to the top-level user kk_drop call and the
      * cycle-candidate buffer is large, run a collection cycle.  The
      * depth check prevents re-entry into the collector from inside a
-     * cascade (which segfaults).  Disabled by default; opt in via
-     * KK_CYCLE_THRESHOLD=N (collect when roots_buf hits N candidates). */
+     * cascade (which would segfault).  Default threshold is 10k —
+     * commit c37b7a7 made the collector safe at any threshold by
+     * converting traversal to iterative and guarding stale pointers
+     * with the freelist sentinel + arena ownership checks.
+     * Set KK_CYCLE_THRESHOLD=0 to disable. */
     if (kk_drop_depth == 0) {
         static int64_t threshold = -1;
         if (threshold == -1) {
             const char* v = getenv("KK_CYCLE_THRESHOLD");
-            threshold = (v && v[0]) ? atoll(v) : 0;  /* default OFF */
+            threshold = (v && v[0]) ? atoll(v) : 10000;  /* default ON */
         }
         if (threshold > 0 && kk_cycle_roots_count() >= threshold) {
             kk_cycle_collect();

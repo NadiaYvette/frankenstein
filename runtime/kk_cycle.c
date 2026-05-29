@@ -135,103 +135,241 @@ int64_t kk_nfields(int64_t ptr) {
  * For closures we skip field 0, which holds a raw function pointer. */
 static void for_each_child(int64_t ptr, void (*fn)(int64_t child)) {
     if (!kk_is_heap_ptr(ptr)) return;
+    /* Bound nf: kk_alloc_con clamps to 255.  A recycled-or-corrupt
+     * cell can have rc-word bits that decode to an absurdly large
+     * nfields and the loop walks into unmapped memory.  Reject
+     * implausible values silently. */
     int64_t nf = kk_nfields(ptr);
+    if (nf < 0 || nf > 255) return;
     int64_t* fields = (int64_t*)(ptr + 8);
     int64_t tag_w = *(int64_t*)ptr;
-    /* Borrow closures (CLOB) skip ALL captures during traversal —
-     * they don't own them.  Regular closures (CLOS) skip field 0
-     * (raw fn ptr) and walk captures. */
     if (tag_w == KK_CLOSBOR_TAG) return;
     int64_t start = (tag_w == KK_CLOSURE_TAG) ? 1 : 0;
     for (int64_t i = start; i < nf; i++) {
         int64_t child = fields[i];
-        if (kk_is_heap_ptr(child)) {
-            fn(child);
-        }
+        if (!kk_is_heap_ptr(child)) continue;
+        /* Reject children that aren't arena-owned: malloc'd or
+         * unmapped addresses don't participate in cycles via the
+         * candidate API and dereferencing them segfaults. */
+        if (!kk_arena_maybe_owns((const void*)(uintptr_t)child)) continue;
+        fn(child);
     }
 }
 
 /* ---- Phase 1: MarkRoots — trial-delete internal references ---- */
 
-static void mark_gray(int64_t ptr);
-
-static void mark_gray_child(int64_t child) {
-    kk_rc_decrement(child);
-    if (kk_get_color(child) != KK_COLOR_GRAY) {
-        mark_gray(child);
-    }
+/* Reject pointers that look like freelist entries — kk_arena_recycle_put
+ * leaves block[0]=0 (rc word) and block[1]'s high bit set (KK_RECYCLE_FLAG
+ * on the freelist next-ptr).  If we traverse into one of those during
+ * mark_gray/scan/collect_white the recursion processes garbage and
+ * sometimes infinite-loops the stack.  ptr points to block[1] (the tag
+ * slot) — bit 63 of *ptr is the recycle flag. */
+#define KK_RECYCLE_FLAG ((int64_t)1 << 63)
+static inline int kk_is_freelist_cell(int64_t ptr) {
+    int64_t* rc = (int64_t*)(ptr - 8);
+    if ((*rc & 0xFFFFFFFFFFFFFFLL) != 0) return 0;  /* live: rc/nfields/color nonzero */
+    return (*(int64_t*)ptr & KK_RECYCLE_FLAG) != 0;
 }
 
-static void mark_gray(int64_t ptr) {
-    if (!kk_is_heap_ptr(ptr)) return;
-    if (kk_get_color(ptr) == KK_COLOR_GRAY) return;
-    kk_set_color(ptr, KK_COLOR_GRAY);
-    for_each_child(ptr, mark_gray_child);
+/* Iterative mark_gray.  Surd-quintic builds polynomial coefficient
+ * lists that recurse deeper than the default 8 MiB pthread stack
+ * — recursive mark_gray overflows and segfaults.  Use a heap-grown
+ * work queue instead.
+ *
+ * mark_gray's job is two-fold:
+ *  - decrement the child's rc (trial deletion)
+ *  - recurse into child's children if it's not already GRAY
+ * The decrement happens once per (parent, child) edge — push every
+ * child we encounter onto the queue.  Setting GRAY before pushing
+ * doesn't help because we want the decrement for every edge.
+ *
+ * Two-stack pattern:
+ *  - rc_queue: cells to decrement-and-recurse (children to visit)
+ *  - grey_queue: cells to mark gray and walk THEIR children
+ * Avoids duplicating the per-edge decrement vs. per-cell grey-mark. */
+static int64_t* mg_queue = NULL;
+static int64_t  mg_queue_cap = 0;
+static int64_t  mg_queue_len = 0;
+static void mg_queue_push(int64_t ptr) {
+    if (mg_queue_len >= mg_queue_cap) {
+        int64_t new_cap = mg_queue_cap < 1024 ? 1024 : mg_queue_cap * 2;
+        int64_t* p = (int64_t*)realloc(mg_queue, (size_t)new_cap * sizeof(int64_t));
+        if (!p) return;  /* OOM: abandon; collection becomes incomplete */
+        mg_queue = p;
+        mg_queue_cap = new_cap;
+    }
+    mg_queue[mg_queue_len++] = ptr;
+}
+
+static void mark_gray_visit_child(int64_t child) {
+    if (!kk_is_heap_ptr(child)) return;
+    kk_rc_decrement(child);
+    if (kk_is_freelist_cell(child)) return;
+    if (kk_get_color(child) == KK_COLOR_GRAY) return;
+    mg_queue_push(child);
+}
+
+static void mark_gray(int64_t root) {
+    if (!kk_is_heap_ptr(root)) return;
+    if (kk_is_freelist_cell(root)) return;
+    if (kk_get_color(root) == KK_COLOR_GRAY) return;
+    mg_queue_push(root);
+    while (mg_queue_len > 0) {
+        int64_t ptr = mg_queue[--mg_queue_len];
+        if (kk_is_freelist_cell(ptr)) continue;
+        if (kk_get_color(ptr) == KK_COLOR_GRAY) continue;
+        kk_set_color(ptr, KK_COLOR_GRAY);
+        for_each_child(ptr, mark_gray_visit_child);
+    }
 }
 
 /* ---- Phase 2: ScanRoots — identify garbage (white) vs live (black) ---- */
 
-static void scan(int64_t ptr);
-static void scan_black(int64_t ptr);
+/* Each phase uses its own work queue (kept across calls so allocation
+ * cost amortizes).  Iterative everywhere — recursion blew the stack
+ * on surd-quintic's deep cons-cell chains. */
+static int64_t* sb_queue = NULL;
+static int64_t  sb_queue_cap = 0;
+static int64_t  sb_queue_len = 0;
+static void sb_queue_push(int64_t ptr) {
+    if (sb_queue_len >= sb_queue_cap) {
+        int64_t new_cap = sb_queue_cap < 1024 ? 1024 : sb_queue_cap * 2;
+        int64_t* p = (int64_t*)realloc(sb_queue, (size_t)new_cap * sizeof(int64_t));
+        if (!p) return;
+        sb_queue = p;
+        sb_queue_cap = new_cap;
+    }
+    sb_queue[sb_queue_len++] = ptr;
+}
 
-static void scan_black_child(int64_t child) {
+static void scan_black_visit_child(int64_t child) {
+    if (!kk_is_heap_ptr(child)) return;
     kk_rc_increment(child);
-    if (kk_get_color(child) != KK_COLOR_BLACK) {
-        scan_black(child);
+    if (kk_is_freelist_cell(child)) return;
+    if (kk_get_color(child) == KK_COLOR_BLACK) return;
+    sb_queue_push(child);
+}
+
+static void scan_black(int64_t root) {
+    if (!kk_is_heap_ptr(root)) return;
+    if (kk_is_freelist_cell(root)) return;
+    sb_queue_push(root);
+    while (sb_queue_len > 0) {
+        int64_t ptr = sb_queue[--sb_queue_len];
+        if (kk_is_freelist_cell(ptr)) continue;
+        if (kk_get_color(ptr) == KK_COLOR_BLACK) continue;
+        kk_set_color(ptr, KK_COLOR_BLACK);
+        for_each_child(ptr, scan_black_visit_child);
     }
 }
 
-static void scan_black(int64_t ptr) {
-    if (!kk_is_heap_ptr(ptr)) return;
-    kk_set_color(ptr, KK_COLOR_BLACK);
-    for_each_child(ptr, scan_black_child);
+/* scan walks gray-rooted cells iteratively.  Uses scan_visit_child
+ * to enqueue children for further scan-processing.  When a cell has
+ * rc>0 (external refs), scan_black is invoked — it uses its own
+ * sb_queue so scan's queue isn't disturbed. */
+static int64_t* sc_queue = NULL;
+static int64_t  sc_queue_cap = 0;
+static int64_t  sc_queue_len = 0;
+static void sc_queue_push(int64_t ptr) {
+    if (sc_queue_len >= sc_queue_cap) {
+        int64_t new_cap = sc_queue_cap < 1024 ? 1024 : sc_queue_cap * 2;
+        int64_t* p = (int64_t*)realloc(sc_queue, (size_t)new_cap * sizeof(int64_t));
+        if (!p) return;
+        sc_queue = p;
+        sc_queue_cap = new_cap;
+    }
+    sc_queue[sc_queue_len++] = ptr;
 }
 
-static void scan_child(int64_t child) {
-    scan(child);
+static void scan_visit_child(int64_t child) {
+    if (!kk_is_heap_ptr(child)) return;
+    if (kk_is_freelist_cell(child)) return;
+    if (kk_get_color(child) != KK_COLOR_GRAY) return;
+    sc_queue_push(child);
 }
 
-static void scan(int64_t ptr) {
-    if (!kk_is_heap_ptr(ptr)) return;
-    if (kk_get_color(ptr) != KK_COLOR_GRAY) return;
-    if (kk_get_rc(ptr) > 0) {
-        /* External reference exists — this object is live */
-        scan_black(ptr);
-    } else {
-        /* No external references — this is garbage */
-        kk_set_color(ptr, KK_COLOR_WHITE);
-        for_each_child(ptr, scan_child);
+static void scan(int64_t root) {
+    if (!kk_is_heap_ptr(root)) return;
+    if (kk_is_freelist_cell(root)) return;
+    if (kk_get_color(root) != KK_COLOR_GRAY) return;
+    sc_queue_push(root);
+    while (sc_queue_len > 0) {
+        int64_t ptr = sc_queue[--sc_queue_len];
+        if (kk_is_freelist_cell(ptr)) continue;
+        if (kk_get_color(ptr) != KK_COLOR_GRAY) continue;
+        if (kk_get_rc(ptr) > 0) {
+            scan_black(ptr);  /* uses sb_queue, not sc_queue */
+        } else {
+            kk_set_color(ptr, KK_COLOR_WHITE);
+            for_each_child(ptr, scan_visit_child);
+        }
     }
 }
 
 /* ---- Phase 3: CollectRoots — free white objects ---- */
 
-static void collect_white(int64_t ptr) {
-    if (!kk_is_heap_ptr(ptr)) return;
-    if (kk_get_color(ptr) != KK_COLOR_WHITE) return;
-
-    /* Mark black to prevent double-free */
-    kk_set_color(ptr, KK_COLOR_BLACK);
-
-    /* Recursively collect children first */
-    int64_t nf = kk_nfields(ptr);
-    int64_t* fields = (int64_t*)(ptr + 8);
-    int64_t tag_w = *(int64_t*)ptr;
-    /* Borrow closures (CLOB) skip ALL captures during traversal —
-     * they don't own them.  Regular closures (CLOS) skip field 0
-     * (raw fn ptr) and walk captures. */
-    if (tag_w == KK_CLOSBOR_TAG) return;
-    int64_t start = (tag_w == KK_CLOSURE_TAG) ? 1 : 0;
-    for (int64_t i = start; i < nf; i++) {
-        int64_t child = fields[i];
-        collect_white(child);
+/* Iterative collect_white.  Two-phase: mark all reachable WHITE
+ * cells BLACK (collecting their addresses), then free them.  The
+ * mark-black-on-visit trick prevents double-processing under
+ * iteration the same way it does under recursion. */
+static int64_t* cw_queue = NULL;
+static int64_t  cw_queue_cap = 0;
+static int64_t  cw_queue_len = 0;
+static int64_t* cw_freed = NULL;
+static int64_t  cw_freed_cap = 0;
+static int64_t  cw_freed_len = 0;
+static void cw_queue_push(int64_t ptr) {
+    if (cw_queue_len >= cw_queue_cap) {
+        int64_t new_cap = cw_queue_cap < 1024 ? 1024 : cw_queue_cap * 2;
+        int64_t* p = (int64_t*)realloc(cw_queue, (size_t)new_cap * sizeof(int64_t));
+        if (!p) return;
+        cw_queue = p;
+        cw_queue_cap = new_cap;
     }
+    cw_queue[cw_queue_len++] = ptr;
+}
+static void cw_freed_push(int64_t ptr) {
+    if (cw_freed_len >= cw_freed_cap) {
+        int64_t new_cap = cw_freed_cap < 1024 ? 1024 : cw_freed_cap * 2;
+        int64_t* p = (int64_t*)realloc(cw_freed, (size_t)new_cap * sizeof(int64_t));
+        if (!p) return;
+        cw_freed = p;
+        cw_freed_cap = new_cap;
+    }
+    cw_freed[cw_freed_len++] = ptr;
+}
 
-    /* Unregister and free. Arena-owned cells are not individually
-     * reclaimed; kk_arena_free is a no-op for them. */
-    kk_unregister_nfields(ptr);
-    total_collected++;
-    kk_arena_free((void*)(ptr - 8));
+static void collect_white(int64_t root) {
+    if (!kk_is_heap_ptr(root)) return;
+    if (kk_is_freelist_cell(root)) return;
+    if (kk_get_color(root) != KK_COLOR_WHITE) return;
+
+    cw_queue_push(root);
+    /* Phase A: walk every reachable WHITE cell, mark BLACK, collect ptr */
+    while (cw_queue_len > 0) {
+        int64_t ptr = cw_queue[--cw_queue_len];
+        if (kk_is_freelist_cell(ptr)) continue;
+        if (kk_get_color(ptr) != KK_COLOR_WHITE) continue;
+        kk_set_color(ptr, KK_COLOR_BLACK);
+        cw_freed_push(ptr);
+
+        int64_t tag_w = *(int64_t*)ptr;
+        if (tag_w == KK_CLOSBOR_TAG) continue;  /* doesn't own captures */
+        int64_t nf = kk_nfields(ptr);
+        int64_t* fields = (int64_t*)(ptr + 8);
+        int64_t start = (tag_w == KK_CLOSURE_TAG) ? 1 : 0;
+        for (int64_t i = start; i < nf; i++) {
+            int64_t child = fields[i];
+            if (kk_is_heap_ptr(child)) cw_queue_push(child);
+        }
+    }
+    /* Phase B: free each */
+    while (cw_freed_len > 0) {
+        int64_t ptr = cw_freed[--cw_freed_len];
+        kk_unregister_nfields(ptr);
+        total_collected++;
+        kk_arena_free((void*)(ptr - 8));
+    }
 }
 
 /* ---- Public API ---- */
@@ -252,13 +390,21 @@ int64_t kk_cycle_collect(void) {
 
     int64_t freed_before = total_collected;
 
-    /* Phase 1: MarkRoots — trial-delete internal references */
+    /* Phase 1: MarkRoots — trial-delete internal references.
+     * kk_is_heap_ptr only checks alignment + the >0x10000 floor; it
+     * doesn't verify the memory is mapped.  At higher collection
+     * frequencies, the roots_buf accumulates stale pointers to cells
+     * that have been freed and possibly unmapped/recycled to a
+     * different size.  Guard reads of *ptr behind kk_arena_maybe_owns
+     * which range-checks against the arena slab list. */
     for (int64_t i = 0; i < roots_len; i++) {
         int64_t ptr = roots_buf[i];
-        if (kk_is_heap_ptr(ptr) && kk_get_color(ptr) == KK_COLOR_PURPLE) {
+        if (kk_is_heap_ptr(ptr)
+            && kk_arena_maybe_owns((const void*)(uintptr_t)ptr)
+            && !kk_is_freelist_cell(ptr)
+            && kk_get_color(ptr) == KK_COLOR_PURPLE) {
             mark_gray(ptr);
         } else {
-            /* No longer a candidate (already freed or re-colored) */
             roots_buf[i] = 0;
         }
     }
@@ -266,7 +412,8 @@ int64_t kk_cycle_collect(void) {
     /* Phase 2: ScanRoots — identify live (black) vs garbage (white) */
     for (int64_t i = 0; i < roots_len; i++) {
         int64_t ptr = roots_buf[i];
-        if (ptr != 0) {
+        if (ptr != 0 && kk_arena_maybe_owns((const void*)(uintptr_t)ptr)
+                     && !kk_is_freelist_cell(ptr)) {
             scan(ptr);
         }
     }
@@ -274,14 +421,13 @@ int64_t kk_cycle_collect(void) {
     /* Phase 3: CollectRoots — free white objects */
     for (int64_t i = 0; i < roots_len; i++) {
         int64_t ptr = roots_buf[i];
-        if (ptr != 0) {
+        if (ptr != 0 && kk_arena_maybe_owns((const void*)(uintptr_t)ptr)
+                     && !kk_is_freelist_cell(ptr)) {
             collect_white(ptr);
         }
     }
 
-    /* Reset roots buffer */
     roots_len = 0;
-
     return total_collected - freed_before;
 }
 

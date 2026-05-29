@@ -3,6 +3,7 @@ module Main (main) where
 import Frankenstein.Core.Types
 import Frankenstein.Core.Perceus (insertPerceus)
 import Frankenstein.Core.ElideConsumedDrops (elideConsumedDropsProgram)
+import Frankenstein.Core.PromoteRecursiveLambdas (promoteRecursiveLambdasProgram)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.Core.Evidence (evidencePassGlobal, collectGlobalEffects)
 import qualified Frankenstein.Core.EvidenceEvv as EvidenceEvv
@@ -571,8 +572,16 @@ handleOutput progRaw flags = do
   -- so it sees the actual EDrop bindings.  Opt-out via
   -- FRANKENSTEIN_NO_ELIDE_DROPS for A/B comparison.
   noElide <- lookupEnv "FRANKENSTEIN_NO_ELIDE_DROPS"
+  noPromote <- lookupEnv "FRANKENSTEIN_NO_PROMOTE_REC_LAMBDAS"
+  -- Promote captures of recursive let-bound lambdas to explicit leading
+  -- params BEFORE Perceus, so Perceus's per-branch usage analysis sees
+  -- the explicit args at recursive call sites.  Without this, Perceus
+  -- inserts a balancing drop on a capture in branches that, post-lift,
+  -- pass that capture to the recursive call — the drop frees the cell
+  -- before the call dereferences it.  See memory/ghc_bridge_refcount.md.
+  let progPromoted = (if noPromote == Nothing then promoteRecursiveLambdasProgram else id) progEv
   let prog = (if noElide == Nothing then elideConsumedDropsProgram else id)
-             $ insertPerceus progEv
+             $ insertPerceus progPromoted
       config = defaultEmitConfig
         { ecOutputPath = flagOutput flags
         , ecKokaRuntimePath = Just "runtime/kk_runtime.c"

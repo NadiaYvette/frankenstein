@@ -572,14 +572,19 @@ handleOutput progRaw flags = do
   -- so it sees the actual EDrop bindings.  Opt-out via
   -- FRANKENSTEIN_NO_ELIDE_DROPS for A/B comparison.
   noElide <- lookupEnv "FRANKENSTEIN_NO_ELIDE_DROPS"
-  noPromote <- lookupEnv "FRANKENSTEIN_NO_PROMOTE_REC_LAMBDAS"
   -- Promote captures of recursive let-bound lambdas to explicit leading
   -- params BEFORE Perceus, so Perceus's per-branch usage analysis sees
   -- the explicit args at recursive call sites.  Without this, Perceus
   -- inserts a balancing drop on a capture in branches that, post-lift,
   -- pass that capture to the recursive call — the drop frees the cell
   -- before the call dereferences it.  See memory/ghc_bridge_refcount.md.
-  let progPromoted = (if noPromote == Nothing then promoteRecursiveLambdasProgram else id) progEv
+  --
+  -- Opt-IN via FRANKENSTEIN_PROMOTE_REC_LAMBDAS=1.  Default OFF because
+  -- the pass produces semantically-equivalent MLIR for small examples
+  -- but breaks the self-hosted compiler at stage 2 (stage 2 binary
+  -- SIGSEGVs on every example).  Investigation pending.
+  doPromote <- lookupEnv "FRANKENSTEIN_PROMOTE_REC_LAMBDAS"
+  let progPromoted = (if doPromote == Just "1" then promoteRecursiveLambdasProgram else id) progEv
   let prog = (if noElide == Nothing then elideConsumedDropsProgram else id)
              $ insertPerceus progPromoted
       config = defaultEmitConfig

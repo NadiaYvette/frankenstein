@@ -181,7 +181,52 @@ perceusExpr scope expr = case expr of
             mScrutVar = case scrut of
               EVar n -> Just n
               _      -> Nothing
-            branches' = map (perceusBranch scope mScrutVar) branches
+            -- Per-branch usage of OUTER variables (free in branch body
+            -- but not bound by the branch's pattern).  ECase counts
+            -- branches via max, so the outer wrapRetains is sized for
+            -- the heaviest branch; lighter branches must emit (max −
+            -- this) drops or they leak (max − this) refs each.  This
+            -- is the classic Perceus "balance branches" rule.
+            --
+            -- Concrete trigger: dropWhile's case-on-result-bool has
+            -- TRUE = 1 use of predicate (recurse), FALSE = 0 uses
+            -- (just build Cons).  Without this drop, every dropWhile
+            -- termination at the FALSE branch leaked one closure ref
+            -- — surd-quintic's 17.5M live CLOS cells.
+            patVarsSet br =
+              Set.fromList (map fst (patternVars (branchPattern br)))
+            scrutSet = case mScrutVar of
+              Just n  -> Set.singleton n  -- perceusBranch already drops it
+              Nothing -> Set.empty
+            -- Only emit drops on variables actually in scope.  Free
+            -- EVars not in scope are top-level fn refs, not heap
+            -- pointers — dropping them triggers PAP wrapper allocation
+            -- and segfaults.
+            branchOuterUsage br =
+              let patNames = patVarsSet br
+                  fullUsage = analyzeUsage (branchBody br)
+                  excluded k =  Set.member k patNames
+                             || Set.member k scrutSet
+                             || not (Map.member k scope)
+              in Map.filterWithKey (\k _ -> not (excluded k)) fullUsage
+            branchUsages = map branchOuterUsage branches
+            maxUsage = Map.unionsWith max branchUsages
+            mkDrops br' bu =
+              let body = branchBody br'
+                  vars = Map.keys maxUsage
+                  emitDrop n e = ELet [[Bind (Name "_drop" 0) unitType
+                                          (EDrop (EVar n)) DefVal]] e
+                  countDiff n = Map.findWithDefault 0 n maxUsage
+                              - Map.findWithDefault 0 n bu
+                  body' = foldr
+                    (\n e ->
+                       let d = countDiff n
+                       in if d > 0 then iterate (emitDrop n) e !! d else e)
+                    body vars
+              in br' { branchBody = body' }
+            branches' = zipWith
+              (\br bu -> mkDrops (perceusBranch scope mScrutVar br) bu)
+              branches branchUsages
         in ECase scrut' branches'
       _ ->
         let dsName = Name "_scrutinee" 0

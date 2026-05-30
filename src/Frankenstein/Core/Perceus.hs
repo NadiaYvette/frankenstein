@@ -1,3 +1,4 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 -- | Perceus Reference Counting Insertion
 --
 -- A Core-to-Core pass that inserts retain/drop/reuse operations
@@ -27,8 +28,6 @@ import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
-import System.Environment (lookupEnv)
-import System.IO.Unsafe (unsafePerformIO)
 
 -- | Check if a type is known to be unboxed (non-heap-allocated).
 -- Values of these types are plain machine integers, not heap pointers,
@@ -376,13 +375,17 @@ patternVars (PatLit _)      = []
 -- | Phase 12c step 4 gate.  When @FRANKENSTEIN_NEW_PERCEUS=1@ is set,
 -- 'analyzeUsage' returns counts under the Perceus-faithful semantics
 -- from 'Frankenstein.Core.ConsumingUses' rather than the legacy
--- surface-syntax heuristic.  Read once at startup; NOINLINE so GHC
--- doesn't memoize the value across runs of the binary.
+-- surface-syntax heuristic.
+--
+-- Dispatched via a pure foreign import to @kk_use_new_perceus@ in
+-- @runtime/kk_runtime.c@ — same gate the emitter uses.  See
+-- @Frankenstein.MlirEmit.Emitter.useNewPerceusCount@ for the
+-- rationale; the @unsafePerformIO@-based implementation broke the
+-- bootstrap (commit 89a49b9 root cause).
+foreign import ccall unsafe "kk_use_new_perceus" c_use_new_perceus_usage :: Int
+
 useNewPerceusUsage :: Bool
-useNewPerceusUsage = unsafePerformIO $ do
-  v <- lookupEnv "FRANKENSTEIN_NEW_PERCEUS"
-  pure (v == Just "1")
-{-# NOINLINE useNewPerceusUsage #-}
+useNewPerceusUsage = c_use_new_perceus_usage == 1
 
 -- | Analyze usage of variables in an expression.
 -- Returns a map from variable name to usage count.

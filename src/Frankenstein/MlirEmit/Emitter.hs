@@ -1,3 +1,4 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 -- | Frankenstein Core -> MLIR Emitter
 --
 -- Emits textual MLIR, then invokes mlir-opt → mlir-translate → clang
@@ -28,8 +29,6 @@ import qualified Data.Text.IO as TIO
 import qualified Data.ByteString as BS
 import Data.Word (Word8)
 import Data.IORef
-import System.Environment (lookupEnv)
-import System.IO.Unsafe (unsafePerformIO)
 import System.Process (readProcessWithExitCode, readProcess)
 import System.Exit (ExitCode(..))
 import Control.Monad (forM, forM_)
@@ -95,15 +94,22 @@ type Emit a = State EmitState a
 -- | Phase 12c step 3 gate.  When @FRANKENSTEIN_NEW_PERCEUS=1@,
 -- 'emitLambdaLift' replaces the legacy surface-syntax @countUses@
 -- heuristic with 'consumingUseCount' from
--- 'Frankenstein.Core.ConsumingUses'.  Read once at startup; the
--- NOINLINE pragma is required so GHC doesn't memoize the value
--- and miss the env var on later invocations (we read it inside
--- a pure function, so the IO is sequestered behind unsafePerformIO).
+-- 'Frankenstein.Core.ConsumingUses'.
+--
+-- Dispatched via a pure foreign import to @kk_use_new_perceus@ in
+-- @runtime/kk_runtime.c@.  The C function reads the env var once
+-- and caches the result; GHC treats the foreign import as a
+-- constant.  Previous implementation used @unsafePerformIO@ +
+-- @lookupEnv@, which introduced an undeclared dependency on
+-- @GHC.Internal.IO.Unsafe.unsafePerformIO@ and
+-- @GHC.Internal.System.Environment.lookupEnv@ — neither of which
+-- is shimmed in self-host, causing the stage 1 binary to crash
+-- with @FATAL: call1(0, ...)@ when its emit path consulted the
+-- gate (commit 89a49b9 root-cause analysis).
+foreign import ccall unsafe "kk_use_new_perceus" c_use_new_perceus :: Int
+
 useNewPerceusCount :: Bool
-useNewPerceusCount = unsafePerformIO $ do
-  v <- lookupEnv "FRANKENSTEIN_NEW_PERCEUS"
-  pure (v == Just "1")
-{-# NOINLINE useNewPerceusCount #-}
+useNewPerceusCount = c_use_new_perceus == 1
 
 freshName :: Text -> Emit Text
 freshName prefix = do

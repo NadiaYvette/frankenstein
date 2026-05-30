@@ -2721,6 +2721,30 @@ static void kk_flush_trace_sighandler(int sig) {
     raise(sig);
 }
 
+/* Phase 12c step 7: env-var dispatch for FRANKENSTEIN_NEW_PERCEUS
+ * without unsafePerformIO.  The Haskell side foreign-imports
+ * @kk_use_new_perceus@ as a pure @Int@; GHC treats the value as a
+ * constant after the first call.  This C function reads the env
+ * var once and caches the result.  Returns 1 if the env var is
+ * exactly "1", 0 otherwise.
+ *
+ * Implementing the gate as a foreign C function (instead of the
+ * previous @unsafePerformIO . lookupEnv@ pattern) removes the
+ * stage-1-binary dependency on @GHC.Internal.IO.Unsafe.unsafePerformIO@
+ * and @GHC.Internal.System.Environment.lookupEnv@ — neither of
+ * which is shimmed in the self-host runtime.  See commit 89a49b9
+ * for the root-cause analysis. */
+int kk_use_new_perceus(void) {
+    static int initialized = 0;
+    static int value = 0;
+    if (!initialized) {
+        const char* v = getenv("FRANKENSTEIN_NEW_PERCEUS");
+        value = (v && v[0] == '1' && v[1] == '\0') ? 1 : 0;
+        initialized = 1;
+    }
+    return value;
+}
+
 void kk_args_init(int argc, char** argv) {
     kk_g_argc = argc;
     kk_g_argv = argv;

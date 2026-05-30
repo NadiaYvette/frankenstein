@@ -86,6 +86,8 @@ library
         koka,
         organ-ir
     hs-source-dirs:   src
+    c-sources:
+        runtime/kk_perceus_flag.c
     default-language: GHC2024
 
 test-suite frankenstein-tests

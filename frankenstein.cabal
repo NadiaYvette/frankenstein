@@ -24,6 +24,7 @@ library
         Frankenstein.Core.FlattenPatterns
         Frankenstein.Core.ElideConsumedDrops
         Frankenstein.Core.PromoteRecursiveLambdas
+        Frankenstein.Core.ConsumingUses
         Frankenstein.Core.NormalizePatterns
         Frankenstein.Core.CpsConvert
         Frankenstein.Core.TypeCheck

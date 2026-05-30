@@ -89,6 +89,40 @@ static inline int kk_rc_trace_enabled(void) {
     return kk_rc_trace_on;
 }
 
+/* Phase 12c step 7 fast caller resolution.
+ *
+ * @dladdr@ does a linear search through the binary's symbol table,
+ * which on the self-host stage 1 (~70K symbols) takes ~30us per
+ * call.  At 1M+ trace events per crash, that's ~30s of pure
+ * dladdr — the predicate runs out of timeout before reaching FATAL.
+ *
+ * Cache results in a small open-addressing hash table keyed by the
+ * return-address pointer (the unique caller site, not the symbol).
+ * 65,536-entry direct-mapped cache; lookups are O(1) and collisions
+ * just re-resolve and overwrite, which is fine because trace
+ * accuracy isn't affected by occasional cache thrash. */
+#define KK_CALLER_CACHE_SIZE 65536
+typedef struct { void* key; const char* sym; } kk_caller_slot_t;
+static kk_caller_slot_t kk_caller_cache[KK_CALLER_CACHE_SIZE];
+
+static const char* kk_caller_name(void* caller) {
+    /* Fast hash: shift-and-xor of the pointer's middle bits.  Most
+     * caller addresses share the high bits (same .text section), so
+     * mixing in lower bits gives better distribution. */
+    uintptr_t h = (uintptr_t)caller;
+    h = (h >> 4) ^ (h >> 16);
+    h &= (KK_CALLER_CACHE_SIZE - 1);
+    if (kk_caller_cache[h].key == caller && kk_caller_cache[h].sym) {
+        return kk_caller_cache[h].sym;
+    }
+    Dl_info info;
+    const char* sym = "?";
+    if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;
+    kk_caller_cache[h].key = caller;
+    kk_caller_cache[h].sym = sym;
+    return sym;
+}
+
 static inline void kk_rc_trace_emit(const char* op, int64_t ptr,
                                     int64_t from, int64_t to,
                                     void* caller) {
@@ -111,9 +145,7 @@ static inline void kk_rc_trace_emit(const char* op, int64_t ptr,
      * normal runs. */
     if (clos_only && tag != 0x434C4F53 /* CLOS */
                   && tag != 0x434C4F42 /* CLOB */) return;
-    Dl_info info;
-    const char* sym = "?";
-    if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;
+    const char* sym = kk_caller_name(caller);
     fprintf(stderr, "%s 0x%lx rc=%ld→%ld tag=0x%lx caller=%s\n",
             op, (unsigned long)(uintptr_t)ptr,
             (long)from, (long)to, (long)tag, sym);
@@ -631,10 +663,8 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
              * The binary must be linked with -Wl,-export-dynamic
              * for user symbols to resolve; otherwise dladdr returns
              * "?" for all but the runtime's own functions. */
-            Dl_info info;
-            const char* sym = "?";
             void* caller = __builtin_return_address(0);
-            if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;
+            const char* sym = kk_caller_name(caller);
             fprintf(stderr, "ALLOC 0x%lx tag=%s nf=%ld caller=%s\n",
                     (unsigned long)(uintptr_t)ptr, tag_match,
                     (long)nfields, sym);
@@ -2822,10 +2852,8 @@ void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     if (trace_on && idx == 0) {
         int64_t tag = *(int64_t*)ptr;
         if (tag == 0x434C4F53 /* CLOS */ || tag == 0x434C4F42 /* CLOB */) {
-            Dl_info info;
-            const char* sym = "?";
             void* caller = __builtin_return_address(0);
-            if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;
+            const char* sym = kk_caller_name(caller);
             fprintf(stderr, "SETFIELD0 0x%lx fn=0x%lx caller=%s\n",
                     (unsigned long)(uintptr_t)ptr,
                     (unsigned long)(uintptr_t)value, sym);

@@ -93,6 +93,24 @@ static inline void kk_rc_trace_emit(const char* op, int64_t ptr,
                                     int64_t from, int64_t to,
                                     void* caller) {
     int64_t tag = *(int64_t*)ptr;
+    /* @KK_RC_TRACE_CLOS_ONLY=1@ restricts the trace to closure cells
+     * (the kind that produce call1(0, ...) crashes when freed
+     * prematurely).  Reduces trace volume ~10× on parser workloads
+     * and keeps the crash reachable within reasonable timeouts. */
+    static int clos_only_init = 0;
+    static int clos_only = 0;
+    if (!clos_only_init) {
+        const char* v = getenv("KK_RC_TRACE_CLOS_ONLY");
+        clos_only = (v && v[0] == '1' && v[1] == '\0');
+        clos_only_init = 1;
+    }
+    /* Inlined tag values (the @KK_CLOSURE_TAG@/@KK_CLOSBOR_TAG@
+     * macros are #defined later in the file).  Keep these in sync
+     * with the definitions below; the rc-trace path is only hit
+     * when @KK_RC_TRACE_CLOS_ONLY=1@ so a typo here is a no-op for
+     * normal runs. */
+    if (clos_only && tag != 0x434C4F53 /* CLOS */
+                  && tag != 0x434C4F42 /* CLOB */) return;
     Dl_info info;
     const char* sym = "?";
     if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;

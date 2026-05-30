@@ -1151,6 +1151,79 @@ without depending on the global semantics fix. Local to
 `KK_RECYCLE=1` without touching Core IR or runtime ABI. This is the
 near-term action while (12a) and (12b) bake.
 
+### 12c. True Perceus consuming-use analysis as a Core IR pass
+
+**Problem**: `emitLambdaLift`'s `countUses` is a surface-syntax heuristic,
+not a real Perceus analysis.  It approximates consuming uses as
+"per-name EVar mention count" but mis-handles every case where
+syntactic occurrence diverges from runtime consume:
+
+- Nested `ELam` bodies (uses are per-inner-invocation, not per-outer)
+- `EDelay` bodies (uses are per-force, not per-thunk-creation)
+- Pattern + let shadowing (inner binders with same `Name` aren't the
+  outer capture)
+- Distinct `Name`s with same text (GHC synthetic vars commonly do this)
+- Drop semantics: `EDrop e` consumes its inner @e@, while `ERetain` /
+  `ERelease` don't
+
+The current emitter walks the IR for each capture and reports a count
+that's neither an upper nor a lower bound — it's just wrong in the
+general case.  Each over-count adds an unnecessary `kk_retain` to the
+prologue; over a long-running compile the rc drifts compoundedly and
+the runtime starts reading corrupted CONS cells.
+
+**Bisect history**: commit `e9437193` introduced the heuristic.
+Bisect identifies it as the first bad commit for the self-hosted
+bootstrap (Phase 9 stage 2 binary SIGSEGVs in
+`kk_haskell_chars_concat`).  Subsequent rounds tried removing the
+multi-retain (single-retain pre-e9437193 behavior), tightening the
+Name comparison + adding pattern/let shadowing, and skipping nested
+ELam/EDelay.  None restored the bootstrap on top of the current tree
+and the strictly-correct version regressed surd-quintic under
+`KK_RECYCLE=1`.  Reverting `871afa7` (lifted-lambda closure-drop) or
+`f4d7837` (per-branch drop balancing) individually or together did
+not restore the bootstrap either — the residual RC drift is the
+sum of many small wrongs across the post-`3da8f6f` runtime/Perceus
+work, not isolated to a single offending commit.
+
+**Plan**: replace `countUses` with a proper Perceus consuming-use
+analysis as a Core IR pass that:
+
+1. Runs after `insertPerceus` (so it sees the actual `ERetain` /
+   `EDrop` placement) but before `emitProgram`.
+2. Computes a per-binding-site map `Name → ConsumingUseCount` using
+   a Perceus-faithful definition:
+   - `EVar n` is a consuming use of `n` (count = 1).
+   - `ELam ps body` adds 1 consuming use of every free var of @body@
+     not bound by @ps@ — that's the closure-capture transfer.
+   - `EDelay body` likewise (single thunk-creation event).
+   - `EApp f args` consumes @f@ and every arg.
+   - `EDrop e` consumes the inner expression.
+   - `ERetain` / `ERelease` are not consumes (pure rc ops).
+   - `ECase` is `scrut + max(branches)`.
+   - Honor pattern + let + lambda shadowing on `Name`.
+3. Emits the same prologue-retain count the emitter currently
+   computes, but from a single authoritative source.  After this
+   pass, `emitLambdaLift` reads the count out of an annotation
+   instead of recomputing it.
+4. As a corollary, audit the four commits whose drop-insertion
+   patterns are tuned to the over-retaining behavior
+   (`871afa7`, `fb14ba4`/`e13f1fe`, `f4d7837`, `5869a8c`) and verify
+   each one balances the corrected retain count.  Some may need
+   to be re-tuned or removed.
+
+**Acceptance**: bootstrap reaches Phase 10c fixed-point again
+(was 23/23 MLIR match pre-`e9437193`); surd-quintic stays at 4/4
+byte-identical under `KK_RECYCLE=1`; hellos remain 26/26;
+`PromoteRecursiveLambdas` (currently opt-in workaround for the
+recursive-let-lambda subset) becomes redundant and can be removed.
+
+**Risk**: multi-week effort.  The Perceus analysis itself is ~200
+lines; the bigger task is the audit of all the drop-insertion sites
+and possibly redesigning some of them.  Suggest gating the new pass
+behind an env var during transition (`FRANKENSTEIN_NEW_PERCEUS=1`)
+so the baselines stay testable both ways.
+
 ---
 
 ## Cross-Module Effect Dispatch ✓

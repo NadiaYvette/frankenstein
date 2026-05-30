@@ -1224,6 +1224,60 @@ and possibly redesigning some of them.  Suggest gating the new pass
 behind an env var during transition (`FRANKENSTEIN_NEW_PERCEUS=1`)
 so the baselines stay testable both ways.
 
+### Status (step 4 complete; step 5 outlined)
+
+**Step 1** (`d8e87f0`): `Frankenstein.Core.ConsumingUses` —
+Perceus-faithful @consumingUseCount :: Name -> Expr -> Int@.
+
+**Step 2** (`e5d0874`): `Frankenstein.Debug.PerceusCounts` +
+`--emit-perceus-counts` CLI flag.  Empirical: hellos have 0
+divergences, self-host modules have 11–196 divergent captures each;
+all are OVER-counts (heuristic > analysis), almost always by 1, on
+ShowS-style `b1$N` pattern vars captured by `let p$N` inner lambdas.
+
+**Step 3** (`dd70916`): emitter `countUses` gated.  With env var,
+bootstrap predicate's null-fn-ptr crash mode changes from
+"kk_haskell_chars_concat reads corrupt CONS" to "FATAL: call1(0, ...)"
+— the rc drift inverted from upward to downward.
+
+**Step 4** (`5ec0958`): Perceus `analyzeUsage` gated on the same env
+var.  Coordinated retain side now uses ConsumingUses semantics.  Both
+modes' bootstrap predicate still SIGSEGV with the same FATAL crash
+shape, so the drop-insertion sites need re-tuning — fixing the
+retains in lockstep with the drops still balances wrong somewhere.
+
+**Step 5 (open)**: audit the four drop-insertion commits against
+the corrected retain counts and fix the residual imbalances.
+
+- `871afa7` lifted-lambda closure-drop — single drop per invocation,
+  independent of countUses.  Should still be correct under NEW.
+- `5869a8c` Perceus zero-arity scrutinee drop — single drop per
+  branch, independent of count.  Should still be correct under NEW.
+- `f4d7837` Perceus per-branch balance — uses `analyzeUsage`, which
+  is now gated.  Under NEW the per-branch (max − this) drops are
+  smaller (because counts are smaller); should be in balance, but
+  empirically isn't.
+- `e13f1fe` `ElideConsumedDrops` — independent of counts.  Should
+  still be correct under NEW.
+
+The puzzle is that ALL FOUR drop sites look like they should
+self-adjust under NEW — yet the bootstrap crashes regardless.  This
+points at a fifth issue not yet identified, or at a subtle
+interaction between the four.  Step 5 needs:
+
+1. An rc-trace instrumentation in the runtime: log every
+   `kk_retain` / `kk_drop` with the cell's tag and the calling
+   function name (via dladdr).  Hellos and a single failing
+   self-host module run with the trace would show per-invocation rc
+   change in the form `(tag, fn) → cum_change`.
+2. Compare default-mode vs NEW-mode traces on the failing input.
+   The first divergence pinpoints the responsible drop site.
+
+That instrumentation is roughly a day's work; the actual fix should
+fall out quickly once we can see which closures' rc drifts and where
+each rc op came from.  Suggest landing the trace as Phase 12c step 5
+diagnostic, then step 6 as the actual rebalance.
+
 ---
 
 ## Cross-Module Effect Dispatch ✓

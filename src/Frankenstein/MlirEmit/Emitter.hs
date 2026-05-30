@@ -17,6 +17,7 @@ module Frankenstein.MlirEmit.Emitter
 
 import Frankenstein.Core.Types
 import Frankenstein.Core.ConTags (assignProgramTags, conKey)
+import Frankenstein.Core.ConsumingUses (consumingUseCount)
 import Frankenstein.Core.CycleAnalysis (analyzeCycles, CycleInfo(..))
 import Frankenstein.MlirEmit.Dialects (MlirOp(..), renderOp)
 
@@ -27,6 +28,8 @@ import qualified Data.Text.IO as TIO
 import qualified Data.ByteString as BS
 import Data.Word (Word8)
 import Data.IORef
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Process (readProcessWithExitCode, readProcess)
 import System.Exit (ExitCode(..))
 import Control.Monad (forM, forM_)
@@ -88,6 +91,19 @@ data EmitState = EmitState
   }
 
 type Emit a = State EmitState a
+
+-- | Phase 12c step 3 gate.  When @FRANKENSTEIN_NEW_PERCEUS=1@,
+-- 'emitLambdaLift' replaces the legacy surface-syntax @countUses@
+-- heuristic with 'consumingUseCount' from
+-- 'Frankenstein.Core.ConsumingUses'.  Read once at startup; the
+-- NOINLINE pragma is required so GHC doesn't memoize the value
+-- and miss the env var on later invocations (we read it inside
+-- a pure function, so the IO is sequestered behind unsafePerformIO).
+useNewPerceusCount :: Bool
+useNewPerceusCount = unsafePerformIO $ do
+  v <- lookupEnv "FRANKENSTEIN_NEW_PERCEUS"
+  pure (v == Just "1")
+{-# NOINLINE useNewPerceusCount #-}
 
 freshName :: Text -> Emit Text
 freshName prefix = do
@@ -3564,14 +3580,27 @@ emitLambdaLift params body = do
   -- list so we don't accidentally retain top-level fn refs (which appear
   -- as EVars but aren't heap cells).  See ROADMAP Phase 12a for the
   -- broader cleanup that would let Perceus own this analysis instead.
-  -- Count consuming uses of `tgt` in an expression.  An EVar reference
-  -- inside ERetain / ERelease doesn't consume — those are pure rc ops
-  -- the emitter lowers to kk_retain / kk_release without touching
-  -- ownership.  EDrop *does* consume (it lowers to kk_drop, which is
-  -- the canonical consume).  EApp args and EApp head both consume
-  -- (the called function takes ownership of every operand).
+  -- Count consuming uses of `tgt` in an expression.  Two modes:
+  --
+  --   * Default (legacy heuristic from commits e9437193 + 027b697):
+  --     surface-syntax EVar mention count.  Recurses into nested
+  --     ELam/EDelay bodies; uses bare text equality on names; does
+  --     not honor pattern + let shadowing.  Documented to break the
+  --     bootstrap (see Phase 12c, ROADMAP).
+  --
+  --   * @FRANKENSTEIN_NEW_PERCEUS=1@: Perceus-faithful consuming-use
+  --     count from 'Frankenstein.Core.ConsumingUses' — charges nested
+  --     closure captures as a single closure-create event, uses full
+  --     Name equality, honors shadowing.  Currently experimental;
+  --     swapping it in changes the kk_retain count per closure
+  --     invocation and may need coordinated re-tuning at the
+  --     Perceus per-branch balance + drop-insertion sites (Phase 12c
+  --     step 4).
   let countUses :: Name -> Expr -> Int
-      countUses tgt = go
+      countUses = if useNewPerceusCount
+                  then consumingUseCount
+                  else legacyCountUses
+      legacyCountUses tgt = go
         where
           tgtT = nameText tgt
           go (EVar n)         = if nameText n == tgtT then 1 else 0

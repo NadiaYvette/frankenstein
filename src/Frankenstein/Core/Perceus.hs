@@ -20,12 +20,15 @@ module Frankenstein.Core.Perceus
   ) where
 
 import Frankenstein.Core.Types
+import Frankenstein.Core.ConsumingUses (consumingUseCount)
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | Check if a type is known to be unboxed (non-heap-allocated).
 -- Values of these types are plain machine integers, not heap pointers,
@@ -370,12 +373,49 @@ patternVars (PatCon _ pats) = concatMap patternVars pats
 patternVars (PatWild _)     = []
 patternVars (PatLit _)      = []
 
+-- | Phase 12c step 4 gate.  When @FRANKENSTEIN_NEW_PERCEUS=1@ is set,
+-- 'analyzeUsage' returns counts under the Perceus-faithful semantics
+-- from 'Frankenstein.Core.ConsumingUses' rather than the legacy
+-- surface-syntax heuristic.  Read once at startup; NOINLINE so GHC
+-- doesn't memoize the value across runs of the binary.
+useNewPerceusUsage :: Bool
+useNewPerceusUsage = unsafePerformIO $ do
+  v <- lookupEnv "FRANKENSTEIN_NEW_PERCEUS"
+  pure (v == Just "1")
+{-# NOINLINE useNewPerceusUsage #-}
+
 -- | Analyze usage of variables in an expression.
 -- Returns a map from variable name to usage count.
--- For App/Let/Handle/Reuse: sum (each use is a separate reference).
--- For Case: scrutinee count + max over branches (only one branch executes).
+--
+-- Two modes:
+--
+--   * Default (legacy): surface-syntax sum of @EVar@ mentions.  For
+--     App/Let/Handle/Reuse: sum (each use is a separate reference).
+--     For Case: scrutinee count + max over branches.  Recurses into
+--     nested @ELam@/@EDelay@ bodies — same over-counting as the
+--     emitter's legacy @countUses@, which broke the bootstrap (see
+--     ROADMAP Phase 12c).
+--
+--   * @FRANKENSTEIN_NEW_PERCEUS=1@: Perceus-faithful semantics from
+--     'Frankenstein.Core.ConsumingUses'.  Charges @ELam@/@EDelay@
+--     captures as a single closure-create event, honours pattern +
+--     let shadowing, uses full @Name@ equality.
+--
+-- The new mode is the coordinated companion to step 3's emitter
+-- gate: with both branches of the rc accounting using the same
+-- analysis, the drop-insertion sites (per-branch balance,
+-- closure-drop, zero-arity scrutinee drop, elide-consumed) should
+-- balance the corrected retain counts.  Step 4 audits each of those
+-- four sites against the new counts.
 analyzeUsage :: Expr -> Map Name Int
-analyzeUsage expr = go expr
+analyzeUsage = if useNewPerceusUsage
+               then analyzeUsageNew
+               else legacyAnalyzeUsage
+
+-- | Original heuristic.  Retained as the default to keep the
+-- baselines stable while step 4 designs the coordinated swap.
+legacyAnalyzeUsage :: Expr -> Map Name Int
+legacyAnalyzeUsage expr = go expr
   where
     go (EVar n)         = Map.singleton n 1
     go (ELit _)         = Map.empty
@@ -396,6 +436,14 @@ analyzeUsage expr = go expr
     go (EPerform _ args) = Map.unionsWith (+) (map go args)
     go (EHandle _ h b)  = Map.unionWith (+) (go h) (go b)
     go (EFunRef _)      = Map.empty
+
+-- | Perceus-faithful usage map.  Computes 'consumingUseCount' once
+-- per free variable of @e@.  Quadratic in worst case (one walk per
+-- free var); fine for the modules we care about.
+analyzeUsageNew :: Expr -> Map Name Int
+analyzeUsageNew e =
+  let frees = freeVars e
+  in Map.fromList [ (n, consumingUseCount n e) | n <- Set.toList frees ]
 
 unitType :: Type
 unitType = TCon (TypeCon (QName "std" (Name "unit" 0)) KindValue)

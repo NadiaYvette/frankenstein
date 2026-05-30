@@ -176,7 +176,8 @@ SHIM_OBJS_5B=$(ls "$OUT"/*.o | grep -E '/(shim_|A_sanitize_shim|cross_module_|dr
 STAGE_OBJS_5B=$(ls "$OUT"/*.o | grep -vE '/(shim_|A_sanitize_shim|cross_module_|driver|main|stdlib_shims|kk_|.*self-ir\.o|factorial-self-ir|_standalone\.o)')
 clang -O2 -o self-host/frankenstein-self-compiler $SHIM_OBJS_5B $STAGE_OBJS_5B -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files \
-  -Wl,--allow-multiple-definition
+  -Wl,--allow-multiple-definition \
+  -Wl,-export-dynamic
 echo "Linked: self-host/frankenstein-self-compiler ($(stat -c%s self-host/frankenstein-self-compiler) bytes)"
 
 echo ""
@@ -693,7 +694,8 @@ if [ "$S2_OK" -gt 0 ]; then
   clang -O2 -o self-host/frankenstein-self-compiler-stage2 \
     $SHIM_OBJS $STAGE2_OBJS -lm \
     -Wl,--unresolved-symbols=ignore-in-object-files \
-    -Wl,--allow-multiple-definition 2>/dev/null
+    -Wl,--allow-multiple-definition \
+    -Wl,-export-dynamic 2>/dev/null
   echo "Linked: self-host/frankenstein-self-compiler-stage2 ($(stat -c%s self-host/frankenstein-self-compiler-stage2) bytes)"
 
   echo ""
@@ -728,7 +730,8 @@ if [ "$S2_OK" -gt 0 ]; then
       clang -O2 -o self-host/frankenstein-self-compiler-stage3 \
         $SHIM_OBJS $STAGE3_OBJS -lm \
         -Wl,--unresolved-symbols=ignore-in-object-files \
-        -Wl,--allow-multiple-definition 2>/dev/null
+        -Wl,--allow-multiple-definition \
+        -Wl,-export-dynamic 2>/dev/null
       echo "Linked: self-host/frankenstein-self-compiler-stage3 ($(stat -c%s self-host/frankenstein-self-compiler-stage3) bytes)"
     fi
 

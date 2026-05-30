@@ -625,9 +625,19 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
         else if (tag == 0x4C415A59 && (trace[0] == 'L' || trace[0] == '1')) tag_match = "LAZY";
         else if (trace[0] == '1') tag_match = "OTHER";
         if (tag_match) {
-            fprintf(stderr, "[alloc] tag=%s nf=%ld → %p caller=%p\n",
-                    tag_match, (long)nfields, (void*)(uintptr_t)ptr,
-                    __builtin_return_address(0));
+            /* Phase 12c step 7: resolve the caller's address via
+             * dladdr so the alloc trace is greppable by source
+             * function (matches the KK_RC_TRACE output format).
+             * The binary must be linked with -Wl,-export-dynamic
+             * for user symbols to resolve; otherwise dladdr returns
+             * "?" for all but the runtime's own functions. */
+            Dl_info info;
+            const char* sym = "?";
+            void* caller = __builtin_return_address(0);
+            if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;
+            fprintf(stderr, "ALLOC 0x%lx tag=%s nf=%ld caller=%s\n",
+                    (unsigned long)(uintptr_t)ptr, tag_match,
+                    (long)nfields, sym);
         }
     }
     return ptr;
@@ -2766,6 +2776,29 @@ void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     if (!kk_is_heap_ptr(ptr)) return;
     int64_t* fields = (int64_t*)(ptr + 8);
     fields[idx] = value;
+    /* Phase 12c step 7: optionally log the field-0 set on CLOS cells.
+     * Pairing this with @KK_ALLOC_TRACE=CLOS@ lets us detect closures
+     * whose fn-pointer slot is allocated but never set — the suspected
+     * cause of the @FATAL: call1(0, ...)@ bootstrap crash. */
+    static int trace_init = 0;
+    static int trace_on = 0;
+    if (!trace_init) {
+        const char* v = getenv("KK_SETFIELD_TRACE");
+        trace_on = (v && v[0] == '1' && v[1] == '\0');
+        trace_init = 1;
+    }
+    if (trace_on && idx == 0) {
+        int64_t tag = *(int64_t*)ptr;
+        if (tag == 0x434C4F53 /* CLOS */ || tag == 0x434C4F42 /* CLOB */) {
+            Dl_info info;
+            const char* sym = "?";
+            void* caller = __builtin_return_address(0);
+            if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;
+            fprintf(stderr, "SETFIELD0 0x%lx fn=0x%lx caller=%s\n",
+                    (unsigned long)(uintptr_t)ptr,
+                    (unsigned long)(uintptr_t)value, sym);
+        }
+    }
 }
 
 /* Evidence vector operations for algebraic effects

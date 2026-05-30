@@ -12,6 +12,7 @@ import Frankenstein.Core.DeriveSelectors (deriveSelectors)
 import Frankenstein.Core.FlattenPatterns (flattenPatterns)
 import Frankenstein.Core.NormalizePatterns (normalizePatterns)
 import Frankenstein.Debug.DumpProgram (dumpProgram)
+import qualified Frankenstein.Debug.PerceusCounts as PerceusCounts
 import Frankenstein.Core.Linker (linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.GhcBridge.Driver (compileToCore, compileToCoreWith, compileToCoreMulti, GhcCoreResult(..))
 import Frankenstein.MercuryBridge.HldsParse
@@ -148,6 +149,7 @@ data Flags = Flags
   , flagEmitEffectMlir :: !Bool
   , flagEmitOrgan :: !Bool
   , flagEmitOrganPost :: !Bool
+  , flagEmitPerceusCounts :: !Bool
   , flagCompile  :: !Bool
   , flagOutput   :: !FilePath
   , flagFromJson :: !Bool
@@ -160,7 +162,7 @@ data EvidenceMode = EvidenceInline | EvidencePlotkin
   deriving (Show, Eq)
 
 defaultFlags :: Flags
-defaultFlags = Flags False False False False False False "a.out" False TargetNative False EvidenceInline
+defaultFlags = Flags False False False False False False False "a.out" False TargetNative False EvidenceInline
 
 data Command
   = ShowHelp
@@ -223,6 +225,7 @@ parseFlags args = Flags
   , flagEmitOrgan = "--emit-organ" `elem` args
                  || "--emit-organ-post-passes" `elem` args
   , flagEmitOrganPost = "--emit-organ-post-passes" `elem` args
+  , flagEmitPerceusCounts = "--emit-perceus-counts" `elem` args
   , flagCompile  = "--compile" `elem` args
   , flagOutput   = case dropWhile (/= "--output") args of
                      ("--output":o:_) -> o
@@ -621,6 +624,14 @@ handleOutput progRaw flags = do
           if flagEmitOrganPost flags
             then TIO.putStrLn $ OrganEmit.emitProgram prog
             else TIO.putStrLn $ OrganEmit.emitProgram (normalizePatterns progRaw)
+      | flagEmitPerceusCounts flags -> do
+          -- Phase 12c step 2: walk every ELam in the post-Perceus
+          -- program and tabulate, per capture, what the current
+          -- emitter heuristic vs. the Perceus-faithful analysis
+          -- reports.  Diagnoses where the heuristic over- or
+          -- under-counts on real programs — the audit input for
+          -- step 3.
+          TIO.putStrLn $ PerceusCounts.renderReport (PerceusCounts.analyzeProgram prog)
       | flagEmitEffectMlir flags -> do
           -- Emit MLIR with frankenstein.* dialect ops — skip both the
           -- effect optimizer (which would inline handlers) and the
@@ -682,6 +693,7 @@ printHelp = do
   putStrLn "  --emit-mlir       Print MLIR output (after evidence lowering)"
   putStrLn "  --emit-effect-mlir Print MLIR with frankenstein.* dialect ops"
   putStrLn "  --emit-organ      Print OrganIR JSON (interchange format)"
+  putStrLn "  --emit-perceus-counts  Report heuristic-vs-analysis consuming-use counts per ELam (Phase 12c)"
   putStrLn "  --compile         Compile to native executable (or .wasm)"
   putStrLn "  --target wasm32   Target WebAssembly (use with --compile)"
   putStrLn "  -o, --output      Output path (default: a.out)"

@@ -2679,6 +2679,18 @@ static void kk_print_stats_sigterm(int sig) {
     _exit(128 + sig);
 }
 
+/* Phase 12c step 7 trace-buffering helpers.  See kk_args_init. */
+static void kk_flush_trace_atexit(void) {
+    fflush(stderr);
+}
+static void kk_flush_trace_sighandler(int sig) {
+    fflush(stderr);
+    /* Re-raise with default handler so the parent shell sees the
+     * normal exit status (e.g. 134 for SIGABRT, 143 for SIGTERM). */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 void kk_args_init(int argc, char** argv) {
     kk_g_argc = argc;
     kk_g_argv = argv;
@@ -2688,6 +2700,26 @@ void kk_args_init(int argc, char** argv) {
      * output (PASS / FAIL lines) only appears once everything completes
      * — defeating the purpose of incremental reporting. */
     setvbuf(stdout, NULL, _IOLBF, 0);
+    /* Phase 12c step 7: when any of the trace env vars are set, fully
+     * buffer stderr (default is unbuffered for stderr).  fprintf-per-
+     * event with unbuffered stderr does a write() syscall per line and
+     * dominates runtime cost — the diagnostic predicate hits 600s
+     * timeout instead of the 60s no-trace baseline.  Full buffering
+     * (256 KiB) batches writes and lets the predicate reach its
+     * crash point.  atexit hook flushes on normal exit; SIGABRT/SIGSEGV
+     * handlers already flush as part of the signal handler. */
+    if (getenv("KK_RC_TRACE") || getenv("KK_ALLOC_TRACE")
+            || getenv("KK_SETFIELD_TRACE")) {
+        static char kk_trace_buf[256 * 1024];
+        setvbuf(stderr, kk_trace_buf, _IOFBF, sizeof(kk_trace_buf));
+        /* On abnormal exit (FATAL: call1 abort()s; SIGTERM from
+         * timeout) we still want the trace contents to land on disk.
+         * atexit handles normal exits; install signal handlers for
+         * SIGABRT and SIGTERM that flush before re-raising. */
+        atexit(kk_flush_trace_atexit);
+        signal(SIGABRT, kk_flush_trace_sighandler);
+        signal(SIGTERM, kk_flush_trace_sighandler);
+    }
     if (getenv("KK_STATS")) {
         atexit(kk_print_stats);
         signal(SIGTERM, kk_print_stats_sigterm);

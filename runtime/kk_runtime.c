@@ -63,6 +63,44 @@ static inline int64_t* kk_rc_ptr(int64_t ptr) {
     return (int64_t*)(ptr - 8);
 }
 
+/* Phase 12c step 5 — rc-trace instrumentation.
+ *
+ * When @KK_RC_TRACE=1@ in the environment, every heap-cell kk_retain
+ * and kk_drop call logs:
+ *
+ *     RETAIN <cell> rc=N→N+1 tag=0x... caller=<symbol>
+ *     DROP   <cell> rc=N→N-1 tag=0x... caller=<symbol>
+ *
+ * @caller@ is resolved from @__builtin_return_address(0)@ via
+ * @dladdr@.  The aim is to diff "default mode" vs "NEW_PERCEUS=1"
+ * traces on the same input — the first divergent rc-event pinpoints
+ * the drop-insertion site whose placement still depends on the over-
+ * retaining heuristic.  See ROADMAP Phase 12c step 5.
+ *
+ * Read once at program start, NOINLINE so we don't recompute per call. */
+static int kk_rc_trace_init = 0;
+static int kk_rc_trace_on = 0;
+static inline int kk_rc_trace_enabled(void) {
+    if (!kk_rc_trace_init) {
+        const char* v = getenv("KK_RC_TRACE");
+        kk_rc_trace_on = (v && v[0] == '1' && v[1] == '\0');
+        kk_rc_trace_init = 1;
+    }
+    return kk_rc_trace_on;
+}
+
+static inline void kk_rc_trace_emit(const char* op, int64_t ptr,
+                                    int64_t from, int64_t to,
+                                    void* caller) {
+    int64_t tag = *(int64_t*)ptr;
+    Dl_info info;
+    const char* sym = "?";
+    if (dladdr(caller, &info) && info.dli_sname) sym = info.dli_sname;
+    fprintf(stderr, "%s 0x%lx rc=%ld→%ld tag=0x%lx caller=%s\n",
+            op, (unsigned long)(uintptr_t)ptr,
+            (long)from, (long)to, (long)tag, sym);
+}
+
 void kk_retain(int64_t ptr) {
     if (!kk_is_heap_ptr(ptr)) return;
     if (kk_is_string(ptr)) { kk_str_retain(ptr); return; }
@@ -81,6 +119,8 @@ void kk_retain(int64_t ptr) {
     int64_t count = cur + 1;
     *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | count;
     *rc = (*rc & (KK_RC_MASK | KK_NFIELDS_MASK)) | KK_COLOR_BLACK;
+    if (kk_rc_trace_enabled())
+        kk_rc_trace_emit("RETAIN", ptr, cur, count, __builtin_return_address(0));
 }
 
 int64_t kk_tag(int64_t ptr);  /* forward decl */
@@ -147,8 +187,12 @@ void kk_drop(int64_t ptr) {
     if (count > 1) {
         /* Shared — just decrement (preserve color and nfields) */
         *rc = (*rc & (KK_COLOR_MASK | KK_NFIELDS_MASK)) | (count - 1);
+        if (kk_rc_trace_enabled())
+            kk_rc_trace_emit("DROP", ptr, count, count - 1, __builtin_return_address(0));
         return;
     }
+    if (kk_rc_trace_enabled())
+        kk_rc_trace_emit("DROP", ptr, count, 0, __builtin_return_address(0));
     /* From here on: cell is going to rc=0 and we cascade.  This is the
      * only path that needs depth tracking for the cycle-collect trigger. */
     kk_drop_depth++;

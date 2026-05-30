@@ -5115,7 +5115,14 @@ compileToExecutableLink config llPath =
                       r4 <- runCmd (ecClangPath config)
                         ["-x", "ir", llPath, "-x", "none", rtObjPath, cycleObjPath, arenaObjPath, idris2ShimObjPath,
                          "-o", ecOutputPath config, optFlag, ltoFlag, "-lm"
-                        , "-Wl,--unresolved-symbols=ignore-in-object-files"]
+                        , "-Wl,--unresolved-symbols=ignore-in-object-files"
+                        -- Export local symbols to the dynamic symbol table
+                        -- so kk_runtime's KK_RC_TRACE=1 dladdr lookups
+                        -- resolve user-function names (e.g. lifted
+                        -- lambdas) instead of "?".  Required for Phase
+                        -- 12c step 5 rc-trace; cost is a marginal
+                        -- increase in binary size for the .dynsym entries.
+                        , "-Wl,-export-dynamic"]
                         "" "clang (link)"
                       case r4 of
                         Left e  -> pure (Left e)

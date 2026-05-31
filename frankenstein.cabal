@@ -25,6 +25,7 @@ library
         Frankenstein.Core.ElideConsumedDrops
         Frankenstein.Core.PromoteRecursiveLambdas
         Frankenstein.Core.ConsumingUses
+        Frankenstein.Core.Liveness
         Frankenstein.Debug.PerceusCounts
         Frankenstein.Core.NormalizePatterns
         Frankenstein.Core.CpsConvert

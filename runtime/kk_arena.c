@@ -294,3 +294,53 @@ int kk_recycle_audit_lookup(const void* block,
     if (out_caller) *out_caller = g_recycle_ledger[idx].caller;
     return g_recycle_ledger[idx].seq + 1;  /* nonzero = found */
 }
+
+/* Allocation ledger: ring buffer of allocation events keyed by block
+ * address.  Lets the audit answer "where was this cell originally
+ * allocated?" for cells that crash on use without going through the
+ * recycler.  Populated by kk_alloc_con when KK_ALLOC_AUDIT=1. */
+#define KK_ALLOC_LEDGER_SIZE 131072  /* 128K × 32 bytes = 4 MiB */
+typedef struct {
+    const void* block;
+    int64_t tag;
+    size_t size;
+    void* allocator;
+    int seq;
+} kk_alloc_entry_t;
+static kk_alloc_entry_t g_alloc_ledger[KK_ALLOC_LEDGER_SIZE];
+static int g_alloc_seq = 0;
+
+int kk_alloc_audit_enabled(void) {
+    static int audit = -1;
+    if (audit == -1) {
+        const char* v = getenv("KK_ALLOC_AUDIT");
+        audit = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return audit;
+}
+
+void kk_alloc_audit_record(const void* block,
+                           int64_t tag,
+                           size_t size,
+                           void* allocator) {
+    if (!kk_alloc_audit_enabled()) return;
+    size_t idx = ((uintptr_t)block >> 4) % KK_ALLOC_LEDGER_SIZE;
+    g_alloc_ledger[idx].block = block;
+    g_alloc_ledger[idx].tag = tag;
+    g_alloc_ledger[idx].size = size;
+    g_alloc_ledger[idx].allocator = allocator;
+    g_alloc_ledger[idx].seq = g_alloc_seq++;
+}
+
+int kk_alloc_audit_lookup(const void* block,
+                          int64_t* out_tag,
+                          size_t* out_size,
+                          void** out_allocator) {
+    if (!kk_alloc_audit_enabled()) return 0;
+    size_t idx = ((uintptr_t)block >> 4) % KK_ALLOC_LEDGER_SIZE;
+    if (g_alloc_ledger[idx].block != block) return 0;
+    if (out_tag) *out_tag = g_alloc_ledger[idx].tag;
+    if (out_size) *out_size = g_alloc_ledger[idx].size;
+    if (out_allocator) *out_allocator = g_alloc_ledger[idx].allocator;
+    return g_alloc_ledger[idx].seq + 1;
+}

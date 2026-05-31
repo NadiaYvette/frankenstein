@@ -108,4 +108,23 @@ int kk_recycle_audit_lookup(const void* block,
                             size_t* out_size,
                             void** out_caller);
 
+/* True iff KK_ALLOC_AUDIT=1.  When enabled, kk_alloc_con records each
+ * allocation in a ledger so use-after-corruption diagnostics can
+ * report "this cell was originally allocated at <caller>". */
+int kk_alloc_audit_enabled(void);
+
+/* Record an allocation.  Called from kk_alloc_con (no-op when the
+ * audit is disabled). */
+void kk_alloc_audit_record(const void* block,
+                           int64_t tag,
+                           size_t size,
+                           void* allocator);
+
+/* Look up an allocation.  Returns 0 if the block isn't in the ledger,
+ * nonzero (the sequence number + 1) when it is. */
+int kk_alloc_audit_lookup(const void* block,
+                          int64_t* out_tag,
+                          size_t* out_size,
+                          void** out_allocator);
+
 #endif /* KK_ARENA_H */

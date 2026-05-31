@@ -480,6 +480,24 @@ int64_t kk_tag(int64_t ptr) {
                 fprintf(stderr, "  recycled-by: %p (unresolved)\n", recycler);
             }
         }
+        /* Allocation ledger lookup: where was this cell originally
+         * allocated?  Helps identify the source even when recycle
+         * info has been overwritten by a later collision. */
+        int64_t alloc_tag = 0;
+        size_t alloc_size = 0;
+        void* allocator = NULL;
+        if (kk_alloc_audit_lookup(block, &alloc_tag, &alloc_size, &allocator)) {
+            Dl_info info;
+            if (allocator && dladdr(allocator, &info) && info.dli_sname) {
+                fprintf(stderr, "  allocated-by: %s (+%lx) tag=0x%lx size=%zu\n",
+                        info.dli_sname,
+                        (unsigned long)((const char*)allocator - (const char*)info.dli_saddr),
+                        alloc_tag, alloc_size);
+            } else {
+                fprintf(stderr, "  allocated-by: %p tag=0x%lx size=%zu\n",
+                        allocator, alloc_tag, alloc_size);
+            }
+        }
         /* Backtrace the caller chain so we can identify which generated
          * function read the recycled cell.  12 frames is enough to see
          * the trampoline + lifted lambda. */
@@ -530,6 +548,20 @@ int64_t kk_field(int64_t ptr, int64_t idx) {
             Dl_info info;
             if (dladdr((void*)(uintptr_t)fields[0], &info) && info.dli_sname) {
                 fprintf(stderr, "  field[0] resolves to: %s\n", info.dli_sname);
+            }
+            /* Allocation ledger lookup. */
+            const void* block = (const void*)(uintptr_t)(ptr - 8);
+            int64_t alloc_tag = 0;
+            size_t alloc_size = 0;
+            void* allocator = NULL;
+            if (kk_alloc_audit_lookup(block, &alloc_tag, &alloc_size, &allocator)) {
+                Dl_info ai;
+                if (allocator && dladdr(allocator, &ai) && ai.dli_sname) {
+                    fprintf(stderr, "  allocated-by: %s (+%lx) tag=0x%lx size=%zu\n",
+                            ai.dli_sname,
+                            (unsigned long)((const char*)allocator - (const char*)ai.dli_saddr),
+                            alloc_tag, alloc_size);
+                }
             }
             /* Phase 12c step 8: backtrace the caller chain. */
             void* buf[12];
@@ -683,6 +715,10 @@ int64_t kk_alloc_con(int64_t tag, int64_t nfields) {
     }
     /* Return pointer to the tag slot */
     int64_t ptr = (int64_t)&block[1];
+    /* Record in the allocation ledger if enabled.  Block address is
+     * &block[0] (the rc word).  See kk_arena.h. */
+    kk_alloc_audit_record((const void*)block, tag, (size_t)total,
+                          __builtin_return_address(0));
     static const char* trace = NULL;
     if (trace == NULL) { trace = getenv("KK_ALLOC_TRACE"); if (!trace) trace = ""; }
     if (trace[0]) {

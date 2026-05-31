@@ -127,4 +127,20 @@ int kk_alloc_audit_lookup(const void* block,
                           size_t* out_size,
                           void** out_allocator);
 
+/* True iff KK_DROP_AUDIT=1.  When enabled, kk_drop records each cell
+ * that reaches rc=0 (the final cascade drop) into a ledger so the
+ * bounds audit can answer "which caller dropped this cell?". */
+int kk_drop_audit_enabled(void);
+
+/* Record a drop-to-zero event with a backtrace.  out_dropper[0..N-1]
+ * receives the call chain (most recent first); the recorder skips
+ * kk_drop's own frames so the first entry is the first non-kk_drop
+ * caller. */
+#define KK_DROP_BT_DEPTH 4
+void kk_drop_audit_record(const void* block);
+
+/* Look up a drop event.  out_callers[0..KK_DROP_BT_DEPTH-1] is filled
+ * if non-NULL. */
+int kk_drop_audit_lookup(const void* block, void* out_callers[KK_DROP_BT_DEPTH]);
+
 #endif /* KK_ARENA_H */

@@ -16,6 +16,7 @@
  * list stays short — even a 100 MiB working set is only ~100 nodes.
  */
 
+#define _GNU_SOURCE
 #include "kk_arena.h"
 
 #include <stdio.h>
@@ -343,4 +344,67 @@ int kk_alloc_audit_lookup(const void* block,
     if (out_size) *out_size = g_alloc_ledger[idx].size;
     if (out_allocator) *out_allocator = g_alloc_ledger[idx].allocator;
     return g_alloc_ledger[idx].seq + 1;
+}
+
+/* Drop ledger: records cells reaching rc=0 (the final cascade drop).
+ * Lets the bounds / use-after-drop audits report who dropped the
+ * crashing cell.  Keyed by block address, same hashing scheme as the
+ * alloc ledger; collisions overwrite (most-recent-wins). */
+#define KK_DROP_LEDGER_SIZE 131072
+typedef struct {
+    const void* block;
+    void* callers[KK_DROP_BT_DEPTH];
+    int seq;
+} kk_drop_entry_t;
+static kk_drop_entry_t g_drop_ledger[KK_DROP_LEDGER_SIZE];
+static int g_drop_seq = 0;
+
+int kk_drop_audit_enabled(void) {
+    static int audit = -1;
+    if (audit == -1) {
+        const char* v = getenv("KK_DROP_AUDIT");
+        audit = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return audit;
+}
+
+/* Use __builtin_return_address for cheap caller capture; backtrace is
+ * too expensive when fired on every cascade-drop.  At cascade depth N,
+ * (0) is inside kk_drop, (1)..(N) walk up through more kk_drop frames,
+ * (N+1) is the original caller.  The lookup-time filter strips
+ * kk_drop entries from the displayed chain.
+ *
+ * The (k) accesses require valid frame pointers; with -O2 + clang,
+ * they're stable for small k and return NULL or garbage for k that
+ * walks off the stack — guard at lookup time. */
+/* Set by kk_drop when entering the outermost cascade level
+ * (kk_drop_depth == 0).  Read here to attribute the drop to the
+ * original caller of kk_drop rather than to a kk_drop+offset frame. */
+void* kk_outermost_drop_caller = NULL;
+
+__attribute__((noinline))
+void kk_drop_audit_record(const void* block) {
+    if (!kk_drop_audit_enabled()) return;
+    size_t idx = ((uintptr_t)block >> 4) % KK_DROP_LEDGER_SIZE;
+    g_drop_ledger[idx].block = block;
+    /* The outermost kk_drop caller is the FRANKENSTEIN function that
+     * triggered the cascade.  Local return addresses (0)/(1) are
+     * inside kk_drop's own recursive frames and don't help identify
+     * the source. */
+    g_drop_ledger[idx].callers[0] = kk_outermost_drop_caller;
+    g_drop_ledger[idx].callers[1] = __builtin_return_address(0);
+    g_drop_ledger[idx].callers[2] = __builtin_return_address(1);
+    g_drop_ledger[idx].callers[3] = NULL;
+    g_drop_ledger[idx].seq = g_drop_seq++;
+}
+
+int kk_drop_audit_lookup(const void* block, void* out_callers[KK_DROP_BT_DEPTH]) {
+    if (!kk_drop_audit_enabled()) return 0;
+    size_t idx = ((uintptr_t)block >> 4) % KK_DROP_LEDGER_SIZE;
+    if (g_drop_ledger[idx].block != block) return 0;
+    if (out_callers) {
+        for (int i = 0; i < KK_DROP_BT_DEPTH; i++)
+            out_callers[i] = g_drop_ledger[idx].callers[i];
+    }
+    return g_drop_ledger[idx].seq + 1;
 }

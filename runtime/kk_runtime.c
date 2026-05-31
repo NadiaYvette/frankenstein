@@ -245,6 +245,13 @@ void kk_drop(int64_t ptr) {
         kk_rc_trace_emit("DROP", ptr, count, 0, __builtin_return_address(0));
     /* From here on: cell is going to rc=0 and we cascade.  This is the
      * only path that needs depth tracking for the cycle-collect trigger. */
+    /* Track the outermost kk_drop caller so the drop ledger can
+     * attribute cascade-dropped cells to the original (non-kk_drop)
+     * caller, not to a recursive kk_drop+offset frame. */
+    extern void* kk_outermost_drop_caller;
+    if (kk_drop_depth == 0) {
+        kk_outermost_drop_caller = __builtin_return_address(0);
+    }
     kk_drop_depth++;
     /* Sole owner (rc == 1) — drop children, then free.
      *
@@ -275,6 +282,11 @@ void kk_drop(int64_t ptr) {
         *rc = 0;
         nf = kk_nfields(ptr);
     }
+    /* Record this drop event in the ledger so post-mortem audits
+     * (KK_BOUNDS_AUDIT etc.) can report which kk_drop caller
+     * dropped the cell that now looks dead.  Zero cost when
+     * KK_DROP_AUDIT is off. */
+    kk_drop_audit_record((const void*)(uintptr_t)(ptr - 8));
     /* Stat: count cells reaching rc=0 (for leak hunting; export at exit). */
     extern int64_t kk_n_drops_to_zero;
     kk_n_drops_to_zero++;
@@ -2978,6 +2990,25 @@ void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
                 }
             } else {
                 fprintf(stderr, "  allocated-by: (not in ledger)\n");
+            }
+            /* Who dropped it to rc=0?  Print up to 4 frames of the
+             * drop's call chain (skipping kk_drop's own frames). */
+            void* drop_callers[KK_DROP_BT_DEPTH] = {NULL};
+            if (kk_drop_audit_lookup(block, drop_callers)) {
+                fprintf(stderr, "  drop-chain:\n");
+                for (int i = 0; i < KK_DROP_BT_DEPTH; i++) {
+                    if (!drop_callers[i]) break;
+                    Dl_info di;
+                    if (dladdr(drop_callers[i], &di) && di.dli_sname) {
+                        fprintf(stderr, "    [%d] %s (+%lx)\n", i,
+                                di.dli_sname,
+                                (unsigned long)((const char*)drop_callers[i] - (const char*)di.dli_saddr));
+                    } else {
+                        fprintf(stderr, "    [%d] %p\n", i, drop_callers[i]);
+                    }
+                }
+            } else {
+                fprintf(stderr, "  dropped-by: (not in ledger)\n");
             }
             void* btbuf[12];
             int nb = backtrace(btbuf, 12);

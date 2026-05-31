@@ -227,6 +227,7 @@ int64_t ghc_list_filter_2(int64_t p, int64_t xs) {
         if (tobool(call1(p, arr[i]))) arr[count++] = arr[i];
     int64_t result = array_to_list(arr, count);
     free(arr);
+    kk_drop(p);
     return result;
 }
 static int64_t filter_apply(int64_t clos, int64_t xs) {
@@ -268,6 +269,7 @@ int64_t ghc_list_zipWith_3(int64_t f, int64_t xs, int64_t ys) {
     }
     int64_t result = array_to_list(arr, n);
     free(arr);
+    kk_drop(f);
     return result;
 }
 
@@ -279,6 +281,7 @@ int64_t ghc_list_span_2(int64_t p, int64_t xs) {
     int64_t left = array_to_list(arr, split);
     int64_t right = array_to_list(arr + split, n - split);
     free(arr);
+    kk_drop(p);
     return kk_pair(left, right);
 }
 
@@ -331,6 +334,7 @@ int64_t ghc_list_dropWhile_1(int64_t p) { return make_closure1(&dropWhile_apply,
 int64_t ghc_list_dropWhile_2(int64_t p, int64_t xs) __asm__("GHC_Internal_List_dropWhile$2");
 int64_t ghc_list_dropWhile_2(int64_t p, int64_t xs) {
     while (!kk_is_nil(xs) && call1(p, kk_list_head(xs))) xs = kk_list_tail(xs);
+    kk_drop(p);
     return xs;
 }
 static int64_t dropWhile_apply(int64_t clos, int64_t xs) {
@@ -350,6 +354,7 @@ int64_t ghc_list_takeWhile_2(int64_t p, int64_t xs) {
     }
     int64_t result = array_to_list(arr, n);
     free(arr);
+    kk_drop(p);
     return result;
 }
 
@@ -368,6 +373,7 @@ int64_t ghc_list_scanl_3(int64_t f, int64_t z, int64_t xs) {
     }
     int64_t result = array_to_list(arr, n);
     free(arr);
+    kk_drop(f);
     return result;
 }
 
@@ -378,9 +384,10 @@ int64_t ghc_list_scanl_3(int64_t f, int64_t z, int64_t xs) {
 int64_t ghc_foldable_all_2(int64_t p, int64_t xs) __asm__("GHC_Internal_Data_Foldable_all$2");
 int64_t ghc_foldable_all_2(int64_t p, int64_t xs) {
     while (!kk_is_nil(xs)) {
-        if (!tobool(call1(p, kk_list_head(xs)))) return 0;
+        if (!tobool(call1(p, kk_list_head(xs)))) { kk_drop(p); return 0; }
         xs = kk_list_tail(xs);
     }
+    kk_drop(p);
     return 1;
 }
 
@@ -389,9 +396,10 @@ int64_t ghc_foldable_any_1(int64_t p) { return make_closure1(&any_apply, p); }
 int64_t ghc_foldable_any_2(int64_t p, int64_t xs) __asm__("GHC_Internal_Data_Foldable_any$2");
 int64_t ghc_foldable_any_2(int64_t p, int64_t xs) {
     while (!kk_is_nil(xs)) {
-        if (tobool(call1(p, kk_list_head(xs)))) return 1;
+        if (tobool(call1(p, kk_list_head(xs)))) { kk_drop(p); return 1; }
         xs = kk_list_tail(xs);
     }
+    kk_drop(p);
     return 0;
 }
 static int64_t any_apply(int64_t clos, int64_t xs) { return ghc_foldable_any_2(kk_field(clos,1), xs); }
@@ -502,9 +510,10 @@ int64_t ghc_foldable_find_2(int64_t p, int64_t xs) __asm__("GHC_Internal_Data_Fo
 int64_t ghc_foldable_find_2(int64_t p, int64_t xs) {
     while (!kk_is_nil(xs)) {
         int64_t h = kk_list_head(xs);
-        if (tobool(call1(p, h))) return kk_just(h);
+        if (tobool(call1(p, h))) { kk_drop(p); return kk_just(h); }
         xs = kk_list_tail(xs);
     }
+    kk_drop(p);
     return kk_nothing();
 }
 static int64_t find_apply(int64_t clos, int64_t xs) { return ghc_foldable_find_2(kk_field(clos,1), xs); }
@@ -513,6 +522,7 @@ int64_t ghc_foldable_foldl_3(int64_t f, int64_t z, int64_t xs) __asm__("GHC_Inte
 int64_t ghc_foldable_foldl_3(int64_t f, int64_t z, int64_t xs) {
     int64_t acc = z;
     while (!kk_is_nil(xs)) { acc = call2(f, acc, kk_list_head(xs)); xs = kk_list_tail(xs); }
+    kk_drop(f);
     return acc;
 }
 
@@ -520,9 +530,12 @@ int64_t ghc_foldable_foldr_3(int64_t f, int64_t z, int64_t xs) __asm__("GHC_Inte
 int64_t ghc_foldable_foldr_3(int64_t f, int64_t z, int64_t xs) {
     /* Force xs: in plotkin mode the list may arrive as a thunk
      * (kk_thunk_force is a no-op on non-thunks). See ABI audit
-     * boundary B in docs/plotkin-abi-audit.md. */
+     * boundary B in docs/plotkin-abi-audit.md.
+     * f is owned; for the base case drop it.  For the recursive
+     * call, retain so the recursive frame owns its own copy. */
     xs = kk_thunk_force(xs);
-    if (kk_is_nil(xs)) return z;
+    if (kk_is_nil(xs)) { kk_drop(f); return z; }
+    kk_retain(f);
     return call2(f, kk_list_head(xs), ghc_foldable_foldr_3(f, z, kk_list_tail(xs)));
 }
 

@@ -340,6 +340,10 @@ static int64_t bind_runner(int64_t clos, int64_t s) {
         fprintf(stderr, "[bind#%d CRASH] f=%p a=%p s2=%p\n", n, (void*)f, (void*)a, (void*)s2);
         abort();
     }
+    /* C-runner closure-arg drop: matches the Haskell-lifted-lambda
+     * convention (commit 871afa7) so that call1's retain (908f813)
+     * is balanced per invocation. */
+    kk_drop(clos);
     return call1(g, s2);
 }
 
@@ -366,7 +370,9 @@ static int64_t then_runner(int64_t clos, int64_t s) {
     int64_t m2 = kk_field(clos, 2);
     int64_t pair1 = call1(m1, s);
     int64_t s2 = kk_snd(pair1);
-    return call1(m2, s2);
+    int64_t result = call1(m2, s2);
+    kk_drop(clos);
+    return result;
 }
 
 int64_t ghc_base_then_2(int64_t m1, int64_t m2) __asm__("GHC_Internal_Base_zgzg$2");
@@ -412,7 +418,9 @@ static int64_t fmap_state_runner(int64_t clos, int64_t s) {
     int64_t result = call1(action, s);
     int64_t a  = kk_fst(result);
     int64_t s2 = kk_snd(result);
-    return kk_pair(call1(f, a), s2);
+    int64_t out = kk_pair(call1(f, a), s2);
+    kk_drop(clos);
+    return out;
 }
 
 static int64_t fmap_apply(int64_t clos, int64_t xs) {
@@ -420,7 +428,9 @@ static int64_t fmap_apply(int64_t clos, int64_t xs) {
     /* Dispatch: if xs is a closure (State monad action), use State fmap;
        otherwise treat as a list. */
     if (kk_is_heap_ptr(xs) && kk_tag(xs) == KK_CLOSURE_TAG) {
-        return make_closure2(&fmap_state_runner, f, xs);
+        int64_t cl = make_closure2(&fmap_state_runner, f, xs);
+        kk_drop(clos);
+        return cl;
     }
     int64_t result = kk_nil();
     int64_t *stack = NULL;
@@ -435,6 +445,7 @@ static int64_t fmap_apply(int64_t clos, int64_t xs) {
     for (int64_t i = count - 1; i >= 0; i--)
         result = kk_cons(stack[i], result);
     free(stack);
+    kk_drop(clos);
     return result;
 }
 

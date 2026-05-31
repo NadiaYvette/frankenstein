@@ -468,10 +468,10 @@ static int64_t text_unlines(int64_t list) {
 static int64_t text_map(int64_t f, int64_t s) {
     int64_t len;
     const char* buf = text_borrow(s, &len);
-    if (len == 0) return kk_string_empty();
+    if (len == 0) { kk_drop(f); return kk_string_empty(); }
     /* Worst case: each input byte becomes 4 output bytes */
     char* out = (char*)malloc((size_t)len * 4 + 1);
-    if (!out) return kk_string_empty();
+    if (!out) { kk_drop(f); return kk_string_empty(); }
     int64_t opos = 0;
     int64_t i = 0;
     while (i < len) {
@@ -483,6 +483,7 @@ static int64_t text_map(int64_t f, int64_t s) {
     }
     int64_t r = text_from_buf(out, opos);
     free(out);
+    kk_drop(f);
     return r;
 }
 
@@ -495,8 +496,9 @@ static int64_t text_all(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (!call_closure_1(f, cp)) return 0;
+        if (!call_closure_1(f, cp)) { kk_drop(f); return 0; }
     }
+    kk_drop(f);
     return 1;
 }
 
@@ -509,8 +511,9 @@ static int64_t text_any(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        if (call_closure_1(f, cp)) return 1;
+        if (call_closure_1(f, cp)) { kk_drop(f); return 1; }
     }
+    kk_drop(f);
     return 0;
 }
 
@@ -519,7 +522,7 @@ static int64_t text_take_while(int64_t f, int64_t s) {
     int64_t flat = kk_str_flatten(s);
     int64_t len;
     const char* buf = text_borrow(flat, &len);
-    if (len == 0) return kk_string_empty();
+    if (len == 0) { kk_drop(f); return kk_string_empty(); }
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
@@ -527,6 +530,7 @@ static int64_t text_take_while(int64_t f, int64_t s) {
         if (!call_closure_1(f, cp)) break;
         i += bytes_used;
     }
+    kk_drop(f);
     return text_slice(flat, 0, i);
 }
 
@@ -535,7 +539,7 @@ static int64_t text_drop_while(int64_t f, int64_t s) {
     int64_t flat = kk_str_flatten(s);
     int64_t len;
     const char* buf = text_borrow(flat, &len);
-    if (len == 0) return kk_string_empty();
+    if (len == 0) { kk_drop(f); return kk_string_empty(); }
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
@@ -543,6 +547,7 @@ static int64_t text_drop_while(int64_t f, int64_t s) {
         if (!call_closure_1(f, cp)) break;
         i += bytes_used;
     }
+    kk_drop(f);
     return text_slice(flat, i, len - i);
 }
 
@@ -551,7 +556,7 @@ static int64_t text_drop_while_end(int64_t f, int64_t s) {
     int64_t flat = kk_str_flatten(s);
     int64_t len;
     const char* buf = text_borrow(flat, &len);
-    if (len == 0) return kk_string_empty();
+    if (len == 0) { kk_drop(f); return kk_string_empty(); }
     int64_t end = len;
     while (end > 0) {
         int64_t cp_start = end - 1;
@@ -562,6 +567,7 @@ static int64_t text_drop_while_end(int64_t f, int64_t s) {
         if (!call_closure_1(f, cp)) break;
         end = cp_start;
     }
+    kk_drop(f);
     return text_slice(flat, 0, end);
 }
 
@@ -570,7 +576,7 @@ static int64_t text_span(int64_t f, int64_t s) {
     int64_t flat = kk_str_flatten(s);
     int64_t len;
     const char* buf = text_borrow(flat, &len);
-    if (len == 0) return kk_pair(kk_string_empty(), kk_string_empty());
+    if (len == 0) { kk_drop(f); return kk_pair(kk_string_empty(), kk_string_empty()); }
     int64_t i = 0;
     while (i < len) {
         int64_t bytes_used;
@@ -579,6 +585,7 @@ static int64_t text_span(int64_t f, int64_t s) {
         i += bytes_used;
     }
     int64_t r = kk_pair(text_slice(flat, 0, i), text_slice(flat, i, len - i));
+    kk_drop(f);
     return r;
 }
 
@@ -817,11 +824,11 @@ int64_t text_concat_1(int64_t list) { return text_concat(list); }
 static int64_t text_concatMap(int64_t f, int64_t s) {
     int64_t len;
     const char* borrowed = text_borrow(s, &len);
-    if (len == 0) return kk_string_empty();
+    if (len == 0) { kk_drop(f); return kk_string_empty(); }
     /* Copy bytes into a local buffer so that call_closure_1 / kk_str_concat
      * cannot invalidate our pointer (use-after-free from RC drops).         */
     char* buf = (char*)malloc((size_t)len);
-    if (!buf) return kk_string_empty();
+    if (!buf) { kk_drop(f); return kk_string_empty(); }
     memcpy(buf, borrowed, (size_t)len);
     int64_t result = kk_string_empty();
     int64_t i = 0;
@@ -829,11 +836,15 @@ static int64_t text_concatMap(int64_t f, int64_t s) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + i, &bytes_used);
         i += bytes_used;
-        kk_retain(f);
+        /* No per-iter retain: call_closure_1 already retains the closure
+         * (Phase 12c step 8 / commit 908f813), balancing the body's drop
+         * of its own closure-arg.  Per iter is rc-neutral; the original
+         * ref is consumed by the kk_drop(f) at end of function. */
         int64_t piece = call_closure_1(f, cp);
         result = kk_str_concat(result, piece);
     }
     free(buf);
+    kk_drop(f);
     return result;
 }
 
@@ -1052,12 +1063,13 @@ int64_t text_tail_1(int64_t s) { return text_tail(s); }
 /* --- break (predicate version) --- */
 
 /* T.break pred text: split at first char where pred is true.
- * Returns (before, after) as a Haskell tuple. */
+ * Returns (before, after) as a Haskell tuple.
+ * pred is owned by this function; drop on every return path. */
 static int64_t text_break_pred(int64_t pred, int64_t s) {
     int64_t flat = kk_str_flatten(s);
     int64_t len;
     const char* buf = text_borrow(flat, &len);
-    if (len == 0) return kk_pair(kk_string_empty(), kk_string_empty());
+    if (len == 0) { kk_drop(pred); return kk_pair(kk_string_empty(), kk_string_empty()); }
     int64_t off = 0;
     while (off < len) {
         int64_t bytes_used;
@@ -1066,12 +1078,14 @@ static int64_t text_break_pred(int64_t pred, int64_t s) {
         if (r) {
             int64_t before = text_slice(flat, 0, off);
             int64_t after  = text_slice(flat, off, len - off);
+            kk_drop(pred);
             return kk_pair(before, after);
         }
         off += bytes_used;
     }
     /* No match — return (whole, empty). Retain the original string. */
     kk_str_retain(flat);
+    kk_drop(pred);
     return kk_pair(flat, kk_string_empty());
 }
 
@@ -1096,11 +1110,12 @@ int64_t text_splitAt_2(int64_t n, int64_t s) { return text_split_at(n, s); }
 
 /* --- foldl' --- */
 
-/* T.foldl' f z text: strict left fold over codepoints */
+/* T.foldl' f z text: strict left fold over codepoints.
+ * f is owned by this function; drop at every return path. */
 static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
     int64_t len;
     const char* buf = text_borrow(s, &len);
-    if (len == 0) return z;
+    if (len == 0) { kk_drop(f); return z; }
     int64_t acc = z;
     int64_t off = 0;
     while (off < len) {
@@ -1116,6 +1131,7 @@ static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
         off += bytes_used;
     }
     /* buf is borrowed — do NOT free */
+    kk_drop(f);
     return acc;
 }
 

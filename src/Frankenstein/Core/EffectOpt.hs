@@ -289,7 +289,8 @@ countAppsOf name = go
     go (EApp f as)         = go f + sum (map go as)
     go (ELam _ b)          = go b
     go (ELet bgs b)        =
-      sum [ go (bindExpr bnd) | bg <- bgs, bnd <- bg ] + go b
+      -- Explicit concatMap form (see commit a5a578c).
+      sum (concatMap (map (go . bindExpr)) bgs) + go b
     go (ECase s brs)       = go s + sum (map (go . branchBody) brs)
     go (EHandle _ h b)     = go h + go b
     go (EPerform _ as)     = sum (map go as)

@@ -254,7 +254,8 @@ collectCallTargets = go
     go (EApp (EVar n) args) = Set.insert n (Set.unions (map go args))
     go (EApp f args)        = Set.union (go f) (Set.unions (map go args))
     go (ELet bgs body)      =
-      Set.union (Set.unions [go (bindExpr b) | bg <- bgs, b <- bg]) (go body)
+      -- Explicit concatMap form (see commit a5a578c).
+      Set.union (Set.unions (concatMap (map (go . bindExpr)) bgs)) (go body)
     go (ECase s brs)        =
       Set.union (go s) (Set.unions (map (go . branchBody) brs))
     go (ELam _ b)           = go b
@@ -281,8 +282,9 @@ freeVars (EFunRef _)      = Set.empty
 freeVars (EApp f args)    = Set.unions (freeVars f : map freeVars args)
 freeVars (ELam ps body)   = freeVars body `Set.difference` Set.fromList (map fst ps)
 freeVars (ELet bgs body)  =
-  let bound   = Set.fromList [bindName b | bg <- bgs, b <- bg]
-      bindFvs = Set.unions [freeVars (bindExpr b) | bg <- bgs, b <- bg]
+  -- Explicit concatMap form (see commit a5a578c).
+  let bound   = Set.fromList (concatMap (map bindName) bgs)
+      bindFvs = Set.unions (concatMap (map (freeVars . bindExpr)) bgs)
   in (bindFvs `Set.union` freeVars body) `Set.difference` bound
 freeVars (ECase s brs)    =
   Set.union (freeVars s) (Set.unions (map branchFreeVars brs))

@@ -90,8 +90,9 @@ elideConsumedDrops = goExpr Set.empty
     collectConsumed (EApp f args) =
       collectConsumed f `Set.union` Set.unions (map collectConsumed args)
     collectConsumed (ELet bgs body) =
+      -- Explicit concatMap form (see commit a5a578c).
       Set.unions (collectConsumed body :
-        [collectConsumed (bindExpr bd) | bg <- bgs, bd <- bg])
+        concatMap (map (collectConsumed . bindExpr)) bgs)
     collectConsumed (ELam _ b)        = collectConsumed b
     collectConsumed (ECase s brs)     =
       collectConsumed s `Set.union`

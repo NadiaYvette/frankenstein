@@ -225,14 +225,18 @@ buildSymbolTable defs =
 -- | Build a constructor symbol table from data declarations.
 buildConTable :: [DataDecl] -> SymbolTable
 buildConTable decls =
-  Map.fromListWith (++)
-    [ ( nameText (qnameName (conName c))
-      , [(qnameModule (conName c),
-          mangleName (qnameModule (conName c))
-                     (nameText (qnameName (conName c))))]
-      )
-    | dd <- decls, c <- dataCons dd
-    ]
+  -- Explicit concatMap form (see commit a5a578c): GHC's nested-list-comp
+  -- desugar uses derived helpers that Perceus over-drops on outerTail.
+  Map.fromListWith (++) $
+    concatMap (\dd ->
+      map (\c ->
+            ( nameText (qnameName (conName c))
+            , [(qnameModule (conName c),
+                mangleName (qnameModule (conName c))
+                           (nameText (qnameName (conName c))))]
+            ))
+          (dataCons dd))
+      decls
 
 -- | Rewrite all definitions so that:
 --   (a) Each definition's name is mangled to include its module prefix.
@@ -441,9 +445,10 @@ rewriteExpr homeMod selfName symTab conTab expr0 = go Set.empty expr0
         in (ELam params body', ws, es)
 
       ELet bgs body ->
-        let -- All names bound in this let (visible in all groups + body)
+        let -- All names bound in this let (visible in all groups + body).
+            -- Explicit concatMap form (see commit a5a578c).
             bound = Set.fromList
-              [nameText (bindName b) | bg <- bgs, b <- bg]
+              (concatMap (map (nameText . bindName)) bgs)
             locals' = Set.union locals bound
             (bgs', ws1, es1) = goBindGroups locals' bgs
             (body', ws2, es2) = go locals' body
@@ -671,16 +676,20 @@ detectUndefinedSymbols prog =
         [ (qnameModule (defName d), nameText (qnameName (defName d)))
         | d <- progDefs prog ]
 
-      -- Constructor names from data declarations
+      -- Constructor names from data declarations.
+      -- Explicit concatMap form avoids the GHC-derived nested-comp
+      -- helpers that Perceus over-drops (see commit a5a578c).
       conQNames :: Set (Text, Text)
-      conQNames = Set.fromList
-        [ (qnameModule (conName c), nameText (qnameName (conName c)))
-        | dd <- progData prog, c <- dataCons dd ]
+      conQNames = Set.fromList $
+        concatMap (\dd ->
+          map (\c -> (qnameModule (conName c), nameText (qnameName (conName c))))
+              (dataCons dd))
+          (progData prog)
 
       conNames :: Set Text
-      conNames = Set.fromList
-        [ nameText (qnameName (conName c))
-        | dd <- progData prog, c <- dataCons dd ]
+      conNames = Set.fromList $
+        concatMap (\dd -> map (nameText . qnameName . conName) (dataCons dd))
+          (progData prog)
 
       -- All names that are considered "known"
       allKnown = Set.unions [definedNames, conNames, primitiveNames, runtimeNames]
@@ -745,7 +754,8 @@ collectVarNames expr = go expr
           bodyRefs = go body
       in filter (`Set.notMember` bound) bodyRefs
     go (ELet bgs body) =
-      let bound = Set.fromList [nameText (bindName b) | bg <- bgs, b <- bg]
+      -- Explicit concatMap form (see commit a5a578c).
+      let bound = Set.fromList (concatMap (map (nameText . bindName)) bgs)
           bgRefs = concatMap (\bg -> concatMap (go . bindExpr) bg) bgs
           bodyRefs = go body
       in filter (`Set.notMember` bound) (bgRefs ++ bodyRefs)

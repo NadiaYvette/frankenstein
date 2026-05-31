@@ -109,19 +109,21 @@ data Env = Env
 
 buildEnv :: Program -> Env
 buildEnv prog = Env
-  { envCtors   = Map.fromList
-      [ ( (qnameModule (conName c), nameText (qnameName (conName c)))
-        , length (conFields c) )
-      | dd <- progData prog
-      , c <- dataCons dd
-      ]
-  , envOps     = Map.fromList
-      [ ( (qnameModule (effectName ed) <> nameText (qnameName (effectName ed))
-          , nameText (qnameName (opName op)))
-        , opArityOf (opType op) )
-      | ed <- progEffects prog
-      , op <- effectOps ed
-      ]
+  -- Explicit concatMap form (see commit a5a578c): GHC's nested-list-comp
+  -- desugar uses derived helpers that Perceus over-drops.
+  { envCtors   = Map.fromList $
+      concatMap (\dd ->
+        map (\c -> ( (qnameModule (conName c), nameText (qnameName (conName c)))
+                   , length (conFields c) ))
+            (dataCons dd))
+        (progData prog)
+  , envOps     = Map.fromList $
+      concatMap (\ed ->
+        map (\op -> ( ( qnameModule (effectName ed) <> nameText (qnameName (effectName ed))
+                      , nameText (qnameName (opName op)))
+                    , opArityOf (opType op) ))
+            (effectOps ed))
+        (progEffects prog)
   , envFnArity = Map.fromList
       [ ( (qnameModule (defName d), nameText (qnameName (defName d)))
         , typeArity (defType d) )
@@ -176,7 +178,8 @@ checkExpr env = go
         in calleeErrs ++ argsErrs
       ELam _params body -> go body
       ELet bgs body     ->
-        concat [ go (bindExpr b) | bg <- bgs, b <- bg ] ++ go body
+        -- Explicit concatMap form (see commit a5a578c).
+        concat (concatMap (map (go . bindExpr)) bgs) ++ go body
       ECase scrut brs
         | null brs  -> [EmptyCase]
         | otherwise -> go scrut ++ concatMap (checkBranch env) brs

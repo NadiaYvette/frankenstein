@@ -658,7 +658,8 @@ emitProgramText prog =
           go d (EDelay e)    = go d e
           go d (EForce e)    = go d e
           go d (ELet bgs body) =
-            go d body || or [ go d (bindExpr b) | bg <- bgs, b <- bg ]
+            -- Explicit concatMap form (see commit a5a578c).
+            go d body || or (concatMap (map (go d . bindExpr)) bgs)
           go d (ECase _ bs) = any (\(Branch _ _ b) -> go d b) bs
           go d (ELam _ body) = go d body
           go _ _ = False
@@ -696,8 +697,9 @@ emitProgramText prog =
       -- our bridge remap) was previously missed because we only checked
       -- the body of the let, not the binder RHSs.  Check both.
       exprCallsPrint (ELet bgs body)     =
+        -- Explicit concatMap form (see commit a5a578c).
         exprCallsPrint body
-          || or [ exprCallsPrint (bindExpr b) | bg <- bgs, b <- bg ]
+          || or (concatMap (map (exprCallsPrint . bindExpr)) bgs)
       exprCallsPrint (ECase _ bs)        = any (\(Branch _ _ b) -> exprCallsPrint b) bs
       exprCallsPrint (ELam _ body)       = exprCallsPrint body
       exprCallsPrint _                   = False

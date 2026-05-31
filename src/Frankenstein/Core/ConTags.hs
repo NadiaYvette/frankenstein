@@ -137,7 +137,8 @@ ctorsInExpr expr = go expr
     go (EApp f args)       = Set.unions (go f : map go args)
     go (ELam _ body)       = go body
     go (ELet bgs body)     =
-      Set.unions (go body : [go (bindExpr b) | bg <- bgs, b <- bg])
+      -- Explicit concatMap form (see commit a5a578c).
+      Set.unions (go body : concatMap (map (go . bindExpr)) bgs)
     go (ECase scrut bs)    =
       Set.unions (go scrut : map branch bs)
     go (ETypeApp e _)      = go e

@@ -103,14 +103,13 @@ findSelfRefsInData defName expr = go expr
 
     -- Let: check both bindings and body. Recursive bindings within
     -- a let could create cycles too.
+    -- Explicit concatMap form (see commit a5a578c).
     go (ELet bgs body)  =
-      let bgRefs = Set.unions [go (bindExpr b) | bg <- bgs, b <- bg]
+      let bgRefs = Set.unions (concatMap (map (go . bindExpr)) bgs)
           -- Also check for mutual recursion creating data cycles
-          bgNames = Set.fromList [nameText (bindName b) | bg <- bgs, b <- bg]
+          bgNames = Set.fromList (concatMap (map (nameText . bindName)) bgs)
           mutualCycles = Set.unions
-            [ findMutualDataCycles bgNames (bindExpr b)
-            | bg <- bgs, b <- bg
-            ]
+            (concatMap (map (findMutualDataCycles bgNames . bindExpr)) bgs)
       in Set.unions [bgRefs, mutualCycles, go body]
 
     -- Case: recurse into scrutinee and branches
@@ -159,8 +158,9 @@ findMutualDataCycles _bgNames (EApp (ECon _) args) =
      then Set.empty
      else Set.singleton "mutual data cycle in let-rec"
 findMutualDataCycles bgNames (ELet bgs body) =
+  -- Explicit concatMap form (see commit a5a578c).
   Set.unions (findMutualDataCycles bgNames body :
-    [findMutualDataCycles bgNames (bindExpr b) | bg <- bgs, b <- bg])
+    concatMap (map (findMutualDataCycles bgNames . bindExpr)) bgs)
 findMutualDataCycles bgNames (ECase s brs) =
   Set.unions (findMutualDataCycles bgNames s :
     [findMutualDataCycles bgNames (branchBody br) | br <- brs])

@@ -129,9 +129,12 @@ perceusExpr scope expr = case expr of
 
   -- Let: insert drops for unused bindings, retains for multi-use bindings
   ELet bgs body ->
-    let -- Collect all bound names with their multiplicities and types
-        boundInfo = [ (bindName b, bindMultiplicity b, bindType b)
-                    | bg <- bgs, b <- bg ]
+    let -- Collect all bound names with their multiplicities and types.
+        -- Explicit concatMap form (see commit a5a578c) avoids GHC's
+        -- nested-list-comp desugar → derived helper → Perceus over-drop.
+        boundInfo = concatMap
+          (map (\b -> (bindName b, bindMultiplicity b, bindType b)))
+          bgs
         boundNames = [ (n, m) | (n, m, _) <- boundInfo ]
         scope' = foldl (\s (n, m) -> Map.insert n m s) scope boundNames
         bodyFree = freeVars body
@@ -343,8 +346,9 @@ freeVars (ECon _)         = Set.empty
 freeVars (EApp f args)    = Set.unions (freeVars f : map freeVars args)
 freeVars (ELam ps body)   = freeVars body `Set.difference` Set.fromList (map fst ps)
 freeVars (ELet bgs body)  =
-  let bound = Set.fromList [bindName b | bg <- bgs, b <- bg]
-      bindFvs = Set.unions [freeVars (bindExpr b) | bg <- bgs, b <- bg]
+  -- Explicit concatMap form (see commit a5a578c).
+  let bound = Set.fromList (concatMap (map bindName) bgs)
+      bindFvs = Set.unions (concatMap (map (freeVars . bindExpr)) bgs)
   in (bindFvs `Set.union` freeVars body) `Set.difference` bound
 freeVars (ECase s brs)    = Set.unions (freeVars s : map branchFreeVars brs)
 freeVars (ERetain e)      = freeVars e
@@ -425,7 +429,9 @@ legacyAnalyzeUsage expr = go expr
     go (ECon _)         = Map.empty
     go (EApp f args)    = Map.unionsWith (+) (go f : map go args)
     go (ELam _ body)    = go body
-    go (ELet bgs body)  = Map.unionsWith (+) (go body : [go (bindExpr b) | bg <- bgs, b <- bg])
+    go (ELet bgs body)  =
+      -- Explicit concatMap form (see commit a5a578c).
+      Map.unionsWith (+) (go body : concatMap (map (go . bindExpr)) bgs)
     go (ECase s brs)    = Map.unionWith (+) (go s)
                             (Map.unionsWith max [go (branchBody br) | br <- brs])
     go (ERetain e)      = go e

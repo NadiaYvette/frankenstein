@@ -279,15 +279,25 @@ perceusBranch scope mScrutVar br =
       -- Used pattern variables (need retaining before scrutinee drop) paired
       -- with their consuming-use count.  Skip retain for unboxed types —
       -- they're plain integers, not heap ptrs.
-      usedPats = [ (n, Map.findWithDefault 0 n bodyUsage)
-                 | (n, t) <- patVars
-                 , Set.member n bodyFree
-                 , not (isUnboxedType t) ]
+      -- Explicit concatMap, not nested-guard list-comp: GHC desugars
+      -- the comp form into derived recursive helpers (dszd...805406
+      -- here) that over-drop the iterated 2-tuple's fields.  Same
+      -- class as dszd...091 (d90c746) / dszd...249 (a5a578c).
+      usedPats = concatMap
+        (\(n, t) ->
+           if Set.member n bodyFree && not (isUnboxedType t)
+             then [(n, Map.findWithDefault 0 n bodyUsage)]
+             else [])
+        patVars
       -- Unused pattern variables (for fallback when no scrutinee var)
-      unusedPats = [ n | (n, t) <- patVars
-                   , not (Set.member n bodyFree)
-                   , Map.findWithDefault Many n scope' /= Linear
-                   , not (isUnboxedType t) ]
+      unusedPats = concatMap
+        (\(n, t) ->
+           if not (Set.member n bodyFree)
+              && Map.findWithDefault Many n scope' /= Linear
+              && not (isUnboxedType t)
+             then [n]
+             else [])
+        patVars
   in case mScrutVar of
     Just sv ->
       -- Koka-style: retain used fields FIRST, then drop the scrutinee.

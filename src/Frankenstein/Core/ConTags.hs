@@ -39,8 +39,14 @@ conKey qn = nameText (qnameName qn)
 -- Every module that references the same constructor name gets the
 -- same tag, enabling cross-module pattern matching in the self-hosted
 -- pipeline.
+-- Pointful body, not the natural point-free chain
+-- @(`mod` 65521) . abs . T.foldl' step 5381@: GHC compiles the
+-- composition by allocating two (.) closures per call, which the
+-- self-compiler's lambda-lift drops too eagerly — KK_RECYCLE_AUDIT
+-- on Core_Types fires through stableConTag_lambda714 (a (.) cell
+-- of size 24) reached from assignProgramTags's lambda.
 stableConTag :: Text -> Int
-stableConTag = (`mod` 65521) . abs . T.foldl' step 5381
+stableConTag k = abs (T.foldl' step 5381 k) `mod` 65521
   where step acc c = acc * 33 + fromEnum c
 
 -- | Walk a 'Program' and assign a deterministic tag to every

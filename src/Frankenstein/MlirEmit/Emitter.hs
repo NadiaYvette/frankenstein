@@ -4390,7 +4390,14 @@ classifyBranches branches
       let defaultBody = case defaultBranch of
             Just b  -> branchBody b
             Nothing -> branchBody (last branches)  -- last branch as default
-          litPairs = [(n, branchBody b) | b <- intLitBranches, PatLit (LitInt n) <- [branchPattern b]]
+          -- Explicit concatMap, not nested list-comp generator: GHC
+          -- compiles `[ ... | b <- ..., PatLit (LitInt n) <- [branchPattern b] ]`
+          -- as a pair of derived recursive helpers (dszd...127657 /
+          -- dszd...127661) that over-drop their Cons cells.  Same
+          -- class as dszd...091 / dszd...249 / dszd...2274.
+          litPairs = concatMap (\b -> case branchPattern b of
+                                        PatLit (LitInt n) -> [(n, branchBody b)]
+                                        _ -> []) intLitBranches
       in MultiIntLitCase litPairs defaultBody
   -- Single constructor branch with no real default → exhaustive, no scf.if
   | [b] <- conBranches, Nothing <- defaultBranch, length branches == 1
@@ -4398,9 +4405,10 @@ classifyBranches branches
       SingleConCase qn pats (branchBody b)
   -- Constructor patterns.
   | not (null conBranches) =
-      let conData = [(qn, pats, branchBody b)
-                    | b <- conBranches
-                    , PatCon qn pats <- [branchPattern b] ]
+      -- Explicit concatMap; see dszd...127657 note above.
+      let conData = concatMap (\b -> case branchPattern b of
+                                       PatCon qn pats -> [(qn, pats, branchBody b)]
+                                       _ -> []) conBranches
       in case defaultBranch of
            Just b  -> ConCase conData (Just (branchBody b))
            -- No explicit default: treat the branch set as exhaustive.
@@ -4425,7 +4433,10 @@ classifyBranches branches
       let defaultBody = case [b | b <- branches, isDefaultPat (branchPattern b)] of
             (b:_) -> branchBody b
             []    -> branchBody (last branches)
-          charPairs = [(c, branchBody b) | b <- charBranches, PatLit (LitChar c) <- [branchPattern b]]
+          -- Explicit concatMap; see dszd...127657 note above.
+          charPairs = concatMap (\b -> case branchPattern b of
+                                         PatLit (LitChar c) -> [(c, branchBody b)]
+                                         _ -> []) charBranches
       in CharLitCase charPairs defaultBody
   where
     charBranches = [b | b <- branches, isCharLit (branchPattern b)]

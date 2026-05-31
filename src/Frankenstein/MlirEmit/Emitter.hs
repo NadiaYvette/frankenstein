@@ -387,21 +387,30 @@ emitFnAsValue fnName arityMap = do
         case curEvv >>= \e -> Map.lookup e aliases of
           Just r | Set.member r scopeSsa -> Just r
           _                              -> Nothing
-  case resolved of
-    Just evvSsa | isPlotkinFn && arity > 0 ->
-      emitFnAsValueWithArgs fnName arity [evvSsa]
-    _ | isPlotkinFn && arity > 0 -> do
-      -- Fallback: when no in-scope evv is resolvable (e.g. inside a lifted
-      -- lambda whose self-host-emitted body lost track of the outer evv
-      -- capture), pre-supply 0 as the empty-evv sentinel. The PAP wrapper
-      -- still has the right arity (matching plotkin defs), so HOFs invoking
-      -- it via call1/call2 get a saturated dispatch. The captured 0 is
-      -- safe for non-effectful callees (the bootstrap case).
-      zeroSsa <- freshName "v_zero_evv"
-      (ops, ret) <- emitFnAsValueWithArgs fnName arity [zeroSsa]
-      pure ( ("%" <> zeroSsa <> " = arith.constant 0 : i64") : ops, ret )
-    _ ->
-      emitFnAsValueWithArgs fnName arity []
+  -- Lift the `isPlotkinFn && arity > 0` guard out of the inner case
+  -- so the case is exhaustive without guards.  The original
+  -- `case ... of Just _ | guard -> ...; _ | guard -> ...; _ -> ...`
+  -- form left a guard-fall-through path that the self-compiler
+  -- compiled by dropping the captured outer vars and then calling
+  -- GHC's failzd helper with those just-dropped values as args.
+  -- failzd forces them → use-after-drop on a CLOS thunk (size 32,
+  -- LAZY tag).  Observed in Core_Perceus / Core_ConTags /
+  -- Core_FlattenPatterns audit chains.
+  if isPlotkinFn && arity > 0
+    then case resolved of
+      Just evvSsa -> emitFnAsValueWithArgs fnName arity [evvSsa]
+      Nothing -> do
+        -- Fallback: when no in-scope evv is resolvable (e.g. inside a
+        -- lifted lambda whose self-host-emitted body lost track of the
+        -- outer evv capture), pre-supply 0 as the empty-evv sentinel.
+        -- The PAP wrapper still has the right arity (matching plotkin
+        -- defs), so HOFs invoking it via call1/call2 get a saturated
+        -- dispatch. The captured 0 is safe for non-effectful callees
+        -- (the bootstrap case).
+        zeroSsa <- freshName "v_zero_evv"
+        (ops, ret) <- emitFnAsValueWithArgs fnName arity [zeroSsa]
+        pure ( ("%" <> zeroSsa <> " = arith.constant 0 : i64") : ops, ret )
+    else emitFnAsValueWithArgs fnName arity []
 
 -- | Emit a function as value, optionally pre-supplying captured arguments.
 emitFnAsValueWithArgs :: Text -> Int -> [Text] -> Emit ([Text], Text)

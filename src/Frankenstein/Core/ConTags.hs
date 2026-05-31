@@ -91,7 +91,12 @@ assignProgramTags prog =
       endsWithCI suf k =
         let n = T.length suf
         in T.length k >= n && T.toLower (T.takeEnd n k) == T.toLower suf
-  in Map.fromList [(k, tagFor k) | k <- Set.toList referenced]
+      -- Explicit map form, not a list-comp: GHC desugars the latter
+      -- to a derived recursive helper (dszd...2274) whose CONS branch
+      -- drops the iterated cell before its head is fully consumed,
+      -- freeing k while (k, tagFor k) still reads from it.  Same class
+      -- as dszd...091 (commit d90c746) and dszd...249 (commit a5a578c).
+  in Map.fromList (map (\k -> (k, tagFor k)) (Set.toList referenced))
 
 -- | Hardcoded runtime constructor tag for @Cons@ cells produced by
 -- 'kk_cons' in @runtime/kk_runtime.c@.  Must stay in sync with

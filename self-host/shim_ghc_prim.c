@@ -80,16 +80,27 @@ static int64_t call1(int64_t clos, int64_t a) {
         return ((raw1_t)(intptr_t)clos)(a);
     }
     int64_t fp = kk_field(clos, 0);
-    if (fp == 0) {
-        fprintf(stderr, "FATAL: call1 null fp! clos=%p tag=%ld nf=%ld a=%p\n",
-                (void*)clos, (long)kk_tag(clos), (long)kk_nfields(clos), (void*)a);
-        /* Try to find what the closure contains */
+    /* Validate fn ptr is in text segment range (~[0x400000, 0x2000000)
+     * for this binary).  Heap-derived garbage will be > 0x10000000. */
+    if (fp == 0 || (uint64_t)fp < 0x400000 || (uint64_t)fp >= 0x2000000) {
+        fprintf(stderr, "FATAL: call1 bad fp=0x%lx! clos=%p tag=%ld nf=%ld a=%p caller=%p\n",
+                (unsigned long)fp, (void*)clos, (long)kk_tag(clos),
+                (long)kk_nfields(clos), (void*)a,
+                __builtin_return_address(0));
         int64_t nf = kk_nfields(clos);
         for (int64_t i = 0; i < nf && i < 5; i++) {
             int64_t fi = kk_field(clos, i);
-            fprintf(stderr, "  field[%ld] = %ld (0x%lx) heap=%d\n",
-                    (long)i, (long)fi, (unsigned long)fi, kk_is_heap_ptr(fi));
+            fprintf(stderr, "  field[%ld] = 0x%lx heap=%d\n",
+                    (long)i, (unsigned long)fi, kk_is_heap_ptr(fi));
         }
+        void* btbuf[12];
+        extern int backtrace(void**, int);
+        extern char** backtrace_symbols(void* const*, int);
+        int nb = backtrace(btbuf, 12);
+        char** syms = backtrace_symbols(btbuf, nb);
+        for (int i = 0; i < nb && syms; i++)
+            fprintf(stderr, "  bt[%d] %s\n", i, syms[i]);
+        free(syms);
         exit(99);
     }
     return ((fn1_t)(intptr_t)fp)(clos, a);
@@ -106,6 +117,26 @@ static int64_t call2(int64_t clos, int64_t a, int64_t b) {
         return ((raw2_t)(intptr_t)clos)(a, b);
     }
     int64_t fp = kk_field(clos, 0);
+    if (fp == 0 || (uint64_t)fp < 0x400000 || (uint64_t)fp >= 0x2000000) {
+        fprintf(stderr, "FATAL: call2 bad fp=0x%lx! clos=%p tag=%ld nf=%ld\n",
+                (unsigned long)fp, (void*)clos, (long)kk_tag(clos),
+                (long)kk_nfields(clos));
+        int64_t nf = kk_nfields(clos);
+        for (int64_t i = 0; i < nf && i < 5; i++) {
+            int64_t fi = kk_field(clos, i);
+            fprintf(stderr, "  field[%ld] = 0x%lx heap=%d\n",
+                    (long)i, (unsigned long)fi, kk_is_heap_ptr(fi));
+        }
+        void* btbuf[12];
+        extern int backtrace(void**, int);
+        extern char** backtrace_symbols(void* const*, int);
+        int nb = backtrace(btbuf, 12);
+        char** syms = backtrace_symbols(btbuf, nb);
+        for (int i = 0; i < nb && syms; i++)
+            fprintf(stderr, "  bt[%d] %s\n", i, syms[i]);
+        free(syms);
+        exit(99);
+    }
     return ((fn2_t)(intptr_t)fp)(clos, a, b);
 }
 

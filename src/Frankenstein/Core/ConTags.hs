@@ -108,14 +108,20 @@ kkNilTag = 31636
 -- | Gather the set of constructor names referenced by a program.
 -- Scans both 'DataDecl's (so declared ctors always appear, even if
 -- unused) and every 'Expr' tree reachable from 'progDefs'.
+--
+-- The list comprehension is written as an explicit concatMap + map
+-- chain rather than the nested @[ ... | x <- ..., y <- ... ]@ form
+-- because GHC desugars the latter into a derived dictionary helper
+-- that the Frankenstein Perceus pass over-drops on the outer-tail
+-- argument (the recursive concatMap call gets a freed cell and
+-- segfaults on its tag read).  The explicit form goes through
+-- standard concatMap/map which Perceus handles correctly.
 collectReferencedCtors :: Program -> Set Text
 collectReferencedCtors prog =
-  let fromData = Set.fromList
-        [ conKey (conName cd)
-        | dd <- progData prog
-        , cd <- dataCons dd
-        ]
-      fromDefs = Set.unions (map (ctorsInExpr . defExpr) (progDefs prog))
+  let dataDecls = progData prog
+      ctorNames = concatMap (\dd -> map (conKey . conName) (dataCons dd)) dataDecls
+      fromData  = Set.fromList ctorNames
+      fromDefs  = Set.unions (map (ctorsInExpr . defExpr) (progDefs prog))
   in fromData `Set.union` fromDefs
 
 -- | Recursively collect every constructor name referenced by an

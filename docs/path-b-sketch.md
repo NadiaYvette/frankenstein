@@ -301,3 +301,97 @@ sketch enumerated.  Three additional concerns surfaced:
 result as informative data.  A more conservative next attempt would
 be to keep this sketch's "Step 1 alone" (remove body drop) and see
 whether hellos + bootstrap improve, before adding call-site drops.
+
+## Addendum 2 — Path B + liveness retry (NEGATIVE)
+
+Branch `path-b` `b35f0d2` integrates `Frankenstein.Core.Liveness` via
+a new pass `Frankenstein.Core.InsertDrops`:
+
+- `closureCandidates`: names appearing in `EApp` function position,
+  intersected with `boundInExpr` (filters out top-level fn refs and
+  GHC primitives).
+- `insertPathBDrops`: walks the IR with a position counter matching
+  `Liveness`'s evaluation-order numbering; at each subexpression
+  whose range contains a candidate's last-use position, wraps the
+  expression with a sequenced `EDrop`.
+- `recursivelyInsert`: descends into `ELam` / `EDelay` bodies (each
+  becomes its own lifted function at emit time, so each needs its
+  own last-use drops).
+- Wired into `app/Main.hs` after `insertPerceus`.
+
+Tested three variants (hellos PASS 26/26 in all of them):
+
+1. With `stripRetains` for closure candidates — Phase 8 0/21, MLIR
+   errors like `'Nested_sumBoxTree' does not reference a valid
+   function`.
+2. + `ELam` recursive descent — same 0/21.
+3. Without `stripRetains` (just the drop insertion) — same 0/21,
+   stage 1's emitted MLIR shows `Nested_sumBoxTree` *renamed* to
+   `Nested_kk_retain` — i.e., memory corruption on Def records, the
+   def's `name` field pointing into a freed/recycled cell.
+
+### Root cause identified
+
+`emitLambdaLift` constructs closures **without retaining captures**
+(`Emitter.hs` lines 3710-3722).  The closure construction itself
+transfers ownership: `kk_set_field(closure, idx, capture)` stores
+the capture but doesn't bump its rc.  So from the outer scope's
+perspective, the `ELam` *consumes* its captures.
+
+But my Liveness module treats `ELam` as "captures used at this
+position," which makes outer-scope last-use of a capture land AT
+THE ELAM.  My InsertDrops then inserts a drop AFTER the ELam — but
+the closure already consumed the capture during construction.
+**Double-consume.**
+
+The Liveness module's semantics are correct for "outer-scope last
+use" — ELam captures ARE last-used at the ELam position.  But my
+InsertDrops misinterprets that as a drop site.  ELam takes
+ownership; that's where the var dies, no explicit drop needed.
+
+### What this teaches us about Path B's depth
+
+The closure-arg contract is *not* the only ownership convention in
+play.  At least three others exist that interlock:
+
+1. **Closure construction ownership** — `emitLambdaLift` consumes
+   captures by storing them without retain.  Symmetric C helpers
+   (`make_closureN` in `shim_ghc_list.c`) retain before
+   `kk_set_field`.  These two implementations have inconsistent
+   conventions (Haskell-side emitter consumes; C-side helper
+   retains-then-stores, net effect of retaining once).
+2. **Cascade-drop of captures** — when a closure cell reaches rc=0,
+   `kk_drop` recursively drops its captures.  This balances the
+   construction-time consume.
+3. **Body-drop of closure-arg** — what 871afa7 added and Path B
+   reverts.  Per-invocation drop of the closure cell itself.
+
+The Current contract's internal consistency relies on all three
+working together.  Inverting just (3) without auditing (1) and (2)
+produces the double-consume we see.
+
+### What would actually be needed for Path B
+
+To make Path B work end-to-end:
+
+- **emitLambdaLift should retain each capture** before
+  `kk_set_field` (matching the C helpers).  Then closure
+  construction is conceptually "retain + store" — borrow semantics
+  for the outer scope.
+- **InsertDrops can then safely insert a drop at the ELam-position
+  last-use** because the outer-scope ref still exists (the closure
+  has its own retained ref).
+- **Body-drop removal** (Path B step 1) still applies — the body
+  doesn't consume the closure-arg, the caller drops it.
+- **Caller call-site drops** are inserted at last-use position via
+  InsertDrops, on closure variables.
+- **stripRetains for closure candidates** may still be needed (the
+  Perceus wrapRetains added retains assuming Current's per-call
+  consume; under Path B those retains leak).  Or wrapRetains itself
+  needs Path-B awareness.
+
+This is a 5–10 hour effort with multiple interlocking checkpoints
+in `emitLambdaLift`, the `InsertDrops` pass, the C shims, and
+possibly Perceus's `wrapRetains`.  Each step needs hellos to remain
+green, and stage 1 needs to compile correctly for the emitter
+itself to work as a self-host module.

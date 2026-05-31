@@ -3646,12 +3646,18 @@ emitLambdaLift params body = do
       extraCounts = [ 1 | _ <- extraCapsUniq ]
       allCounts = capCounts ++ extraCounts
       allCapFresh = capFresh ++ extraCapFresh
+      -- zipWith3 form: avoids the GHC-derived recursive helper that
+      -- list-comp-over-zip3 desugars into.  That helper destructures
+      -- the iterated 3-tuple via kk_field, then drops it before its
+      -- fields are consumed — freeing fields used later (dszd...091
+      -- over-drop, sibling of dszd...249/commit a5a578c).
+      mkPrologue i cfn cnt =
+        [ "%idx_" <> cfn <> " = arith.constant " <> T.pack (show i) <> " : i64"
+        , "%" <> cfn <> " = func.call @kk_field(%" <> closFresh <> ", %idx_" <> cfn <> ") : (i64, i64) -> i64"
+        ] ++ replicate cnt ("func.call @kk_retain(%" <> cfn <> ") : (i64) -> ()")
       prologue = concat
-        [ [ "%idx_" <> cfn <> " = arith.constant " <> T.pack (show i) <> " : i64"
-          , "%" <> cfn <> " = func.call @kk_field(%" <> closFresh <> ", %idx_" <> cfn <> ") : (i64, i64) -> i64"
-          ] ++ replicate cnt ("func.call @kk_retain(%" <> cfn <> ") : (i64) -> ()")
-        | (i, cfn, cnt) <- zip3 [(1::Int)..length allCapFresh] allCapFresh allCounts
-        ]
+        (zipWith3 mkPrologue
+          [(1::Int)..length allCapFresh] allCapFresh allCounts)
   (bodyOps, bodyResult) <- emitExpr body
   -- Restore alias map and scope set (body-local context shouldn't leak out).
   modify (\s -> s { esAliases  = savedAliases

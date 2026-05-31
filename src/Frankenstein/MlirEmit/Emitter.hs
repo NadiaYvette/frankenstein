@@ -198,11 +198,19 @@ emitPapClosure fnName arity suppliedArgs = do
         , "%" <> idxZeroName <> " = arith.constant 0 : i64"
         , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxZeroName <> ", %" <> fptrName <> ") : (i64, i64, i64) -> ()"
         ]
-  -- Store each supplied arg into slots 1..nSupplied
+  -- Store each supplied arg into slots 1..nSupplied.
+  -- Retain before storing so the PAP cell has its own ref to each
+  -- captured arg.  Mirrors emitLambdaLift's capture handling (see
+  -- commit 32f2f42 + this commit's standalone retain-captures fix):
+  -- when the PAP is later dropped, cascade-drop releases one ref of
+  -- each capture, balancing the retain.  Without this, a PAP that's
+  -- constructed and immediately dropped — common in derived dictionary
+  -- helpers like ctorsInExpr — would over-drop its captures.
   setOps <- fmap concat $ mapM (\(i, a) -> do
       idxN <- freshName "v"
       pure
         [ "%" <> idxN <> " = arith.constant " <> T.pack (show i) <> " : i64"
+        , "func.call @kk_retain(%" <> a <> ") : (i64) -> ()"
         , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxN <> ", %" <> a <> ") : (i64, i64, i64) -> ()"
         ]
     ) (zip [(1 :: Int)..length suppliedArgs] suppliedArgs)
@@ -3707,9 +3715,23 @@ emitLambdaLift params body = do
   -- Resolve extra capture SSA keys from current aliases (before they're saved).
   let extraCapturedNames = map (\k -> Map.findWithDefault k k currentAliases) extraCapsUniq
       allCapturedNames = capturedNames ++ extraCapturedNames
+  -- Retain each capture before storing it in the closure cell.  This
+  -- mirrors the C-side make_closureN helpers and prevents the
+  -- "dead closure cascade-drops a still-live thunk" class of crashes
+  -- diagnosed in commit 32f2f42 (KK_DROP_AUDIT pinpointed
+  -- Frankenstein.Core.ConTags.ctorsInExpr's prologue as dropping a
+  -- thunk via an unused closure that captured it).
+  --
+  -- Path B addendum 2 (docs/path-b-sketch.md) identified this as one
+  -- piece of the closure-arg contract; the full Path B inversion
+  -- had other regressions, but this standalone change is independently
+  -- correct: emitLambdaLift conceptually transfers ownership of the
+  -- captures into the closure cell, and the C-side make_closureN
+  -- already retains.  The host-side emitter was just inconsistent.
   capSetOps <- mapM (\(i, cnName) -> do
     idxN <- freshName "v"
     pure [ "%" <> idxN <> " = arith.constant " <> T.pack (show i) <> " : i64"
+         , "func.call @kk_retain(%" <> cnName <> ") : (i64) -> ()"
          , "func.call @kk_set_field(%" <> ptrName <> ", %" <> idxN <> ", %" <> cnName <> ") : (i64, i64, i64) -> ()"
          ]) (zip [(1::Int)..length allCapturedNames] allCapturedNames)
   pure (allocOps ++ concat capSetOps, ptrName)

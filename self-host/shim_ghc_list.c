@@ -26,6 +26,11 @@ typedef int64_t (*fn2_t)(int64_t, int64_t, int64_t);
 static int64_t call1(int64_t clos, int64_t a) {
     /* Retain argument — the closure (compiled with Perceus) may consume it. */
     kk_retain(a);
+    /* Retain closure — lifted lambdas drop their closure-arg before return
+     * (commit 871afa7).  Without this, callers that reuse `clos` across
+     * iterations (foldl, find, mapM, …) hit use-after-drop on the second
+     * call.  Phase 12c step 8. */
+    kk_retain(clos);
     clos = kk_thunk_force(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw1_t)(int64_t);
@@ -59,6 +64,9 @@ static int64_t call1(int64_t clos, int64_t a) {
 static int64_t call2(int64_t clos, int64_t a, int64_t b) {
     kk_retain(a);
     kk_retain(b);
+    /* See call1 comment: balance the closure-arg drop emitted by lifted
+     * lambda bodies (commit 871afa7). */
+    kk_retain(clos);
     clos = kk_thunk_force(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw2_t)(int64_t, int64_t);

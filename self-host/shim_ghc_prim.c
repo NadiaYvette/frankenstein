@@ -64,6 +64,10 @@ static int64_t call1(int64_t clos, int64_t a) {
      * consume it (drop after extracting fields).  The caller's data
      * structure still holds a reference, so we must keep it alive. */
     kk_retain(a);
+    /* Retain closure — lifted lambdas drop their closure-arg before return
+     * (commit 871afa7).  Without this, callers that reuse `clos` across
+     * iterations hit use-after-drop on the second call.  Phase 12c step 8. */
+    kk_retain(clos);
     if (clos == 0) {
         fprintf(stderr, "FATAL: call1(0, %p) — caller %p\n",
                 (void*)a, __builtin_return_address(0));
@@ -94,6 +98,8 @@ static int64_t call1(int64_t clos, int64_t a) {
 static int64_t call2(int64_t clos, int64_t a, int64_t b) {
     kk_retain(a);
     kk_retain(b);
+    /* See call1 comment: balance the closure-arg drop. */
+    kk_retain(clos);
     clos = resolve_callable(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw2_t)(int64_t, int64_t);

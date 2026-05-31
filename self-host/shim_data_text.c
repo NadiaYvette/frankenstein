@@ -144,10 +144,19 @@ static int64_t unbox_char(int64_t c) {
 
 /* Call a Haskell closure: field 0 = fn ptr.
  * For predicates (Char -> Bool), the closure takes (closure, char_codepoint)
- * and returns 0/1. */
+ * and returns 0/1.
+ *
+ * Phase 12c step 8: retain the closure before invocation.  Lifted lambdas
+ * drop their closure-arg before returning (commit 871afa7), so a caller
+ * that reuses the same closure across iterations (text_break_pred etc.)
+ * must balance that drop with an up-front retain.  Without this, the
+ * second iteration calls kk_thunk_force on a freed predicate cell — the
+ * use-after-drop pinpointed by KK_RECYCLE_AUDIT in the OrganIR parser. */
 static int64_t call_closure_1(int64_t closure, int64_t arg) {
     /* Retain arg — closure may consume it via Perceus drop */
     kk_retain(arg);
+    /* Retain closure — body drops its own closure-arg before returning */
+    kk_retain(closure);
     closure = kk_thunk_force(closure);
     if (!kk_is_heap_ptr(closure)) {
         typedef int64_t (*raw1_t)(int64_t);

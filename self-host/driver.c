@@ -286,6 +286,11 @@ int main(int argc, char** argv) {
     if (verbose) fprintf(stderr, "Running evidencePass...\n");
     t0 = now_sec();
     {
+        /* Phase 12c step 8: collectGlobalEffects consumes prog (Perceus-emitted
+         * drop at end of body), so retain it first so evidencePassGlobal still
+         * has a live reference.  Without this, evidencePassGlobal reads field[0]
+         * of a recycled cell.  Caught by KK_RECYCLE_AUDIT=1. */
+        kk_retain(prog);
         int64_t globalEffects = FRK_collectGlobalEffects(prog);
         prog = FRK_evidencePassGlobal(globalEffects, prog);
     }

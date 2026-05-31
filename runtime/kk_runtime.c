@@ -463,6 +463,16 @@ int64_t kk_tag(int64_t ptr) {
      * Under KK_RECYCLE_AUDIT=1 we abort so gdb shows the calling fn. */
     if ((t & ((int64_t)1 << 63)) && kk_recycle_audit_enabled()) {
         fprintf(stderr, "[kk_tag] USE-AFTER-DROP: ptr=%p tag=0x%lx\n", (void*)ptr, t);
+        /* Phase 12c step 8: backtrace the caller chain so we can identify
+         * which generated function read the recycled cell.  6 frames is
+         * enough to see the trampoline + lifted lambda. */
+        void* buf[12];
+        int nb = backtrace(buf, 12);
+        char** syms = backtrace_symbols(buf, nb);
+        for (int i = 0; i < nb && syms; i++) {
+            fprintf(stderr, "  bt[%d] %s\n", i, syms[i]);
+        }
+        free(syms);
         abort();
     }
     if (kk_tag_trace > 0) {
@@ -504,6 +514,14 @@ int64_t kk_field(int64_t ptr, int64_t idx) {
             if (dladdr((void*)(uintptr_t)fields[0], &info) && info.dli_sname) {
                 fprintf(stderr, "  field[0] resolves to: %s\n", info.dli_sname);
             }
+            /* Phase 12c step 8: backtrace the caller chain. */
+            void* buf[12];
+            int nb = backtrace(buf, 12);
+            char** syms = backtrace_symbols(buf, nb);
+            for (int i = 0; i < nb && syms; i++) {
+                fprintf(stderr, "  bt[%d] %s\n", i, syms[i]);
+            }
+            free(syms);
             abort();
         }
     }

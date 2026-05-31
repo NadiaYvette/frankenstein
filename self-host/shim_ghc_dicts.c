@@ -170,6 +170,9 @@ typedef int64_t (*fn1_t)(int64_t, int64_t);
 
 static int64_t shim_call1(int64_t clos, int64_t a) {
     kk_retain(a);
+    /* Retain closure — lifted lambdas drop their closure-arg (commit 871afa7).
+     * Phase 12c step 8. */
+    kk_retain(clos);
     clos = kk_thunk_force(clos);
     if (!kk_is_heap_ptr(clos)) {
         typedef int64_t (*raw1_t)(int64_t);

@@ -239,6 +239,22 @@ int kk_recycle_audit_enabled(void) {
     return audit;
 }
 
+/* Recycle ledger: ring buffer of recent recycle events.
+ * Phase 12c step 8 diagnostic — when the audit fires, we want to know
+ * what the cell USED to be (its tag) and who recycled it.  Sized to
+ * cover most working sets without dominating memory; 64K entries × 32
+ * bytes = 2 MiB resident, populated only under KK_RECYCLE_AUDIT=1. */
+#define KK_RECYCLE_LEDGER_SIZE 65536
+typedef struct {
+    const void* block;   /* recycled block address (NULL = empty slot) */
+    int64_t tag;         /* original tag before recycle overwrote it */
+    size_t size;         /* block size in bytes */
+    void* caller;        /* return address of kk_arena_recycle_put's caller */
+    int seq;             /* sequence number for ordering */
+} kk_recycle_entry_t;
+static kk_recycle_entry_t g_recycle_ledger[KK_RECYCLE_LEDGER_SIZE];
+static int g_recycle_seq = 0;
+
 void kk_arena_recycle_put(void* block, size_t size) {
     size_t cls = size / 8;
     if (cls >= KK_RECYCLE_CLASSES) return;  /* too big, let it leak */
@@ -251,8 +267,30 @@ void kk_arena_recycle_put(void* block, size_t size) {
             int64_t m = ((int64_t*)p)[1];
             p = (void*)(uintptr_t)(m & ~KK_RECYCLE_FLAG);
         }
+        /* Record the recycle event before we overwrite the tag slot. */
+        int64_t orig_tag = ((int64_t*)block)[1];
+        int s = g_recycle_seq++;
+        size_t idx = ((uintptr_t)block >> 4) % KK_RECYCLE_LEDGER_SIZE;
+        g_recycle_ledger[idx].block = block;
+        g_recycle_ledger[idx].tag = orig_tag;
+        g_recycle_ledger[idx].size = size;
+        g_recycle_ledger[idx].caller = __builtin_return_address(0);
+        g_recycle_ledger[idx].seq = s;
     }
     ((int64_t*)block)[0] = 0;
     ((int64_t*)block)[1] = KK_RECYCLE_FLAG | (int64_t)(uintptr_t)g_free_lists[cls];
     g_free_lists[cls] = block;
+}
+
+int kk_recycle_audit_lookup(const void* block,
+                            int64_t* out_tag,
+                            size_t* out_size,
+                            void** out_caller) {
+    if (!kk_recycle_audit_enabled()) return 0;
+    size_t idx = ((uintptr_t)block >> 4) % KK_RECYCLE_LEDGER_SIZE;
+    if (g_recycle_ledger[idx].block != block) return 0;
+    if (out_tag) *out_tag = g_recycle_ledger[idx].tag;
+    if (out_size) *out_size = g_recycle_ledger[idx].size;
+    if (out_caller) *out_caller = g_recycle_ledger[idx].caller;
+    return g_recycle_ledger[idx].seq + 1;  /* nonzero = found */
 }

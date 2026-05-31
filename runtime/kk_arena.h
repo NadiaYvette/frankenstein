@@ -95,4 +95,17 @@ void kk_arena_recycle_put(void* block, size_t size);
  * reads of recycled cells and abort on use-after-drop. */
 int kk_recycle_audit_enabled(void);
 
+/* Recycle ledger: ring buffer of recent recycle events keyed by block
+ * address.  When the audit fires (kk_tag / kk_field finds a recycled
+ * cell), look up the block here to find what tag/size it had and
+ * which kk_drop caller recycled it.  Returns 0 if not found.  When
+ * found, fills the out-params and returns the sequence number of the
+ * recycle event (higher = more recent).
+ *
+ * Only populated when kk_recycle_audit_enabled() returns true. */
+int kk_recycle_audit_lookup(const void* block,
+                            int64_t* out_tag,
+                            size_t* out_size,
+                            void** out_caller);
+
 #endif /* KK_ARENA_H */

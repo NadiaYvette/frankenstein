@@ -463,9 +463,26 @@ int64_t kk_tag(int64_t ptr) {
      * Under KK_RECYCLE_AUDIT=1 we abort so gdb shows the calling fn. */
     if ((t & ((int64_t)1 << 63)) && kk_recycle_audit_enabled()) {
         fprintf(stderr, "[kk_tag] USE-AFTER-DROP: ptr=%p tag=0x%lx\n", (void*)ptr, t);
-        /* Phase 12c step 8: backtrace the caller chain so we can identify
-         * which generated function read the recycled cell.  6 frames is
-         * enough to see the trampoline + lifted lambda. */
+        /* Phase 12c step 8: identify what the recycled cell USED to be —
+         * its original tag, size, and who recycled it. */
+        const void* block = (const void*)(uintptr_t)(ptr - 8);
+        int64_t orig_tag = 0;
+        size_t orig_size = 0;
+        void* recycler = NULL;
+        if (kk_recycle_audit_lookup(block, &orig_tag, &orig_size, &recycler)) {
+            fprintf(stderr, "  recycled-cell: original-tag=0x%lx (%ld) size=%zu\n",
+                    orig_tag, orig_tag, orig_size);
+            Dl_info info;
+            if (recycler && dladdr(recycler, &info) && info.dli_sname) {
+                fprintf(stderr, "  recycled-by: %s (+%lx)\n", info.dli_sname,
+                        (unsigned long)((const char*)recycler - (const char*)info.dli_saddr));
+            } else {
+                fprintf(stderr, "  recycled-by: %p (unresolved)\n", recycler);
+            }
+        }
+        /* Backtrace the caller chain so we can identify which generated
+         * function read the recycled cell.  12 frames is enough to see
+         * the trampoline + lifted lambda. */
         void* buf[12];
         int nb = backtrace(buf, 12);
         char** syms = backtrace_symbols(buf, nb);

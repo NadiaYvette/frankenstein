@@ -2931,6 +2931,63 @@ int64_t idris2_writeIORef(int64_t _ty, int64_t ref, int64_t value, int64_t _worl
 /* Write field[idx] of a boxed value */
 void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     if (!kk_is_heap_ptr(ptr)) return;
+    /* Bounds check: idx must be < nfields stored in the rc word.
+     * Out-of-bounds writes overwrite the NEXT cell's tag/fields,
+     * producing the "closure with garbage fn ptr" pattern seen in
+     * stage-2 segfaults.  Gate behind KK_BOUNDS_AUDIT=1 (default off
+     * because the check is on every kk_set_field, hottest write
+     * path; ~5% throughput cost in microbenchmarks).
+     *
+     * The nfields packed into block[0] is clamped to 255 in
+     * kk_alloc_con; cells declared with more fields fall through
+     * the check silently — those callers know what they're doing.
+     */
+    static int audit_init = 0;
+    static int audit_on = 0;
+    if (!audit_init) {
+        const char* v = getenv("KK_BOUNDS_AUDIT");
+        audit_on = (v && v[0] && v[0] != '0') ? 1 : 0;
+        audit_init = 1;
+    }
+    if (audit_on) {
+        int64_t rc_word = *(int64_t*)(ptr - 8);
+        int64_t nfields = (rc_word >> KK_NFIELDS_SHIFT) & 0xFF;
+        if (nfields < 255 && idx >= nfields) {
+            fprintf(stderr,
+                "[kk_set_field] OUT-OF-BOUNDS: ptr=%p idx=%ld nfields=%ld value=0x%lx\n",
+                (void*)ptr, (long)idx, (long)nfields, (unsigned long)value);
+            int64_t tag = *(int64_t*)ptr;
+            fprintf(stderr, "  cell tag=0x%lx rc_word=0x%lx caller=%p\n",
+                    (unsigned long)tag, (unsigned long)rc_word,
+                    __builtin_return_address(0));
+            /* Where was this cell originally allocated? */
+            const void* block = (const void*)(uintptr_t)(ptr - 8);
+            int64_t alloc_tag = 0;
+            size_t alloc_size = 0;
+            void* allocator = NULL;
+            if (kk_alloc_audit_lookup(block, &alloc_tag, &alloc_size, &allocator)) {
+                Dl_info ai;
+                if (allocator && dladdr(allocator, &ai) && ai.dli_sname) {
+                    fprintf(stderr, "  allocated-by: %s (+%lx) tag=0x%lx size=%zu\n",
+                            ai.dli_sname,
+                            (unsigned long)((const char*)allocator - (const char*)ai.dli_saddr),
+                            alloc_tag, alloc_size);
+                } else {
+                    fprintf(stderr, "  allocated-by: %p tag=0x%lx size=%zu\n",
+                            allocator, alloc_tag, alloc_size);
+                }
+            } else {
+                fprintf(stderr, "  allocated-by: (not in ledger)\n");
+            }
+            void* btbuf[12];
+            int nb = backtrace(btbuf, 12);
+            char** syms = backtrace_symbols(btbuf, nb);
+            for (int i = 0; i < nb && syms; i++)
+                fprintf(stderr, "  bt[%d] %s\n", i, syms[i]);
+            free(syms);
+            abort();
+        }
+    }
     int64_t* fields = (int64_t*)(ptr + 8);
     fields[idx] = value;
     /* Phase 12c step 7: optionally log the field-0 set on CLOS cells.

@@ -115,22 +115,35 @@ perceusExpr scope expr = case expr of
         bodyFree = freeVars body
         usage = analyzeUsage body
         -- Skip retain/drop for params with unboxed types (plain integers, not heap ptrs)
-        unusedParams = [ n | (n, t) <- params
-                       , not (Set.member n bodyFree)
-                       , Map.findWithDefault Many n scope' /= Linear
-                       , not (isUnboxedType t) ]
+        -- Explicit concatMap (see other Perceus list-comp fixes).
+        unusedParams = concatMap
+          (\(n, t) ->
+             if not (Set.member n bodyFree)
+                && Map.findWithDefault Many n scope' /= Linear
+                && not (isUnboxedType t)
+               then [n]
+               else [])
+          params
         body' = perceusExpr scope' body
         -- Drop unused affine/many params
         droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
                             body' unusedParams
-        -- Insert retains for Many-multiplicity params used more than once
+        -- Insert retains for Many-multiplicity params used more than once.
+        -- Strict case-of for m and count: the lazy `let m = ...; count
+        -- = ...` form built kk_thunk_create cells (LAZY tag, size 32)
+        -- captured over scope'/usage that were dropped on the
+        -- foldr-recursive tail before the next iteration tried to read
+        -- them.  KK_RECYCLE_AUDIT chain: perceusDefTransform →
+        -- perceusExpr +0x639 → foldr\$3 ×3 → perceusExpr_lambda5740 →
+        -- kk_thunk_force → kk_tag.
         retainedBody = foldr
           (\(n, t) e ->
-            let m = Map.findWithDefault Many n scope'
-                count = Map.findWithDefault 0 n usage
-            in if m == Many && count > 1 && not (isUnboxedType t)
-               then wrapRetains n count e
-               else e)
+            case Map.findWithDefault Many n scope' of
+              m -> case Map.findWithDefault 0 n usage of
+                count ->
+                  if m == Many && count > 1 && not (isUnboxedType t)
+                     then wrapRetains n count e
+                     else e)
           droppedBody params
     in ELam params retainedBody
 
@@ -152,19 +165,24 @@ perceusExpr scope expr = case expr of
         bgs' = map (map (perceusBindGroup scope')) bgs
         body' = perceusExpr scope' body
         -- Find bindings unused in body that need dropping (skip unboxed types)
-        toDrop = [ n | (n, m, t) <- boundInfo
-                 , not (Set.member n bodyFree)
-                 , m /= Linear
-                 , not (isUnboxedType t) ]
+        -- Explicit concatMap (3-tuple destructure); see usedPats fix.
+        toDrop = concatMap
+          (\(n, m, t) ->
+             if not (Set.member n bodyFree) && m /= Linear
+                && not (isUnboxedType t)
+               then [n]
+               else [])
+          boundInfo
         droppedBody = foldr (\n e -> ELet [[Bind (Name "_drop" 0) unitType (EDrop (EVar n)) DefVal]] e)
                             body' toDrop
-        -- Insert retains for Many-multiplicity vars used more than once (skip unboxed)
+        -- Strict case-of for count; see ELam retainedBody fix.
         retainedBody = foldr
           (\(n, m, t) e ->
-            let count = Map.findWithDefault 0 n usage
-            in if m == Many && count > 1 && not (isUnboxedType t)
-               then wrapRetains n count e
-               else e)
+            case Map.findWithDefault 0 n usage of
+              count ->
+                if m == Many && count > 1 && not (isUnboxedType t)
+                   then wrapRetains n count e
+                   else e)
           droppedBody boundInfo
     in ELet bgs' retainedBody
 

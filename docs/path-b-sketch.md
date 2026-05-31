@@ -224,3 +224,80 @@ gives most of the same audit value at lower risk.
 - Commit `908f813` — the C-shim retain fixes (Phase 12c step 8)
 - Commit `a8c2cdf` — the audit ledger extension (recycle entry
   records orig_tag, size, recycler PC)
+- Commit `78723c3` (on branch `path-b`) — first attempt at
+  implementing Path B; **NEGATIVE RESULT** documented below
+
+## Addendum 2026-05-31 — empirical result (NEGATIVE)
+
+Branch `path-b` (`78723c3`) implements Steps 1–7 of this sketch:
+- Emitter: strip end-of-body `kk_drop(closFresh)`, add `kk_drop(clos)`
+  after each of 3 indirect call sites
+- All 4 shim call helpers (`call1`/`call2`/`call_closure_1`/
+  `shim_call1`): revert the 908f813 retains
+- 6 shim functions that take a closure: add `kk_drop(closure)` at
+  return paths (text_break_pred, text_foldl_strict, find_2, foldl_3,
+  foldr_3, plus retain-removal in forM_state_runner/dropWhile_runner)
+- `capCounts` prologue retains KEPT (revised from sketch — captures
+  still need balance since the body consumes them N times)
+- Driver retain (908f813) KEPT (top-level fns, not closures)
+
+**Results:**
+- Hellos 26/26: PASS
+- Phase 8 E2E: REGRESSED from 7/14 → 0/21
+- Phase 9 stage-2 module compile: massive segfaults on nearly every
+  module, worse than pre-Path-B baseline
+- Generated MLIR has dangling function references like
+  `'Nested_sumBoxTree' does not reference a valid function`
+
+**Diagnosis:**
+
+The "all-or-nothing" Path B is genuinely all-or-nothing — and we got
+"nothing" because the contract has more moving parts than the
+sketch enumerated.  Three additional concerns surfaced:
+
+1. **`analyzeUsage` and Perceus's drop placement interact with the
+   EmitState.**  The dangling function references in stage-1's
+   output mean that Perceus's drops, under the new contract, are
+   affecting the state monad threading that tracks top-level defs.
+   The emitter's `esLiftedFns`/`esTopFns` accumulator might be
+   getting consumed unexpectedly when its surrounding StateT
+   threading hits a borrow-vs-consume mismatch.
+
+2. **`wrapRetains` semantics under B aren't actually a no-op.**
+   The sketch claimed "wrapRetains becomes a no-op for closure
+   values," but in practice wrapRetains handles ALL Many-multiplicity
+   vars uniformly, including closures.  Under B, a multi-use closure
+   var still needs (N-1) retains because each of N call-site drops
+   consumes one ref — which is the same logic as Current.  So
+   wrapRetains shouldn't change.  This part of the sketch was wrong;
+   the implementation correctly left it alone, but the framing was
+   confusing.
+
+3. **Field-accessor pattern interacts with B.**  Functions like
+   `progDefs` do `kk_field → kk_retain(field) → kk_drop(rec0)`.  Under
+   B, the caller passes rec0 with consume convention (top-level fn).
+   That's unchanged.  But if rec0 is a *closure* (rare but possible
+   for some derived methods), the kk_drop semantics might differ.
+
+**Open hypotheses worth investigating next:**
+
+- The end-of-body drop in lifted lambdas might be the ONLY change
+  needed — keeping the existing call-site behavior (no kk_drop after
+  llvm.call).  This would test whether B's "remove body drop" alone
+  fixes the cascade-related issues without introducing the
+  call-site-drop cascade of regressions.  Smaller risk surface.
+
+- Alternative: the Path B sketch might be largely correct but the
+  call-site `kk_drop(clos)` placement is wrong — perhaps it should
+  be at the END of the SSA scope where `clos` is last-used, not
+  immediately after the call.  Liveness analysis becomes required.
+
+- Or: maybe the actual root cause IS at a smaller fault — a single
+  shim function or single Perceus inference rule — and our
+  C-shim-class fix (908f813) plus targeted Perceus fixes are the
+  right path, not contract inversion.
+
+**Recommendation**: do NOT merge branch `path-b`.  Treat the negative
+result as informative data.  A more conservative next attempt would
+be to keep this sketch's "Step 1 alone" (remove body drop) and see
+whether hellos + bootstrap improve, before adding call-site drops.

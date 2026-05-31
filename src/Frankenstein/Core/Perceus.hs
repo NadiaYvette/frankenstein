@@ -73,9 +73,16 @@ perceusDefTransform def = def
   where
     -- Initial scope: function parameters
     scope0 = case defExpr def of
-      ELam params _ -> Map.fromList
-        [ (n, paramMultiplicity n params (defType def))
-        | (n, _) <- params ]
+      -- Explicit map (not list-comp): the comprehension form desugars
+      -- to dszd...821694, whose CONS branch over-drops its captured
+      -- 'def' (a 6-field Def cell of size 56 allocated by
+      -- evidencePassDef) before subsequent recursive iterations need
+      -- it.  Real crash (not just KK_RECYCLE_AUDIT) in
+      -- Core_DeriveSelectors / Core_FlattenPatterns compiles via
+      -- defType reading freed Def cell at field 0.
+      ELam params _ -> Map.fromList (map
+        (\(n, _) -> (n, paramMultiplicity n params (defType def)))
+        params)
       _ -> Map.empty
 
 -- | Look up the multiplicity of a parameter from the function type.
@@ -135,7 +142,9 @@ perceusExpr scope expr = case expr of
         boundInfo = concatMap
           (map (\b -> (bindName b, bindMultiplicity b, bindType b)))
           bgs
-        boundNames = [ (n, m) | (n, m, _) <- boundInfo ]
+        -- Explicit map (see boundInfo above): comp form with 3-tuple
+        -- destructure desugars to a derived dszd over-drop helper.
+        boundNames = map (\(n, m, _) -> (n, m)) boundInfo
         scope' = foldl (\s (n, m) -> Map.insert n m s) scope boundNames
         bodyFree = freeVars body
         usage = analyzeUsage body

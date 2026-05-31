@@ -1851,8 +1851,9 @@ reachableDefs defs =
       freeVarsExpr (ECon qn)         = Set.singleton (nameText (qnameName qn))
       freeVarsExpr (EApp f args)     = Set.unions (freeVarsExpr f : map freeVarsExpr args)
       freeVarsExpr (ELam _ body)     = freeVarsExpr body
-      freeVarsExpr (ELet bgs body)   = Set.unions (freeVarsExpr body :
-                                          [freeVarsExpr (bindExpr b) | bg <- bgs, b <- bg])
+      freeVarsExpr (ELet bgs body)   =
+        -- Explicit concatMap form (see commit a5a578c).
+        Set.unions (freeVarsExpr body : concatMap (map (freeVarsExpr . bindExpr)) bgs)
       freeVarsExpr (ECase e brs)     = Set.union (freeVarsExpr e)
                                           (Set.unions [freeVarsExpr (branchBody b) | b <- brs])
       freeVarsExpr (EDelay e)        = freeVarsExpr e
@@ -3618,7 +3619,8 @@ emitLambdaLift params body = do
           go (EApp f as)      = go f + sum (map go as)
           go (ELam _ b)       = go b
           go (ELet bgs b)     =
-            go b + sum [go (bindExpr bd) | bg <- bgs, bd <- bg]
+            -- Explicit concatMap form (see commit a5a578c).
+            go b + sum (concatMap (map (go . bindExpr)) bgs)
           go (ECase s brs)    =
             go s + maximum (0 : [go (branchBody br) | br <- brs])
           -- ERetain / ERelease: rc ops, NOT consuming the value
@@ -4475,8 +4477,9 @@ freeVarsExpr (ECon _)         = Set.empty
 freeVarsExpr (EApp f args)    = Set.unions (freeVarsExpr f : map freeVarsExpr args)
 freeVarsExpr (ELam ps body)   = freeVarsExpr body `Set.difference` Set.fromList (map fst ps)
 freeVarsExpr (ELet bgs body)  =
-  let bound = Set.fromList [Frankenstein.Core.Types.bindName b | bg <- bgs, b <- bg]
-      bindFvs = Set.unions [freeVarsExpr (bindExpr b) | bg <- bgs, b <- bg]
+  -- Explicit concatMap form (see commit a5a578c).
+  let bound = Set.fromList (concatMap (map Frankenstein.Core.Types.bindName) bgs)
+      bindFvs = Set.unions (concatMap (map (freeVarsExpr . bindExpr)) bgs)
   in (bindFvs `Set.union` freeVarsExpr body) `Set.difference` bound
 freeVarsExpr (ECase s brs)    = Set.unions (freeVarsExpr s : map brFreeVars brs)
 freeVarsExpr (ERetain e)      = freeVarsExpr e

@@ -395,3 +395,93 @@ in `emitLambdaLift`, the `InsertDrops` pass, the C shims, and
 possibly Perceus's `wrapRetains`.  Each step needs hellos to remain
 green, and stage 1 needs to compile correctly for the emitter
 itself to work as a self-host module.
+
+## Addendum 3 — Capture-retain attempt (NEGATIVE)
+
+Branch `path-b` `3d66cc0` applies the addendum-2 recommendation:
+`emitLambdaLift` now emits `kk_retain(capture)` before each
+`kk_set_field(closure, idx, capture)`.  This matches the C-side
+`make_closureN` pattern and makes closure construction
+borrow+store semantics — the outer scope's ref to each capture
+survives the `ELam`.
+
+Two configurations were tested:
+
+1. **emitLambdaLift retain + Path B body-drop removal + InsertDrops**
+   (capture-retain combined with drop-at-last-use):
+   - Hellos: PASS 26/26
+   - Phase 6 self-test: PASS (progress! prior Path B attempts
+     crashed at end of Phase 6)
+   - Phase 7 factorial: PASS
+   - Phase 8 E2E: STILL 0/21
+   - Stage 1's emitted MLIR has renamed functions
+     (`Nested_sumBoxTree` → `Nested_kk_drop`), indicating Def-record
+     memory corruption — different name from before (`kk_retain` →
+     `kk_drop` this time), same class of bug.
+
+2. **emitLambdaLift retain alone** (InsertDrops disabled):
+   - Hellos: PASS 26/26
+   - Phase 8 E2E: STILL 0/21
+   - Same Def-record corruption pattern
+
+### Conclusion across all three Path B attempts
+
+| Variant | Hellos | Phase 6 | Phase 7 | Phase 8 E2E | Phase 9c E2E |
+|---|---|---|---|---|---|
+| Original Path B (8115f1e) | 26/26 | crash | PASS | 7/14 → broke | 0/21 |
+| + liveness InsertDrops (b35f0d2) | 26/26 | (skipped) | PASS | 0/21 | (skipped) |
+| + capture-retain (3d66cc0) | 26/26 | PASS | PASS | 0/21 | (skipped) |
+| Capture-retain alone (no Drops) | 26/26 | PASS | PASS | 0/21 | (skipped) |
+
+Each variant gets closer in some ways (no self-test crash with
+capture-retain) but Phase 8 E2E never moves off 0/21.
+
+### What this tells us
+
+The closure-arg contract has interactions with the emitter's
+StateT-monad-on-closures threading that our surgical changes
+don't address.  Specifically: when stage 1's compiled emitter
+runs on a real Haskell module, it threads through deep nests of
+captured state-monad continuations.  Somewhere in that nesting,
+the Path B semantic divergence corrupts Def records — the
+`progDefs` list cells, the `Def.name` Text values, or both.
+
+Multiple hypotheses for where it lives:
+
+1. **Liveness over-eagerness on the StateT closure cell** — the
+   StateT closure is the most heavily nested cell in the emitter.
+   My liveness-driven drop sees the StateT's last EVar position
+   and drops there, but the State monad's continuation chain
+   means the StateT is implicitly still alive.  My Liveness module
+   handles ELam captures via "used at the ELam position" but maybe
+   that's not enough for nested-continuation patterns.
+
+2. **`stripRetains` was wrong even when off** — even without
+   stripping Perceus's wrapRetains, the new ELam-retain in
+   emitLambdaLift creates double-retains.  We've now confirmed
+   hellos pass with capture-retain alone, so this isn't the only
+   issue.
+
+3. **`wrapRetains` itself counts ELam captures as consumes** —
+   Perceus's `analyzeUsage` counts an ELam-captured var as a use.
+   Under Current contract that's correct (ELam construction
+   consumes the capture).  Under Path B with capture-retain, the
+   ELam construction is borrow — so wrapRetains over-retains.
+   Need to fix analyzeUsage to not count ELam captures as
+   consumes under Path B.
+
+### Recommendation
+
+Path B is parked.  Branch `path-b` preserves all three attempts
+for reference.  Master's `Frankenstein.Core.Liveness` module is
+sound and usable for other purposes (or for a future
+better-scoped Path B retry where the entire contract is rebuilt
+from first principles rather than incrementally inverted).
+
+A SMALLER follow-up that might be tractable: make the C-shim
+side fully match the existing Current contract by adding `kk_drop`
+at the end of every shim function that takes a closure (the
+mirror of what's already done for text_break_pred etc.).  Hellos
++ bootstrap should remain green, and surd-quintic / similar
+heavy workloads might leak less.  That's Phase 12c step 8 *done
+properly*, not a Path B retry.

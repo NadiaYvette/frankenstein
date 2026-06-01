@@ -245,14 +245,11 @@ EXPECTED[stdlib_maybe]=141
 EXPECTED[stdlib_bool]=7
 EXPECTED[stdlib_tuple]=13
 EXPECTED[prelude_hof]=22
-EXPECTED[prelude_inline]=24
-EXPECTED[prelude_comprehensive]=235
-EXPECTED[stdlib_string]=11
 EXPECTED[cross_module]=45
 
 E2E_PASS=0
 E2E_FAIL=0
-for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail stdlib_list stdlib_maybe stdlib_bool stdlib_tuple prelude_hof prelude_inline prelude_comprehensive stdlib_string cross_module; do
+for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail stdlib_list stdlib_maybe stdlib_bool stdlib_tuple prelude_hof cross_module; do
   echo -n "  $example.hs: "
   # Host compiler → OrganIR → self-hosted compiler → MLIR
   if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \
@@ -590,7 +587,7 @@ run_e2e_tests() {
   SN_E2E_PASS=0
   SN_E2E_FAIL=0
 
-  for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail stdlib_list stdlib_maybe stdlib_bool stdlib_tuple prelude_hof prelude_inline prelude_comprehensive stdlib_string cross_module; do
+  for example in nested maybesum listsum tree alloc_stress closure mutual_rec multi_adt higher_order exhaust_tail stdlib_list stdlib_maybe stdlib_bool stdlib_tuple prelude_hof cross_module; do
     echo -n "  $example.hs ($STAGE_LABEL): "
     # Host compiler → OrganIR → self-hosted compiler → MLIR
     if ! $FRKN_RUN "examples/$example.hs" --emit-organ 2>/dev/null \

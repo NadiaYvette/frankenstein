@@ -3047,6 +3047,26 @@ void kk_set_field(int64_t ptr, int64_t idx, int64_t value) {
     }
     int64_t* fields = (int64_t*)(ptr + 8);
     fields[idx] = value;
+    /* Retain `value` so the cell takes proper ownership.  Without
+     * this, C shims (kk_pair, set_bin, kk_cons, etc.) and emitter
+     * sites that call kk_set_field without a preceding kk_retain
+     * create double-owners: the new cell and the source both think
+     * they own `value`, so the first drop frees it and the second
+     * is a use-after-drop.  Symptom: recursive ADT pattern matches
+     * emit @<modPrefix><lex-min-of-shared-Set> instead of
+     * @<modPrefix><real-name>.  Sites that already retain (e.g.,
+     * emitLambdaLift's capture store from 334158c) now over-retain
+     * → memory leak, but correctness wins.  Future work: audit
+     * emitter sites and remove their explicit retains, then leaks
+     * stop.  Gate via KK_SETFIELD_RETAIN=0 to opt out. */
+    static int retain_on_setfield = -1;
+    if (retain_on_setfield == -1) {
+        const char* v = getenv("KK_SETFIELD_RETAIN");
+        retain_on_setfield = (v && v[0] == '0') ? 0 : 1;  /* default ON */
+    }
+    if (retain_on_setfield) {
+        kk_retain(value);
+    }
     /* Phase 12c step 7: optionally log the field-0 set on CLOS cells.
      * Pairing this with @KK_ALLOC_TRACE=CLOS@ lets us detect closures
      * whose fn-pointer slot is allocated but never set — the suspected

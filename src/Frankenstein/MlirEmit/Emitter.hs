@@ -538,11 +538,16 @@ emitProgramText prog =
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
       -- Cycle analysis: identify defs that may create reference cycles.
       -- analyzeCycles returns one CycleInfo per def, in the same order.
-      cyclicDefs = Set.fromList
-        [ qualifyDefName d
-        | (d, ci) <- zip renamedDefs (analyzeCycles prog)
-        , ciCyclic ci
-        ]
+      -- Explicit recursion: no list-comp, no zipWith, no zip — every
+      -- intermediate-builder shape we tried leaked ciReason ("acyclic")
+      -- into the def name read path under the self-compiler's
+      -- non-recursive kk_retain semantics.
+      gatherCyclic [] _ acc = acc
+      gatherCyclic _ [] acc = acc
+      gatherCyclic (d:ds) (ci:cis) acc =
+        let acc' = if ciCyclic ci then qualifyDefName d : acc else acc
+        in gatherCyclic ds cis acc'
+      cyclicDefs = Set.fromList (gatherCyclic renamedDefs (analyzeCycles prog) [])
       extRtFns = externalRuntimeFns
       extRtArity = externalRuntimeArity
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False
@@ -1251,11 +1256,16 @@ emitProgramWithEffects prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      cyclicDefs = Set.fromList
-        [ qualifyDefName d
-        | (d, ci) <- zip renamedDefs (analyzeCycles prog)
-        , ciCyclic ci
-        ]
+      -- Explicit recursion: no list-comp, no zipWith, no zip — every
+      -- intermediate-builder shape we tried leaked ciReason ("acyclic")
+      -- into the def name read path under the self-compiler's
+      -- non-recursive kk_retain semantics.
+      gatherCyclic [] _ acc = acc
+      gatherCyclic _ [] acc = acc
+      gatherCyclic (d:ds) (ci:cis) acc =
+        let acc' = if ciCyclic ci then qualifyDefName d : acc else acc
+        in gatherCyclic ds cis acc'
+      cyclicDefs = Set.fromList (gatherCyclic renamedDefs (analyzeCycles prog) [])
       extRtFns = externalRuntimeFns
       extRtArity = externalRuntimeArity
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty True
@@ -1459,11 +1469,16 @@ emitProgramWasm prog =
                          in if T.any (== '/') t || T.isPrefixOf modPrefix san
                             then san else modPrefix <> san
       qualifiedTopNames = Set.fromList (map qualifyDefName renamedDefs)
-      cyclicDefs = Set.fromList
-        [ qualifyDefName d
-        | (d, ci) <- zip renamedDefs (analyzeCycles prog)
-        , ciCyclic ci
-        ]
+      -- Explicit recursion: no list-comp, no zipWith, no zip — every
+      -- intermediate-builder shape we tried leaked ciReason ("acyclic")
+      -- into the def name read path under the self-compiler's
+      -- non-recursive kk_retain semantics.
+      gatherCyclic [] _ acc = acc
+      gatherCyclic _ [] acc = acc
+      gatherCyclic (d:ds) (ci:cis) acc =
+        let acc' = if ciCyclic ci then qualifyDefName d : acc else acc
+        in gatherCyclic ds cis acc'
+      cyclicDefs = Set.fromList (gatherCyclic renamedDefs (analyzeCycles prog) [])
       extRtFns = externalRuntimeFns
       extRtArity = externalRuntimeArity
       initState = EmitState 0 [] Set.empty Map.empty [] Map.empty False

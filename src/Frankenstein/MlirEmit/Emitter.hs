@@ -108,6 +108,10 @@ type Emit a = State EmitState a
 -- gate (commit 89a49b9 root-cause analysis).
 foreign import ccall unsafe "kk_use_new_perceus" c_use_new_perceus :: Int
 
+-- Diagnostic: dumps an i64 + a label to stderr.  Returns 0; the side
+-- effect is the print.  Wired through runtime/kk_runtime.c.
+foreign import ccall unsafe "kk_debug_dump" c_debug_dump :: Int -> Int -> Int
+
 useNewPerceusCount :: Bool
 useNewPerceusCount = c_use_new_perceus == 1
 
@@ -478,15 +482,20 @@ emitProgramText :: Program -> Text
 emitProgramText prog =
   let -- Rename user's "main" to "_frankenstein_main" so we can generate our own entry point
       defs = progDefs prog
-      hasMain = any (\d -> nameText (qnameName (defName d)) == "main") defs
-      -- Rename main and strip EDelay wrapper (GHC marks main as lazy, but
-      -- the entry point should be evaluated eagerly, not thunked)
-      renamedDefs = if hasMain
-        then map (\d -> if nameText (qnameName (defName d)) == "main"
-                        then d { defName = QName "" (Name "_frankenstein_main" 99)
-                               , defExpr = stripTopDelay (defExpr d) }
-                        else d) defs
-        else defs
+      -- Single-pass rename: walk defs once, renaming "main" inline and
+      -- tracking whether we saw one.  The previous two-pass form (any
+      -- then map) double-iterated defs; the self-compiler's Perceus
+      -- mishandles the second iteration and corrupts the def names.
+      renameWalk [] = ([], False)
+      renameWalk (d:ds) =
+        let nm = nameText (qnameName (defName d))
+            (rest, restHasMain) = renameWalk ds
+        in if nm == "main"
+             then ( d { defName = QName "" (Name "_frankenstein_main" 99)
+                      , defExpr = stripTopDelay (defExpr d) } : rest
+                  , True )
+             else (d : rest, restHasMain)
+      (renamedDefs, hasMain) = renameWalk defs
       stripTopDelay (EDelay e) = e
       stripTopDelay e           = e
       modPrefix = let m = qnameModule (progName prog)
@@ -495,10 +504,17 @@ emitProgramText prog =
       -- Main's arity at the MLIR level. After D3 plotkin transform, main
       -- takes (evv) as its first parameter; for non-plotkin compiles main
       -- is 0-arg. We read the arity from the renamed Def's type.
-      mainArity = case [ d | d <- renamedDefs
-                           , nameText (qnameName (defName d)) == "_frankenstein_main" ] of
-                    (d:_) -> typeArity (defType d)
-                    _     -> 0
+      -- Explicit filter (not list-comp with nameText guard): the comp
+      -- form drops each `d` via the accessor chain, and the self-
+      -- compiler's Perceus mishandles the second use of renamedDefs.
+      findMainDef [] = Nothing
+      findMainDef (d:ds) =
+        if nameText (qnameName (defName d)) == "_frankenstein_main"
+          then Just d
+          else findMainDef ds
+      mainArity = case findMainDef renamedDefs of
+                    Just d  -> typeArity (defType d)
+                    Nothing -> 0
       typeArity (TForall _ t)    = typeArity t
       typeArity (TFun args _ _)  = length args
       typeArity _                = 0
@@ -781,6 +797,8 @@ emitProgramText prog =
     , stringGlobals
     , ""
     , "  // Perceus runtime declarations"
+    , "  func.func private @kk_debug_dump(i64, i64) -> i64"
+    , "  func.func private @kk_use_new_perceus() -> i64"
     , "  func.func private @kk_drop(i64) -> ()"
     , "  func.func private @kk_retain(i64) -> ()"
     , "  func.func private @kk_release(i64) -> ()"
@@ -1490,6 +1508,8 @@ emitProgramWasm prog =
     , stringGlobals
     , ""
     , "  // Perceus runtime declarations"
+    , "  func.func private @kk_debug_dump(i64, i64) -> i64"
+    , "  func.func private @kk_use_new_perceus() -> i64"
     , "  func.func private @kk_drop(i64) -> ()"
     , "  func.func private @kk_retain(i64) -> ()"
     , "  func.func private @kk_release(i64) -> ()"
@@ -1984,9 +2004,9 @@ emitDefs defs = do
       -- Deduplicate by qualified name: multi-module compilation can produce
       -- the same definition from both the importing and imported module
       -- (GHC's cross-module specialiser copies defs into importers).
-      qualName d = let san = sanitizeName (nameText (qnameName (defName d)))
-                   in if T.any (== '/') (nameText (qnameName (defName d)))
-                         || T.isPrefixOf pfx san
+      qualName d = let !t = nameText (qnameName (defName d))
+                       !san = sanitizeName t
+                   in if T.any (== '/') t || T.isPrefixOf pfx san
                       then san else pfx <> san
       dedup [] _seen = []
       dedup (d:ds) seen =
@@ -4726,14 +4746,19 @@ unwrapLambda e              = e
 -- Nullary defs (arity 0) are also recorded so oversaturated calls can be
 -- detected and routed through the closure-indirect path.
 buildTopFnArity :: Text -> [Def] -> Map Text Int
-buildTopFnArity modPfx defs = Map.fromList
-  [ (qualKey, topLamArity (defExpr d))
-  | d <- defs
-  , let t = nameText (qnameName (defName d))
-        san = sanitizeName t
-        qualKey = if T.any (== '/') t || T.isPrefixOf modPfx san then san else modPfx <> san
-  ]
+buildTopFnArity modPfx defs = Map.fromList (map entryFor defs)
   where
+    -- Explicit map (not list-comp with let-generators): the comp form
+    -- desugars into a derived dszd helper that over-drops `defs` while
+    -- iterating, corrupting later reads (e.g. the def's Name cell text
+    -- field reads as the lex-min of externalRuntimeFns instead of the
+    -- actual name).  Real bug isolated by stepping checkpoints
+    -- through emitProgramText.
+    entryFor d =
+      let t = nameText (qnameName (defName d))
+          san = sanitizeName t
+          qualKey = if T.any (== '/') t || T.isPrefixOf modPfx san then san else modPfx <> san
+      in (qualKey, topLamArity (defExpr d))
     topLamArity (ELam ps _)     = length ps
     topLamArity (ETypeLam _ e)  = topLamArity e
     topLamArity _               = 0
@@ -4742,7 +4767,8 @@ buildTopFnArity modPfx defs = Map.fromList
 -- in MLIR and must be called directly (not through closure-indirect dispatch).
 externalRuntimeFns :: Set Text
 externalRuntimeFns = Set.fromList
-  [ "kk_drop", "kk_retain", "kk_release", "kk_reuse", "kk_is_unique"
+  [ "kk_debug_dump", "kk_use_new_perceus"
+  , "kk_drop", "kk_retain", "kk_release", "kk_reuse", "kk_is_unique"
   , "kk_alloc_con", "kk_set_field", "kk_field", "kk_tag", "kk_structural_eq"
   , "kk_thunk_create", "kk_thunk_create_forced", "kk_thunk_force"
   , "kk_evv_create", "kk_evv_set", "kk_evv_get", "kk_unhandled_effect"
@@ -4908,7 +4934,8 @@ externalRuntimeFns = Set.fromList
 
 externalRuntimeArity :: Map Text Int
 externalRuntimeArity = Map.fromList
-  [ ("kk_drop", 1), ("kk_retain", 1), ("kk_release", 1)
+  [ ("kk_debug_dump", 2), ("kk_use_new_perceus", 0)
+  , ("kk_drop", 1), ("kk_retain", 1), ("kk_release", 1)
   , ("kk_reuse", 2), ("kk_is_unique", 1)
   , ("kk_alloc_con", 2), ("kk_set_field", 3), ("kk_field", 2), ("kk_tag", 1), ("kk_structural_eq", 2)
   , ("kk_thunk_create", 1), ("kk_thunk_create_forced", 1), ("kk_thunk_force", 1)

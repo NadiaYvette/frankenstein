@@ -2828,6 +2828,32 @@ int kk_use_new_perceus(void) {
     return value;
 }
 
+/* Debug dump: takes a (tagged) Frankenstein i64 value and an integer
+ * label, prints them to stderr along with the cell tag and first two
+ * fields (if the pointer looks heap-shaped).  Used as a foreign-import
+ * pure function from Haskell so we can sprinkle it through suspect
+ * code paths without redirecting through IO/State.
+ *
+ * Returns 0 (so callers can treat the result as a constant).  Side
+ * effect is the stderr print. */
+int kk_debug_dump(int64_t ptr, int64_t label) {
+    if (kk_is_heap_ptr(ptr)) {
+        int64_t tag = *(int64_t*)ptr;
+        int64_t f0 = *(int64_t*)(ptr + 8);
+        int64_t f1 = *(int64_t*)(ptr + 16);
+        fprintf(stderr,
+            "[debug_dump %ld] ptr=0x%lx tag=0x%lx (%ld) f0=0x%lx f1=0x%lx\n",
+            (long)label, (unsigned long)ptr,
+            (unsigned long)tag, (long)tag,
+            (unsigned long)f0, (unsigned long)f1);
+    } else {
+        fprintf(stderr,
+            "[debug_dump %ld] non-heap value=0x%lx (%ld)\n",
+            (long)label, (unsigned long)ptr, (long)ptr);
+    }
+    return 0;
+}
+
 void kk_args_init(int argc, char** argv) {
     kk_g_argc = argc;
     kk_g_argv = argv;

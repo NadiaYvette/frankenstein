@@ -85,6 +85,34 @@ extern int64_t Frankenstein_Debug_DumpProgram_dumpProgram(int64_t);
 #endif
 
 static void maybe_dump_ast(const char* label, int64_t prog) {
+    if (getenv("FRANK_DUMP_FIRST_DEF_NAME")) {
+        /* Walk prog -> progDefs (field 1) -> first def (Cons head) ->
+         * defName (field 0) -> qnameName (field 1) -> nameText (field 0) ->
+         * Text length.  Compare to expected def name to detect when in
+         * the pipeline the corruption is introduced. */
+        int64_t defs = kk_field(prog, 1);
+        if (kk_is_heap_ptr(defs) && kk_tag(defs) == 46589 /* Cons */) {
+            int64_t first = kk_field(defs, 0);
+            if (kk_is_heap_ptr(first)) {
+                int64_t qname = kk_field(first, 0);
+                if (kk_is_heap_ptr(qname)) {
+                    int64_t nm = kk_field(qname, 1);
+                    if (kk_is_heap_ptr(nm)) {
+                        int64_t text = kk_field(nm, 0);
+                        int64_t uniq = kk_field(nm, 1);
+                        int64_t tlen = kk_is_string(text) ? kk_str_char_len(text) : -1;
+                        fprintf(stderr,
+                            "[after %s] first def: text-ptr=0x%lx tlen=%ld uniq=0x%lx\n",
+                            label, (unsigned long)text, (long)tlen,
+                            (unsigned long)uniq);
+                    } else {
+                        fprintf(stderr, "[after %s] first def: nm is non-heap=0x%lx\n",
+                                label, (unsigned long)nm);
+                    }
+                }
+            }
+        }
+    }
     if (getenv("FRANKENSTEIN_DUMP_PROGDATA")) {
         int64_t f2 = kk_field(prog, 2);
         fprintf(stderr, "[progData after %s] field[2] = %p heap=%d",

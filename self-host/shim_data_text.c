@@ -1145,6 +1145,56 @@ static int64_t foldl_trampoline(int64_t clos, int64_t text_arg) {
     return text_foldl_strict(f, z, text_arg);
 }
 
+/* Data_Text_foldl_$3(f, z, text): full application — execute foldl' directly.
+ * Without this, the emitter generates a leak-stub that returns 0,
+ * silently breaking every caller that does `T.foldl' step z text`
+ * (most importantly stableConTag, which then returns 0 for every
+ * constructor → all ctors get tag 0 → case dispatch picks the wrong
+ * branch). */
+int64_t text_foldl__3(int64_t f, int64_t z, int64_t s) __asm__("Data_Text_foldl_$3");
+int64_t text_foldl__3(int64_t f, int64_t z, int64_t s) {
+    return text_foldl_strict(f, z, s);
+}
+
+/* Data_Text_toLower$1: lowercase every ASCII letter in the Text.
+ * Non-ASCII bytes (UTF-8 continuation/leader bytes >= 0x80) are
+ * passed through unchanged — Frankenstein currently only needs
+ * ASCII case-folding (constructor names) so a full Unicode pass
+ * isn't necessary.  Without this shim the symbol was stubbed to
+ * return 0, which made `toLower x == toLower y` always True and
+ * broke endsWithCI for every ctor pair sharing length. */
+int64_t text_toLower_1(int64_t s) __asm__("Data_Text_toLower$1");
+int64_t text_toLower_1(int64_t s) {
+    int64_t len;
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_string_empty();
+    char* owned = (char*)malloc((size_t)len + 1);
+    if (!owned) return kk_string_empty();
+    for (int64_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c >= 'A' && c <= 'Z') owned[i] = (char)(c + ('a' - 'A'));
+        else owned[i] = (char)c;
+    }
+    owned[len] = '\0';
+    return kk_str_alloc_leaf_owned(owned, len);
+}
+
+int64_t text_toUpper_1(int64_t s) __asm__("Data_Text_toUpper$1");
+int64_t text_toUpper_1(int64_t s) {
+    int64_t len;
+    const char* buf = text_borrow(s, &len);
+    if (len == 0) return kk_string_empty();
+    char* owned = (char*)malloc((size_t)len + 1);
+    if (!owned) return kk_string_empty();
+    for (int64_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c >= 'a' && c <= 'z') owned[i] = (char)(c - ('a' - 'A'));
+        else owned[i] = (char)c;
+    }
+    owned[len] = '\0';
+    return kk_str_alloc_leaf_owned(owned, len);
+}
+
 int64_t text_foldl__2(int64_t f, int64_t z) __asm__("Data_Text_foldl_$2");
 int64_t text_foldl__2(int64_t f, int64_t z) {
     /* Return a closure: when called with text, executes foldl' f z text */

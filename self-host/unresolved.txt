@@ -3,6 +3,7 @@
                  U asprintf
                  U atan
                  U atan2
+                 U atexit
                  U backtrace
                  U backtrace_symbols
                  U bcmp
@@ -10,6 +11,8 @@
                  U cos
                  U cosh
                  U __divti3
+                 U dladdr
+                 U _exit
                  U exp
                  U fflush
                  U floor
@@ -24,11 +27,14 @@
                  U log10
                  U log2
                  U longjmp
+                 U __modti3
                  U pow
                  U putc
+                 U raise
                  U rewind
                  U _setjmp
                  U setvbuf
+                 U signal
                  U sin
                  U sinh
                  U sqrt

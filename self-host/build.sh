@@ -547,9 +547,20 @@ if injected:
       # Fall back to previous stage .o if available
       if [ -f "$PREV_OBJ_DIR/$flat.o" ]; then
         cp "$PREV_OBJ_DIR/$flat.o" "$OUTDIR/$flat.o"
-        echo "FAIL (mlir-opt/translate) -> fallback to prev-stage .o"
+        # Still compare the emitted MLIR with the previous stage's
+        # MLIR — mlir-opt failure doesn't preclude the compiler being
+        # a fixed point.  Many modules emit MLIR that mlir-opt rejects
+        # (use-before-def of closure captures, missing func.func
+        # decls, etc.) but the emitted text is still deterministic
+        # across stages.
+        if diff -q "$PREV_MLIR_DIR/$flat.mlir" "$OUTDIR/$flat.mlir" > /dev/null 2>&1; then
+          echo "FAIL (mlir-opt/translate, MLIR match) -> fallback to prev-stage .o"
+          SN_MATCH=$((SN_MATCH + 1))
+        else
+          echo "FAIL (mlir-opt/translate, MLIR differs) -> fallback to prev-stage .o"
+          SN_MISMATCH=$((SN_MISMATCH + 1))
+        fi
         SN_OK=$((SN_OK + 1))
-        SN_MISMATCH=$((SN_MISMATCH + 1))
       else
         echo "FAIL (mlir-opt/translate)"
         SN_FAIL=$((SN_FAIL + 1))

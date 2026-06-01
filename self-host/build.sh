@@ -150,9 +150,16 @@ echo "=== Phase 5a: Link self-hosted test binary ==="
 # Cross-module calls are now resolved by aliases.S and shims.c.
 # Remaining unresolved: Haskell stdlib (Data.Map, Data.Text, GHC.Internal.*),
 # Koka stdlib, and external system calls.
-# Exclude driver.o (has its own main)
-ALL_OBJS=$(ls "$OUT"/*.o | grep -v driver.o)
-clang -O2 -o self-host/frankenstein-self $ALL_OBJS -lm \
+# Exclude driver.o (has its own main).  Link order mirrors Phase 5b:
+# shims BEFORE stage .o files so the linker picks the real shim
+# implementations rather than the auto-generated NULL-returning stubs
+# embedded in Core_*.o etc.  Without this, dozens of GHC_Internal_*
+# functions (compose, foldl, structural eq dispatches, …) resolve to
+# `xor eax, eax; ret`, silently breaking every Phase-6 self-test that
+# touches them (assignProgramTags, etc.).
+SHIM_OBJS_5A=$(ls "$OUT"/*.o | grep -E '/(shim_|A_sanitize_shim|cross_module_|stdlib_shims|kk_|unresolved_stubs|main\.o$)' | grep -v 'self-ir\.o' | grep -v 'factorial-self-ir' | grep -v '_standalone\.o' | grep -v 'driver\.o')
+STAGE_OBJS_5A=$(ls "$OUT"/*.o | grep -vE '/(shim_|A_sanitize_shim|cross_module_|driver|main|stdlib_shims|kk_|.*self-ir\.o|factorial-self-ir|_standalone\.o|unresolved_stubs)')
+clang -O2 -o self-host/frankenstein-self $SHIM_OBJS_5A $STAGE_OBJS_5A -lm \
   -Wl,--unresolved-symbols=ignore-in-object-files \
   -Wl,--allow-multiple-definition
 echo "Linked: self-host/frankenstein-self ($(stat -c%s self-host/frankenstein-self) bytes)"

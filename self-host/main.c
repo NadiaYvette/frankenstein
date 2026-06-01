@@ -86,6 +86,7 @@ extern int64_t T(tvKind)(int64_t);
 extern int64_t Frankenstein_Core_ConTags_conKey(int64_t);
 extern int64_t Frankenstein_Core_ConTags_assignProgramTags(int64_t);
 extern int64_t Frankenstein_Core_ConTags_collectReferencedCtors(int64_t);
+extern int64_t Frankenstein_Core_ConTags_stableConTag(int64_t);
 
 /* --- Core/Perceus.o --- */
 extern int64_t Frankenstein_Core_Perceus_unitType(void);

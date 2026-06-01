@@ -1118,16 +1118,22 @@ static int64_t text_foldl_strict(int64_t f, int64_t z, int64_t s) {
     if (len == 0) { kk_drop(f); return z; }
     int64_t acc = z;
     int64_t off = 0;
+    /* Closures emitted by the Frankenstein lambda-lift have signature
+     * fn(closure, arg1, arg2, ..., argN).  For a binary step function
+     * (acc, char) -> acc, the inner lambda is (clos, acc, char) — 3
+     * args total.  Earlier this shim called with 4 args (f, f, acc, cp)
+     * because some PAP wrappers expected the closure twice; that
+     * silently passed the codepoint into rcx where the 3-arg callee
+     * never read it, so step ran with c=acc and computed garbage.
+     * Result: stableConTag returned hash(closure_ptr) for any input
+     * instead of the real djb2-style hash. */
     while (off < len) {
         int64_t bytes_used;
         int64_t cp = utf8_decode(buf + off, &bytes_used);
-        /* The compiled step function may have a hidden 'self' parameter
-         * (GHC where-clause binding). The PAP wrapper expects 4 args:
-         * pap(clos, self, acc, char). Pass the closure as both the
-         * PAP's clos and the inner function's self parameter. */
-        int64_t fn_ptr = kk_field(kk_thunk_force(f), 0);
-        typedef int64_t (*fn3_t)(int64_t, int64_t, int64_t, int64_t);
-        acc = ((fn3_t)(intptr_t)fn_ptr)(f, f, acc, cp);
+        int64_t closure = kk_thunk_force(f);
+        int64_t fn_ptr = kk_field(closure, 0);
+        typedef int64_t (*step_fn_t)(int64_t, int64_t, int64_t);
+        acc = ((step_fn_t)(intptr_t)fn_ptr)(closure, acc, cp);
         off += bytes_used;
     }
     /* buf is borrowed — do NOT free */

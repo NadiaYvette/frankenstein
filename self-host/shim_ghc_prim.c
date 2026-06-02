@@ -80,9 +80,13 @@ static int64_t call1(int64_t clos, int64_t a) {
         return ((raw1_t)(intptr_t)clos)(a);
     }
     int64_t fp = kk_field(clos, 0);
-    /* Validate fn ptr is in text segment range (~[0x400000, 0x2000000)
-     * for this binary).  Heap-derived garbage will be > 0x10000000. */
-    if (fp == 0 || (uint64_t)fp < 0x400000 || (uint64_t)fp >= 0x2000000) {
+    /* Validate fn ptr is in text segment range.  The text section's upper
+     * bound depends on binary size: small examples fit under ~32 MB
+     * (0x2000000), but stage 2/3 self-compiled compiler binaries extend
+     * to ~40 MB.  Heap pointers from kk_arena start well above 0x10000000000
+     * (the mmap-allocated arena), so anything below 0x10000000 is text.
+     * 0x10000000 = 256 MB — plenty of slack for the self-compiled binary. */
+    if (fp == 0 || (uint64_t)fp < 0x400000 || (uint64_t)fp >= 0x10000000) {
         fprintf(stderr, "FATAL: call1 bad fp=0x%lx! clos=%p tag=%ld nf=%ld a=%p caller=%p\n",
                 (unsigned long)fp, (void*)clos, (long)kk_tag(clos),
                 (long)kk_nfields(clos), (void*)a,
@@ -117,7 +121,9 @@ static int64_t call2(int64_t clos, int64_t a, int64_t b) {
         return ((raw2_t)(intptr_t)clos)(a, b);
     }
     int64_t fp = kk_field(clos, 0);
-    if (fp == 0 || (uint64_t)fp < 0x400000 || (uint64_t)fp >= 0x2000000) {
+    /* See call1 comment on the 0x10000000 upper bound (binary text section
+     * can exceed 32 MB in self-compiled stage 2/3 builds). */
+    if (fp == 0 || (uint64_t)fp < 0x400000 || (uint64_t)fp >= 0x10000000) {
         fprintf(stderr, "FATAL: call2 bad fp=0x%lx! clos=%p tag=%ld nf=%ld\n",
                 (unsigned long)fp, (void*)clos, (long)kk_tag(clos),
                 (long)kk_nfields(clos));

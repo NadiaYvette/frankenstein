@@ -25,7 +25,24 @@ def get_def_names(organ_json_path):
     names = set()
     for defn in data['module']['definitions']:
         text = defn['name']['name']['text']
-        mangled = 'frankenstein_' + text.replace('.', '_')
+        # MLIR symbols always carry the capital-F "Frankenstein_" package
+        # prefix (commit ef709a3 switched the C ABI to capital-F).  The
+        # OrganIR JSON 'text' field is the qualified source name:
+        # sometimes it already starts with "Frankenstein." (e.g.
+        # "Frankenstein.Core.Types_$ccompare"), sometimes with another
+        # module qualifier (e.g. "OrganIR.Types_nameText",
+        # "GHC.Internal.Stack.Types_srcLocPackage") that the linker
+        # still resolves under a Frankenstein_-prefixed symbol.  So
+        # mangle dots → underscores first, then ensure the
+        # Frankenstein_ prefix.  Previously the script prepended a
+        # lowercase 'frankenstein_' prefix that never matched any
+        # real symbol — every "extract from prev-stage" fallback
+        # silently produced an empty MLIR, so any split-compile crash
+        # recovered into a body-less stub .o that linked but exploded
+        # at runtime with `undefined symbol Frankenstein_…_consumeProgram`.
+        mangled = text.replace('.', '_')
+        if not mangled.startswith('Frankenstein_'):
+            mangled = 'Frankenstein_' + mangled
         names.add(mangled)
     return names
 

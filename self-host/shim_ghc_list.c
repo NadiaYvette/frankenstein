@@ -273,6 +273,45 @@ int64_t ghc_list_zipWith_3(int64_t f, int64_t xs, int64_t ys) {
     return result;
 }
 
+/* zipWith3 : (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+ *
+ * Critical for the self-hosted bootstrap: emitLambdaLift's prologue
+ * construction is `concat (zipWith3 mkPrologue ...)` (Emitter.hs, d90c746).
+ * Without this shim, the leak-fallback stubs `GHC_Internal_List_zipWith3$4`
+ * to `return 0`, the prologue collapses to nil, and every lifted lambda
+ * emits without its closure-capture prologue → mlir-opt rejects with
+ * "use of undeclared SSA value name %capN". */
+typedef int64_t (*fn3_t)(int64_t, int64_t, int64_t, int64_t);
+static int64_t call3(int64_t clos, int64_t a, int64_t b, int64_t c) {
+    kk_retain(a);
+    kk_retain(b);
+    kk_retain(c);
+    kk_retain(clos);
+    clos = kk_thunk_force(clos);
+    if (!kk_is_heap_ptr(clos)) {
+        typedef int64_t (*raw3_t)(int64_t, int64_t, int64_t);
+        return ((raw3_t)(intptr_t)clos)(a, b, c);
+    }
+    return ((fn3_t)(intptr_t)kk_field(clos, 0))(clos, a, b, c);
+}
+
+int64_t ghc_list_zipWith3_4(int64_t f, int64_t xs, int64_t ys, int64_t zs) __asm__("GHC_Internal_List_zipWith3$4");
+int64_t ghc_list_zipWith3_4(int64_t f, int64_t xs, int64_t ys, int64_t zs) {
+    int64_t *arr; int64_t cap = 16, n = 0;
+    arr = malloc((size_t)cap * sizeof(int64_t));
+    while (!kk_is_nil(xs) && !kk_is_nil(ys) && !kk_is_nil(zs)) {
+        if (n >= cap) { cap *= 2; arr = realloc(arr, (size_t)cap * sizeof(int64_t)); }
+        arr[n++] = call3(f, kk_list_head(xs), kk_list_head(ys), kk_list_head(zs));
+        xs = kk_list_tail(xs);
+        ys = kk_list_tail(ys);
+        zs = kk_list_tail(zs);
+    }
+    int64_t result = array_to_list(arr, n);
+    free(arr);
+    kk_drop(f);
+    return result;
+}
+
 int64_t ghc_list_span_2(int64_t p, int64_t xs) __asm__("GHC_Internal_List_span$2");
 int64_t ghc_list_span_2(int64_t p, int64_t xs) {
     int64_t *arr; int64_t n = list_to_array(xs, &arr);

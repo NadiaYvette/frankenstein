@@ -27,12 +27,18 @@ MEM_HIGH="${MEM_HIGH:-24G}"
 MEM_MAX="${MEM_MAX:-36G}"
 LOCK="${LOCK:-$HOME/.cache/heavy-build.lock}"
 
+SLICE="${SLICE:-builds.slice}"
+
 [ "$#" -gt 0 ] || set -- bash self-host/build.sh
 
-# Build the memory-bounding command prefix, if user-scope cgroups are available.
-if systemd-run --user --scope --quiet -p MemoryMax=1M -- true 2>/dev/null; then
-  BOUND=(systemd-run --user --scope --quiet -p MemoryHigh="$MEM_HIGH" -p MemoryMax="$MEM_MAX" --)
-  echo "[membuild] memory-bounded: MemoryHigh=$MEM_HIGH MemoryMax=$MEM_MAX" >&2
+# Prefer the shared cross-project runner if installed — single source of truth;
+# it places the build in the shared builds.slice and takes the shared lock.
+if command -v membuild >/dev/null 2>&1; then exec membuild "$@"; fi
+
+# Fallback: bound + serialize locally, still joining the shared builds.slice.
+if systemd-run --user --scope --slice="$SLICE" --quiet -p MemoryMax=1M -- true 2>/dev/null; then
+  BOUND=(systemd-run --user --scope --slice="$SLICE" --quiet -p MemoryHigh="$MEM_HIGH" -p MemoryMax="$MEM_MAX" --)
+  echo "[membuild] slice=$SLICE memory-bounded: MemoryHigh=$MEM_HIGH MemoryMax=$MEM_MAX" >&2
 else
   BOUND=()
   echo "[membuild] WARN: memory cgroup not delegated to user scope; running uncapped." >&2

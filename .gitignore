@@ -24,6 +24,11 @@ a.out.*
 *.hlds_dump*
 *.c_date
 *.d
+# …but DO track the workload-tooling config dirs under tools/ — they end in .d
+# to mirror their /etc/{sysctl.d,systemd/oomd.conf.d} install destinations and
+# are not Mercury dependency files (see tools/README.md).
+!tools/sysctl.d/
+!tools/oomd.conf.d/
 *.mh
 *.err
 append.c

@@ -1,0 +1,32 @@
+# Shared resource budget for project build/test runs (cgroup v2, user manager).
+#
+# Every project's build runner should place its build under this slice
+# (systemd-run --user --scope --slice=builds.slice ...).  That bounds the
+# TOTAL memory of all concurrent builds, so one project's run can't push the
+# machine into swap-thrash and disturb another's tests — independent of how
+# many shells launch builds.  Tuned for a 62 GiB box: leaves ~18 GiB for the
+# desktop, browsers, and the per-project Claude shells.
+#
+# Builds also yield CPU and IO to interactive work (lower weights), so the
+# desktop stays responsive while a build runs.
+#
+# Reload after edits:  systemctl --user daemon-reload
+# Inspect live usage:  systemctl --user status builds.slice
+#                      systemd-cgtop  (watch builds.slice)
+
+[Unit]
+Description=Shared budget for project build/test runs
+
+[Slice]
+MemoryHigh=38G
+MemoryMax=44G
+CPUWeight=40
+IOWeight=40
+# Let systemd-oomd kill the worst build INSIDE this slice when it is
+# thrashing (sustained memory PSI) or when swap fills — i.e. act on
+# pressure, earlier than the hard MemoryMax backstop above, and target a
+# build rather than the desktop / interactive shells (which live outside
+# this slice).
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=60%
+ManagedOOMSwap=kill

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# membuild — shared cross-project build/test runner.
+#
+# Coordinates heavy builds across every per-project shell on this machine via
+# two GLOBAL mechanisms, so one project's run can't thrash another's:
+#   * builds.slice  — a shared cgroup with a TOTAL memory budget (see
+#                     ~/.config/systemd/user/builds.slice). Every build placed
+#                     here counts against one shared cap.
+#   * a shared flock — only one heavy build runs at a time across all shells
+#                     (set NO_LOCK=1 to allow concurrency within the slice
+#                      budget instead).
+#
+# Usage:   membuild <command...>
+#   e.g.   membuild bash self-host/build.sh
+#          MEM_MAX=24G membuild make -j8 test
+#          NO_LOCK=1 membuild ./run-tests.sh        # concurrent, slice-bounded
+#
+# Env:
+#   MEM_HIGH  per-build soft cap (reclaim pressure).            default 24G
+#   MEM_MAX   per-build hard cap (also bounded by slice total). default 36G
+#   SLICE     shared slice name.                                default builds.slice
+#   LOCK      shared lock path (same for every project).        default ~/.cache/heavy-build.lock
+#   NO_LOCK=1 skip serialization (still slice-bounded).
+set -uo pipefail
+
+MEM_HIGH="${MEM_HIGH:-24G}"
+MEM_MAX="${MEM_MAX:-36G}"
+SLICE="${SLICE:-builds.slice}"
+LOCK="${LOCK:-$HOME/.cache/heavy-build.lock}"
+
+[ "$#" -gt 0 ] || { echo "usage: membuild <command...>" >&2; exit 2; }
+
+if systemd-run --user --scope --slice="$SLICE" --quiet -p MemoryMax=1M -- true 2>/dev/null; then
+  BOUND=(systemd-run --user --scope --slice="$SLICE" --quiet \
+         -p MemoryHigh="$MEM_HIGH" -p MemoryMax="$MEM_MAX" --)
+  echo "[membuild] slice=$SLICE  per-build MemoryMax=$MEM_MAX  (total bounded by the slice)" >&2
+else
+  BOUND=()
+  echo "[membuild] WARN: user-scope cgroups unavailable; running uncapped." >&2
+fi
+
+if [ "${NO_LOCK:-0}" = 1 ]; then
+  exec "${BOUND[@]}" "$@"
+else
+  mkdir -p "$(dirname "$LOCK")"
+  echo "[membuild] waiting for shared build lock: $LOCK (one build at a time across all shells)" >&2
+  exec flock "$LOCK" "${BOUND[@]}" "$@"
+fi

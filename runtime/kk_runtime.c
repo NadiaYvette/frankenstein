@@ -2057,7 +2057,25 @@ int64_t kk_str_slice(int64_t parent_i, int64_t byte_offset, int64_t byte_len) {
     if (byte_offset + byte_len > parent->byte_len)
         byte_len = parent->byte_len - byte_offset;
     const char* bytes = kk_str_bytes(parent) + byte_offset;
-    int64_t r = (int64_t)kk_str_alloc_slice(parent, bytes, byte_len);
+    /* Collapse slice-of-slice: anchor the new slice to the base LEAF that
+     * owns the buffer, not to the intermediate slice we were handed.
+     * kk_str_bytes() already returns the absolute base-buffer pointer for a
+     * slice, so `bytes` is correct regardless; this only changes which cell
+     * the new slice retains as cat.l, and is byte-identical content-wise.
+     *
+     * Without it, a forward scan that re-slices the remaining text (e.g.
+     * OrganIR.Parse threading `rest` through skip/tail/break) accumulates an
+     * O(n)-deep chain of slices that ALL stay live — each retained as the
+     * next one's parent — even when the caller drops them.  That is O(n)
+     * memory, and once the live count passes the 16,777,216-slot global
+     * string table it saturates, degrading every kk_register_string to
+     * O(table) (open-addressed linear probe) => O(n*table).  Anchoring to the
+     * base leaf lets each consumed intermediate reach rc 0, free, and
+     * unregister, keeping live slices O(1) and the table sparse. */
+    kk_string_t* base = parent;
+    while (base->kind == KK_STR_SLICE && base->u.cat.l != NULL)
+        base = (kk_string_t*)base->u.cat.l;
+    int64_t r = (int64_t)kk_str_alloc_slice(base, bytes, byte_len);
     kk_register_string(r);
     return r;
 }

@@ -379,9 +379,13 @@ compile_stage() {
     fi
 
     # Step 2: Self-hosted compiler → MLIR
-    # The self-hosted JSON parser has super-linear scaling, so large modules
-    # (>1MB OrganIR JSON) are automatically split into parts of ~40 defs each,
-    # compiled separately, and merged.
+    # Large modules hit stacked super-linear cliffs in the self-hosted compiler
+    # (NOT a single parser O(n²) — investigated in #387): (1) the string
+    # registry's fixed 1<<24 table fills with LIVE strings (under --no-perceus
+    # nothing is dropped) so probing goes O(table); (2) bind_runner
+    # (shim_ghc_prim.c) on the large monadic-bind chain. So >1MB OrganIR JSON
+    # modules are auto-split into ~40-def parts, compiled separately, and merged.
+    # Keep this split — retiring it is multi-layer (see memory self-host-parse-cliffs).
     _json_size=$(stat -c%s "$ORGAN_DIR/$flat.organ.json")
     # Splitting was disabled in plotkin mode earlier (round 6) because
     # each part's plotkin pass only saw its own defs in topNames. The
@@ -394,8 +398,8 @@ compile_stage() {
     if [ "$_json_size" -gt 1000000 ]; then
       # Auto-split by JSON byte size: target ~400KB per part so that large
       # definitions (emitAppVar=936KB, emitExpr=377KB, etc.) each get their
-      # own part. JSON is minified (separators=(',',':')) to reduce parser
-      # time — the self-hosted JSON parser is O(n²).
+      # own part. JSON is minified (separators=(',',':')) to cut input size —
+      # the cliffs are registry capacity + bind_runner, not the parser per se.
       _nparts=$(python3 -c "
 import json, sys
 sys.setrecursionlimit(10000)

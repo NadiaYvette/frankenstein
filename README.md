@@ -72,6 +72,10 @@ The MLIR emitter produces standard MLIR dialects (func, arith, scf, cf)
 which are then lowered through MLIR's pass pipeline to LLVM IR and compiled
 to a native binary.
 
+### Observability & LSP Alternative
+
+Organ Bank's harvesting pipeline can also be deployed as an effect-aware, cross-language language server and observability sidecar (`organ-index`), providing token-budgeted skeleton maps, cross-language definition/reference lookups, and PMWA-style boundary checking. See [`docs/observability-lsp-alternative.md`](file:///home/nyc/src/frankenstein/docs/observability-lsp-alternative.md).
+
 ## Quick Start
 
 ### Prerequisites

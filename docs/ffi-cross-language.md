@@ -268,3 +268,4 @@ choices above settle.
 | Evidence/effect erasure | `src/Frankenstein/Core/EvidenceEvv.hs` |
 | Polyglot demo source | `examples/polyglot-demo/four-lang.kk` |
 | Demo build script | `examples/polyglot-demo/simple-demo.sh` |
+| Observability & LSP Alternative | [`docs/observability-lsp-alternative.md`](file:///home/nyc/src/frankenstein/docs/observability-lsp-alternative.md) |

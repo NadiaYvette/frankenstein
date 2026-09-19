@@ -2112,7 +2112,92 @@ emitCycleCandidate ptrName = do
     then pure ["func.call @kk_cycle_candidate(%" <> ptrName <> ") : (i64) -> ()"]
     else pure []
 
--- | Emit a string literal as a [Char] cons-list (for Haskell String = [Char]).
+-- | Lookup arity in the map, trying exact match, sanitized match, and suffix matches.
+lookupArityInMap :: Map Text Int -> Text -> Maybe Int
+lookupArityInMap arMap key =
+  case Map.lookup key arMap of
+    Just a -> Just a
+    Nothing ->
+      let san = sanitizeName key
+      in case Map.lookup san arMap of
+           Just a -> Just a
+           Nothing ->
+             case [ a | (k, a) <- Map.toList arMap
+                      , k == san || T.isSuffixOf ("_" <> san) k || T.isSuffixOf ("_" <> key) k ] of
+               (a:_) -> Just a
+               []    -> Nothing
+
+-- | Lookup arity for a Name.
+lookupNameArity :: Map Text Int -> Name -> Maybe Int
+lookupNameArity arMap n =
+  case lookupArityInMap arMap (nameToSsa n) of
+    Just a -> Just a
+    Nothing ->
+      case lookupArityInMap arMap (nameText n) of
+        Just a -> Just a
+        Nothing -> lookupArityInMap arMap (sanitizeName (nameText n))
+
+-- | Statically detect the arity of an expression (number of args it expects).
+detectExprArity :: Map Text Int -> Expr -> Maybe Int
+detectExprArity _     (ELam ps _)    = Just (length ps)
+detectExprArity arMap (ETypeLam _ e) = detectExprArity arMap e
+detectExprArity arMap (ETypeApp e _) = detectExprArity arMap e
+detectExprArity arMap (EDelay e)     = detectExprArity arMap e
+detectExprArity arMap (EForce e)     = detectExprArity arMap e
+detectExprArity arMap (EVar n)       = lookupNameArity arMap n
+detectExprArity arMap (EFunRef qn)   = lookupArityInMap arMap (nameText (qnameName qn))
+detectExprArity arMap (ECase _ brs)  =
+  let brArities = [ a | br <- brs, Just a <- [detectExprArity arMap (branchBody br)] ]
+  in case brArities of
+       (a:as) | all (== a) as && a > 0 -> Just a
+       _                               -> Nothing
+detectExprArity arMap (ELet _ b)     = detectExprArity arMap b
+detectExprArity _     _              = Nothing
+
+-- | Single closure call: forces the closure, fetches field 0 (fptr),
+-- casts to !llvm.ptr, and emits @llvm.call %fptr(%clos, %args...)@.
+emitSingleClosureCall :: Text -> [Text] -> Emit ([Text], Text)
+emitSingleClosureCall closSsa argNames = do
+  forcedName  <- freshName "v"
+  idxZeroName <- freshName "v"
+  fptrIntName <- freshName "v"
+  fptrPtrName <- freshName "v"
+  resultName  <- freshName "v"
+  argTypes <- mapM lookupType argNames
+  let closArgList  = T.intercalate ", " (("%" <> forcedName) : ["%" <> n | n <- argNames])
+      closArgTypes = T.intercalate ", " ("i64" : argTypes)
+      extractOps =
+        [ "%" <> forcedName  <> " = func.call @kk_thunk_force(%" <> closSsa <> ") : (i64) -> i64"
+        , "%" <> idxZeroName <> " = arith.constant 0 : i64"
+        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> forcedName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
+        , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
+        , "%" <> resultName  <> " = llvm.call %" <> fptrPtrName
+          <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
+        ]
+  pure (extractOps, resultName)
+
+-- | Dispatch an indirect call through a closure value (SSA name @closSsa@)
+-- with arguments @argNames@.
+--
+-- If the closure's arity is known and fewer than @length argNames@,
+-- performs multi-step curried dispatch:
+-- 1. Call the closure with the first @defArity@ args to obtain the inner closure.
+-- 2. Recurse/dispatch through the inner closure with the remaining args.
+--
+-- If arity is unknown or >= length argNames, performs a single closure call.
+emitClosureApp :: Text -> [Text] -> Maybe Int -> Emit ([Text], Text)
+emitClosureApp closSsa argNames (Just arity)
+  | arity > 0 && length argNames > arity = do
+      let (satArgs, extraArgs) = splitAt arity argNames
+      (call1Ops, innerClos) <- emitSingleClosureCall closSsa satArgs
+      forcedInner <- freshName "v"
+      let forceOp = "%" <> forcedInner <> " = func.call @kk_thunk_force(%" <> innerClos <> ") : (i64) -> i64"
+      arityMap <- gets esTopFnArity
+      let nextArity = lookupArityInMap arityMap forcedInner
+      (call2Ops, finalResult) <- emitClosureApp forcedInner extraArgs nextArity
+      pure (call1Ops ++ [forceOp] ++ call2Ops, finalResult)
+emitClosureApp closSsa argNames _ = emitSingleClosureCall closSsa argNames
+
 -- | Emit a Core expression. Returns (list of MLIR ops, result SSA name)
 emitExpr :: Expr -> Emit ([Text], Text)
 emitExpr (ELit (LitInt n)) = do
@@ -2310,34 +2395,16 @@ emitExpr (EApp (EVar fn) args) = emitAppVar fn args
 emitExpr (EApp (ETypeApp fn _) args) = emitExpr (EApp fn args)
 -- Strip ETypeLam wrapper from callee (type abstraction applied to args)
 emitExpr (EApp (ETypeLam _ fn) args) = emitExpr (EApp fn args)
-
 emitExpr (EApp fn args) = do
   (fnOps, fnName) <- emitExpr fn
   argResults <- mapM emitExpr args
   let allArgOps = concatMap fst argResults
       argNames = map snd argResults
-      nArgs = length argNames
-      argTys = replicate nArgs "i64"
-  -- Force the callee: if fn is a thunk (e.g. produced by an upstream
-  -- EDelay that we wrapped via kk_thunk_create_forced), reading field 0
-  -- directly gives the evaluated flag (1), not the fn pointer. kk_thunk_force
-  -- on a non-thunk is a no-op, so always-force is safe and corrects the
-  -- thunk-as-closure dispatch case.
-  forcedName  <- freshName "v"
-  idxZeroName <- freshName "v"
-  fptrIntName <- freshName "v"
-  fptrPtrName <- freshName "v"
-  resultName  <- freshName "v"
-  let closArgList  = T.intercalate ", " (("%" <> forcedName) : ["%" <> n | n <- argNames])
-      closArgTypes = T.intercalate ", " ("i64" : argTys)
-      extractOps =
-        [ "%" <> forcedName  <> " = func.call @kk_thunk_force(%" <> fnName <> ") : (i64) -> i64"
-        , "%" <> idxZeroName <> " = arith.constant 0 : i64"
-        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> forcedName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
-        , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-        , "%" <> resultName  <> " = llvm.call %" <> fptrPtrName
-          <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
-        ]
+  arityMap <- gets esTopFnArity
+  let mArity = case detectExprArity arityMap fn of
+        Just a  -> Just a
+        Nothing -> lookupArityInMap arityMap fnName
+  (extractOps, resultName) <- emitClosureApp fnName argNames mArity
   pure (fnOps ++ allArgOps ++ extractOps, resultName)
 
 emitExpr (ECase scrut branches) = emitCaseDispatch scrut branches
@@ -3269,7 +3336,11 @@ emitAppVarGeneral fn args = do
                       , T.isSuffixOf ("_" <> initialQual) n ] of
                (resolved:_) -> resolved
                [] -> initialQual
-      mArity = Map.lookup qualSanitized arityMap
+      mArity = case lookupNameArity arityMap fn of
+        Just a  -> Just a
+        Nothing -> case lookupArityInMap arityMap qualSanitized of
+          Just a  -> Just a
+          Nothing -> Map.lookup qualSanitized arityMap
   if Set.member qualSanitized topFns
     then case mArity of
       Just arity | nArgs < arity -> do
@@ -3293,21 +3364,10 @@ emitAppVarGeneral fn args = do
             -- field layout differs from closures. kk_thunk_force is a no-op
             -- on non-thunks, so this is always safe.
             forceOp = "%" <> closName <> " = func.call @kk_thunk_force(%" <> rawClosName <> ") : (i64) -> i64"
-        -- Closure-indirect call with the remaining args
-        idxZeroName <- freshName "v"
-        fptrIntName <- freshName "v"
-        fptrPtrName <- freshName "v"
-        resultName  <- freshName "v"
-        let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- extraArgs])
-            closArgTypes = T.intercalate ", " ("i64" : extraTys)
-            extractOps =
-              [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
-              , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
-              , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-              , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
-                <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
-              ]
-        pure (allOps ++ [topCallOp, forceOp] ++ extractOps, resultName)
+        -- Closure-indirect call with the remaining args via emitClosureApp
+        let nextArity = lookupArityInMap arityMap closName
+        (extraOps, resultName) <- emitClosureApp closName extraArgs nextArity
+        pure (allOps ++ [topCallOp, forceOp] ++ extraOps, resultName)
       _ -> do
         resultName <- freshName "v"
         let callOp = "%" <> resultName <> " = func.call @" <> qualSanitized
@@ -3321,26 +3381,13 @@ emitAppVarGeneral fn args = do
       let rawName = nameToSsa fn
       case Map.lookup rawName aliases of
         Just closName -> do
-          -- Case (a): local closure-indirect call. Force in case the
-          -- bound value is a thunk (kk_thunk_force is a no-op on
-          -- non-thunks); without it, reading field 0 of an unforced
-          -- kk_thunk_create_forced thunk returns the eval flag (1)
-          -- instead of the fn pointer — see ABI audit Boundary C.
-          forcedName  <- freshName "v"
-          idxZeroName <- freshName "v"
-          fptrIntName <- freshName "v"
-          fptrPtrName <- freshName "v"
-          resultName  <- freshName "v"
-          let closArgList = T.intercalate ", " (("%" <> forcedName) : ["%" <> n | n <- argNames])
-              closArgTypes = T.intercalate ", " ("i64" : argTypes)
-              extractOps =
-                [ "%" <> forcedName  <> " = func.call @kk_thunk_force(%" <> closName <> ") : (i64) -> i64"
-                , "%" <> idxZeroName <> " = arith.constant 0 : i64"
-                , "%" <> fptrIntName <> " = func.call @kk_field(%" <> forcedName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
-                , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-                , "%" <> resultName  <> " = llvm.call %" <> fptrPtrName
-                  <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
-                ]
+          -- Case (a): local closure-indirect call.
+          let mAr = case lookupNameArity arityMap fn of
+                Just a  -> Just a
+                Nothing -> case lookupArityInMap arityMap rawName of
+                  Just a  -> Just a
+                  Nothing -> lookupArityInMap arityMap closName
+          (extractOps, resultName) <- emitClosureApp closName argNames mAr
           pure (allOps ++ extractOps, resultName)
         Nothing -> do
           -- Check if this is a promoted let-bound lambda (e.g. go, goBranch).
@@ -3374,20 +3421,9 @@ emitAppVarGeneral fn args = do
                       topCallOp = "%" <> rawClosName <> " = func.call @" <> promotedName
                                   <> "(" <> satList <> ") : " <> topCallTy
                       forceOp = "%" <> closName <> " = func.call @kk_thunk_force(%" <> rawClosName <> ") : (i64) -> i64"
-                  idxZeroName <- freshName "v"
-                  fptrIntName <- freshName "v"
-                  fptrPtrName <- freshName "v"
-                  resultName  <- freshName "v"
-                  let closArgList = T.intercalate ", " (("%" <> closName) : ["%" <> n | n <- extraArgs])
-                      closArgTypes = T.intercalate ", " ("i64" : extraTys)
-                      extractOps =
-                        [ "%" <> idxZeroName <> " = arith.constant 0 : i64"
-                        , "%" <> fptrIntName <> " = func.call @kk_field(%" <> closName <> ", %" <> idxZeroName <> ") : (i64, i64) -> i64"
-                        , "%" <> fptrPtrName <> " = llvm.inttoptr %" <> fptrIntName <> " : i64 to !llvm.ptr"
-                        , "%" <> resultName <> " = llvm.call %" <> fptrPtrName
-                          <> "(" <> closArgList <> ") : !llvm.ptr, (" <> closArgTypes <> ") -> i64"
-                        ]
-                  pure (allOps ++ [topCallOp, forceOp] ++ extractOps, resultName)
+                  let nextArity = lookupArityInMap arityMap closName
+                  (extraOps, resultName) <- emitClosureApp closName extraArgs nextArity
+                  pure (allOps ++ [topCallOp, forceOp] ++ extraOps, resultName)
                 _ -> do
                   resultName <- freshName "v"
                   let callOp = "%" <> resultName <> " = func.call @" <> promotedName
@@ -3658,23 +3694,30 @@ emitLambdaLift params body = do
   --     Perceus per-branch balance + drop-insertion sites (Phase 12c
   --     step 4).
   let countUses :: Name -> Expr -> Int
-      countUses = if useNewPerceusCount
-                  then consumingUseCount
-                  else legacyCountUses
-      legacyCountUses tgt = go
+      countUses tgt expr = if useNewPerceusCount
+                           then consumingUseCount tgt expr
+                           else legacyCountUses tgt expr
+      legacyCountUses :: Name -> Expr -> Int
+      legacyCountUses tgt expr = go expr
         where
           tgtT = nameText tgt
+          sumInt :: [Int] -> Int
+          sumInt xs = foldl (+) 0 xs
+          maxBranch :: [Branch] -> Int
+          maxBranch [] = 0
+          maxBranch brs = foldl (\acc br -> max acc (go (branchBody br))) 0 brs
+          go :: Expr -> Int
           go (EVar n)         = if nameText n == tgtT then 1 else 0
           go (ELit _)         = 0
           go (ECon _)         = 0
           go (EFunRef _)      = 0
-          go (EApp f as)      = go f + sum (map go as)
+          go (EApp f as)      = go f + sumInt (map go as)
           go (ELam _ b)       = go b
           go (ELet bgs b)     =
             -- Explicit concatMap form (see commit a5a578c).
-            go b + sum (concatMap (map (go . bindExpr)) bgs)
+            go b + sumInt (concatMap (map (go . bindExpr)) bgs)
           go (ECase s brs)    =
-            go s + maximum (0 : [go (branchBody br) | br <- brs])
+            go s + maxBranch brs
           -- ERetain / ERelease: rc ops, NOT consuming the value
           go (ERetain _)      = 0
           go (ERelease _)     = 0
@@ -3684,7 +3727,7 @@ emitLambdaLift params body = do
           go (EForce e)       = go e
           go (ETypeApp e _)   = go e
           go (ETypeLam _ e)   = go e
-          go (EPerform _ as)  = sum (map go as)
+          go (EPerform _ as)  = sumInt (map go as)
           go (EHandle _ h b)  = go h + go b
       capCounts = [ max 1 (countUses n body) | n <- captured ]
       extraCounts = [ 1 | _ <- extraCapsUniq ]
@@ -4244,8 +4287,17 @@ emitScfIf preOps condName thenExpr elseExpr = do
 
 emitBind :: Bind -> Emit [Text]
 emitBind bnd = do
+  arityMap <- gets esTopFnArity
+  let mArity = detectExprArity arityMap (bindExpr bnd)
   (ops, resultName) <- emitExpr (bindExpr bnd)
   let bname = nameToSsa (Frankenstein.Core.Types.bindName bnd)
+      rawText = nameText (Frankenstein.Core.Types.bindName bnd)
+  case mArity of
+    Just ar | ar > 0 ->
+      modify (\s -> s { esTopFnArity = Map.insert bname ar
+                                      (Map.insert resultName ar
+                                      (Map.insert rawText ar (esTopFnArity s))) })
+    _ -> pure ()
   if bname == resultName
     then pure ops
     else do
@@ -4761,7 +4813,10 @@ unwrapLambda e              = e
 -- Nullary defs (arity 0) are also recorded so oversaturated calls can be
 -- detected and routed through the closure-indirect path.
 buildTopFnArity :: Text -> [Def] -> Map Text Int
-buildTopFnArity modPfx defs = Map.fromList (map entryFor defs)
+buildTopFnArity modPfx defs =
+  let initialMap = Map.fromList (map entryFor defs)
+      extraEntries = concatMap (extraEntriesFor initialMap) defs
+  in Map.fromList extraEntries `Map.union` initialMap
   where
     -- Explicit map (not list-comp with let-generators): the comp form
     -- desugars into a derived dszd helper that over-drops `defs` while
@@ -4774,8 +4829,21 @@ buildTopFnArity modPfx defs = Map.fromList (map entryFor defs)
           san = sanitizeName t
           qualKey = if T.any (== '/') t || T.isPrefixOf modPfx san then san else modPfx <> san
       in (qualKey, topLamArity (defExpr d))
+    extraEntriesFor arMap d =
+      let t = nameText (qnameName (defName d))
+          san = sanitizeName t
+          qualKey = if T.any (== '/') t || T.isPrefixOf modPfx san then san else modPfx <> san
+          ar0 = topLamArity (defExpr d)
+          ar = if ar0 > 0 then ar0 else case detectExprArity arMap (defExpr d) of
+                                          Just a  -> a
+                                          Nothing -> 0
+      in if ar > 0
+         then [(qualKey, ar), (san, ar), (t, ar)]
+         else []
     topLamArity (ELam ps _)     = length ps
     topLamArity (ETypeLam _ e)  = topLamArity e
+    topLamArity (EDelay e)      = topLamArity e
+    topLamArity (EForce e)      = topLamArity e
     topLamArity _               = 0
 
 -- | External C runtime functions that are declared as `func.func private`

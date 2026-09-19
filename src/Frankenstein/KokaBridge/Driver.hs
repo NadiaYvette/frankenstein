@@ -96,7 +96,7 @@ compileKokaFile inputFile = do
 
 -- | Split a string on a single-char delimiter (avoids a Data.List.Split dep).
 splitOnChar :: Char -> String -> [FilePath]
-splitOnChar d = foldr step [[]]
+splitOnChar d s = foldr step [[]] s
   where step c acc@(cur:rest)
           | c == d    = [] : acc
           | otherwise = (c:cur) : rest

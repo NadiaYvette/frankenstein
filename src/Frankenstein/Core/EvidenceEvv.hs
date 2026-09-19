@@ -221,7 +221,7 @@ flatTypeArity _                    = 0
 -- definitions in this Program — call sites against these get @evv@
 -- threaded as their first argument.
 transformExpr :: [EffectDecl] -> Set (Text, Text) -> Name -> Expr -> Expr
-transformExpr effs topNames evv = go
+transformExpr effs topNames evv expr = go expr
   where
     go expr = case expr of
       EHandle effRow handler body ->

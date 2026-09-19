@@ -281,7 +281,7 @@ classifyHandler _ = HKTail
 -- | Count the number of @EApp (EVar name) _@ sites under @expr@.
 -- Used by 'classifyHandler' to tell tail-resumptive from multi-shot.
 countAppsOf :: Text -> Expr -> Int
-countAppsOf name = go
+countAppsOf name expr = go expr
   where
     go (EApp (EVar n) as)
       | nameText n == name = 1 + sum (map go as)

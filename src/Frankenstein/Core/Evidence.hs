@@ -440,7 +440,7 @@ anyType = TCon (TypeCon (QName "std" (Name "any" 0)) KindValue)
 -- alone (they will be resolved by an outer handler, or fall through
 -- to the unresolved-external path in the emitter).
 substEFunRef :: Scope -> Expr -> Expr
-substEFunRef scp = go
+substEFunRef scp expr = go expr
   where
     go (EFunRef qn) =
       let eff = qnameModule qn

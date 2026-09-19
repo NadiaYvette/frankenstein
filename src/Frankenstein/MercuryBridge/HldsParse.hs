@@ -360,7 +360,7 @@ parsePredBlock headerLine bodyLines =
 -- pred's @name@ + @arity@ in 'parsePredBlock', so distinct preds
 -- produce distinct lifted-lambda symbols downstream.
 renameLambdaLhses :: Text -> MercuryGoal -> MercuryGoal
-renameLambdaLhses suffix = goTop Set.empty
+renameLambdaLhses suffix goal = goTop Set.empty goal
   where
     rn renamed v = if Set.member v renamed then v <> suffix else v
     goTop renamed g = case g of

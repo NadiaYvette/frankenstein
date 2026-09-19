@@ -240,7 +240,7 @@ parseObjField key rest1 acc = do
 
 -- | Lookup a key in a JSON object
 jLookup :: Text -> [(Text, JValue)] -> Maybe JValue
-jLookup key = fmap snd . find ((== key) . fst)
+jLookup key fields = fmap snd (find ((== key) . fst) fields)
 
 -- | Extract a string from JValue
 jStr :: JValue -> Maybe Text

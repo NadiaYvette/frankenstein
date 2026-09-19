@@ -70,7 +70,7 @@ import qualified Data.Map.Strict as Map
 -- @Name@ equality includes both the text and the unique, so distinct
 -- GHC synthetic variables with shared text don't get conflated.
 consumingUseCount :: Name -> Expr -> Int
-consumingUseCount tgt = goExpr
+consumingUseCount tgt expr = goExpr expr
   where
     -- "Is @tgt@ free in @e@ (respecting binders)?"  Used for the
     -- closure-capture events at ELam / EDelay / EHandle.

@@ -59,3 +59,8 @@ web/*.wasm
 # Idris2 shim build artifacts + local depends symlinks
 idris2-shim/build/
 idris2-shim/depends/
+build/
+self-host/*.log
+self-host/*-bin
+self-host/frankenstein-self*
+self-host/obj/

@@ -94,7 +94,7 @@ main = do
 EOF
 
 echo "=== [TP-007E] Building and testing ==="
-cabal v2-build frankenstein -j20 --semaphore
+cabal v2-build lib:frankenstein -j20 --semaphore
 cabal v2-test frankenstein:test:funnel-tests
 
 echo "=== [TP-007E] Script execution complete ==="

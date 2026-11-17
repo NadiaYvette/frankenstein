@@ -3,6 +3,7 @@ allow-newer: *:base, *:template-haskell, *:polytropos-core, *:containers, *:ghc
 
 packages:
   .
+  /home/nyc/src/frankenstein/donors/koka
   /home/nyc/src/polytropos/packages/polytropos-core
   /home/nyc/src/penelope/packages/penelope-core
   /home/nyc/src/penelope/packages/penelope-backend-mlir

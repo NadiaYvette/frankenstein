@@ -64,3 +64,4 @@ self-host/*.log
 self-host/*-bin
 self-host/frankenstein-self*
 self-host/obj/
+.yamaarashi/

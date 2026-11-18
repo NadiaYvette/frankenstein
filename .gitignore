@@ -1,6 +1,8 @@
 # === Cabal / GHC build artifacts ===
 dist-newstyle/
 .ghc.environment.*
+cabal.project.local
+cabal.project.local*
 
 # === Haskell object files ===
 *.o

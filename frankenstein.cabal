@@ -25,6 +25,7 @@ library
         Frankenstein.Backpack.HsigBridge
         Frankenstein.Driver.Registry
         Frankenstein.Style.Profile
+        Frankenstein.Emit.Idiomatic
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

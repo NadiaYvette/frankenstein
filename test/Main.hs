@@ -111,6 +111,17 @@ import Frankenstein.Style.Profile
   , rankEquivalentCandidates
   , styleProfileToDhall
   )
+import Frankenstein.Emit.Idiomatic
+  ( TranspileTarget(..)
+  , OwnershipRustType(..)
+  , mapProfileToRustOwnership
+  , sanitizeAbiSymbol
+  , emitIdiomaticRustModule
+  , emitPythonCapiExtension
+  , emitFortranIsoCBinding
+  , emitRocqSpecSkeleton
+  , applyFormatterHook
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -192,6 +203,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , backpackHsigBridgeTests
   , driverRegistryTests
   , styleProfileTests
+  , emitIdiomaticTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2583,4 +2595,59 @@ styleProfileTests = testGroup "Style.Profile"
           dhallText = styleProfileToDhall sp
       assertBool "Non-empty Dhall text" (not (T.null dhallText))
       assertBool "Contains profileName" (T.isInfixOf "profileName = \"functional-default\"" dhallText)
+  ]
+
+--------------------------------------------------------------------------------
+-- Y. Emit.Idiomatic Tests (TP-INGOLSTADT-T3-003)
+--------------------------------------------------------------------------------
+
+emitIdiomaticTests :: TestTree
+emitIdiomaticTests = testGroup "Emit.Idiomatic"
+  [ testCase "Profile 0 emits pure Rust owned/mutable signatures with 0 Rc/Arc imports" $ do
+      let ifaceP0 = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "Math.Vector"
+            , oiSourceLang    = "haskell"
+            , oiCtors         = []
+            , oiExports       = [ExportAbi "add" 2 0 Profile0FreestandingLinear False]
+            , oiImports       = []
+            }
+          sp = defaultStyleForParadigm ParadigmSystems
+          rustCode = emitIdiomaticRustModule sp ifaceP0
+      assertBool "No Rc import" (not (T.isInfixOf "use std::rc::Rc" rustCode))
+      assertBool "No Arc import" (not (T.isInfixOf "use std::sync::Arc" rustCode))
+      assertBool "Contains pub fn add" (T.isInfixOf "pub fn add" rustCode)
+      assertBool "Contains Profile 0 doc" (T.isInfixOf "OrganIR Profile 0" rustCode)
+
+  , testCase "Profile 1 emits std::rc::Rc, Profile 2 emits std::sync::Arc" $ do
+      let sp = defaultStyleForParadigm ParadigmSystems
+          ifaceP1 = OrganInterface "1.0.0" "Env" "haskell" [] [ExportAbi "get" 1 0 Profile1ThreadLocalPerceus False] []
+          rustP1 = emitIdiomaticRustModule sp ifaceP1
+      assertBool "Contains Rc import" (T.isInfixOf "use std::rc::Rc;" rustP1)
+
+      let ifaceP2 = OrganInterface "1.0.0" "Sync" "rust" [] [ExportAbi "share" 1 0 Profile2ConcurrentShared False] []
+          rustP2 = emitIdiomaticRustModule sp ifaceP2
+      assertBool "Contains Arc import" (T.isInfixOf "use std::sync::Arc;" rustP2)
+
+  , testCase "Emitted Python C-API glue exports PyInit_<mod> and PyArg_ParseTuple matching arity" $ do
+      let iface = OrganInterface "1.0.0" "Math.Vector" "haskell" [] [ExportAbi "add" 2 0 Profile0FreestandingLinear False] []
+          pyCode = emitPythonCapiExtension iface
+      assertBool "Contains PyInit_math_vector" (T.isInfixOf "PyMODINIT_FUNC PyInit_math_vector" pyCode)
+      assertBool "Contains PyArg_ParseTuple LL" (T.isInfixOf "PyArg_ParseTuple(args, \"LL\"" pyCode)
+
+  , testCase "Emitted Fortran module contains iso_c_binding and bind(C, name=...)" $ do
+      let iface = OrganInterface "1.0.0" "Math.Vector" "haskell" [] [ExportAbi "add" 2 0 Profile0FreestandingLinear False] []
+          ftnCode = emitFortranIsoCBinding iface
+      assertBool "Contains iso_c_binding" (T.isInfixOf "use, intrinsic :: iso_c_binding" ftnCode)
+      assertBool "Contains bind(C, name=\"add\")" (T.isInfixOf "bind(C, name=\"add\")" ftnCode)
+
+  , testCase "Emitted Rocq .v skeleton exports ContentTag definitions and signatures" $ do
+      let ifaceTag = OrganInterface "1.0.0" "Tree" "haskell"
+            [CtorDescriptor "Tree.Leaf" (ContentTag 101) 0 False]
+            [ExportAbi "node" 2 0 Profile0FreestandingLinear False]
+            []
+          rocqCode = emitRocqSpecSkeleton ifaceTag
+      assertBool "Contains ZArith" (T.isInfixOf "From Stdlib Require Import ZArith." rocqCode)
+      assertBool "Contains Leaf_tag" (T.isInfixOf "Tree_Leaf_tag : Z := 101%Z" rocqCode)
+      assertBool "Contains Parameter node" (T.isInfixOf "Parameter node : Z -> Z -> Z." rocqCode)
   ]

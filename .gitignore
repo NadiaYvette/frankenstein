@@ -70,3 +70,4 @@ self-host/obj/
 
 .ok/
 .yamaarashi/
+*.manifest

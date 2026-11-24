@@ -16,6 +16,7 @@ library
         Frankenstein.Core.Interface
         Frankenstein.Verify.LiquidProfile
         Frankenstein.Opt.EGraph
+        Frankenstein.Verify.SynquidHole
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

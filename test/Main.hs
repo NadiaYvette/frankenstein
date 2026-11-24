@@ -46,6 +46,13 @@ import Frankenstein.Verify.LiquidProfile
   , dischargeLinearityAndBounds
   , runZ3Query
   )
+import Frankenstein.Verify.SynquidHole
+  ( HoleSort(..)
+  , SynthComponent(..)
+  , HoleGoal(..)
+  , SynthOutcome(..)
+  , synthesizeHole
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -120,6 +127,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , polyglotLinkTests
   , liquidProfileTests
   , optEGraphTests
+  , synquidHoleTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2053,11 +2061,56 @@ optEGraphTests = testGroup "Opt.EGraph"
             (Opt.ESeq
               (Opt.EForce (Opt.EAllocThunk (Opt.EAllocCtor "Box" [Opt.EInt 42])))
               (Opt.ERowMorph [0, 1] (Opt.ECheckedIndex (Opt.EVar "v") (Opt.EInt 0) True)))
-          (opt, stats) = Opt.saturateOrganExpr 10 complexExpr
+          (_opt, stats) = Opt.saturateOrganExpr 10 complexExpr
       assertBool "Cost monotonicity invariant (costAfter <= costBefore)"
         (Opt.rsCostAfter stats <= Opt.rsCostBefore stats)
       assertBool "Heap allocs non-increasing"
         (Opt.ocHeapAllocs (Opt.rsCostAfter stats) <= Opt.ocHeapAllocs (Opt.rsCostBefore stats))
       assertBool "RC ops reduced"
         (Opt.ocRcOps (Opt.rsCostAfter stats) < Opt.ocRcOps (Opt.rsCostBefore stats))
+  ]
+
+--------------------------------------------------------------------------------
+-- S. SynquidHole Tests (TP-INGOLSTADT-T1-003)
+--------------------------------------------------------------------------------
+
+synquidHoleTests :: TestTree
+synquidHoleTests = testGroup "Verify.SynquidHole"
+  [ testCase "Bounds-safe indexed accessor fills hole with EUncheckedIndex" $ do
+      let catalog =
+            [ SynthComponent "arr" (SortArray "len") (Opt.EVar "arr")
+            , SynthComponent "i"   (SortIndex "i")   (Opt.EVar "i")
+            ]
+          preconds = [PLe (AInt 0) (AVar "i"), PLt (AVar "i") (AVar "len")]
+          goal = HoleGoal "elemHole" SortInt preconds catalog 10
+      case synthesizeHole goal of
+        SynthSolved expr stats -> do
+          expr @?= Opt.EUncheckedIndex (Opt.EVar "arr") (Opt.EVar "i")
+          Opt.ocBoundsChks (Opt.rsCostAfter stats) @?= 0
+        other -> assertFailure ("Expected SynthSolved, got: " ++ show other)
+
+  , testCase "Linear Profile-0 constructor transform emits zero EDup/EDrop" $ do
+      let catalog =
+            [ SynthComponent "x" SortInt (Opt.EVar "x")
+            , SynthComponent "y" SortInt (Opt.EVar "y")
+            ]
+          goal = HoleGoal "valHole" SortInt [] catalog 10
+      case synthesizeHole goal of
+        SynthSolved expr stats -> do
+          expr @?= Opt.EVar "x"
+          Opt.ocRcOps (Opt.rsCostAfter stats) @?= 0
+        other -> assertFailure ("Expected SynthSolved, got: " ++ show other)
+
+  , testCase "Unsatisfiable holes halt cleanly returning SynthUnsatisfiable" $ do
+      let catalog = [ SynthComponent "arr" (SortArray "n") (Opt.EVar "arr") ]
+          goal = HoleGoal "emptyHole" SortFrame [] catalog 10
+      case synthesizeHole goal of
+        SynthUnsatisfiable name -> name @?= "emptyHole"
+        other -> assertFailure ("Expected SynthUnsatisfiable, got: " ++ show other)
+
+  , testCase "Fuel-exhausted hole halts returning SynthOutOfFuel" $ do
+      let goal = HoleGoal "zeroFuel" SortInt [] [] 0
+      case synthesizeHole goal of
+        SynthOutOfFuel f -> f @?= 0
+        other -> assertFailure ("Expected SynthOutOfFuel, got: " ++ show other)
   ]

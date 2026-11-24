@@ -17,6 +17,7 @@ library
         Frankenstein.Verify.LiquidProfile
         Frankenstein.Opt.EGraph
         Frankenstein.Verify.SynquidHole
+        Frankenstein.Backpack.OpenRecordSig
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

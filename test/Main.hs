@@ -53,6 +53,16 @@ import Frankenstein.Verify.SynquidHole
   , SynthOutcome(..)
   , synthesizeHole
   )
+import Frankenstein.Backpack.OpenRecordSig
+  ( TypeFieldSpec(..)
+  , ValueFieldSpec(..)
+  , ModuleSig(..)
+  , SigMorphism(..)
+  , SigMergeError(..)
+  , emptyModuleSig
+  , applySigMorphism
+  , mergeModuleSigs
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -128,6 +138,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , liquidProfileTests
   , optEGraphTests
   , synquidHoleTests
+  , backpackOpenRecordSigTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2113,4 +2124,58 @@ synquidHoleTests = testGroup "Verify.SynquidHole"
       case synthesizeHole goal of
         SynthOutOfFuel f -> f @?= 0
         other -> assertFailure ("Expected SynthOutOfFuel, got: " ++ show other)
+  ]
+
+--------------------------------------------------------------------------------
+-- T. Backpack.OpenRecordSig Tests (TP-INGOLSTADT-T2-001)
+--------------------------------------------------------------------------------
+
+backpackOpenRecordSigTests :: TestTree
+backpackOpenRecordSigTests = testGroup "Backpack.OpenRecordSig"
+  [ testCase "Pushout merge refines opaque type with manifest representation" $ do
+      let s1 = (emptyModuleSig "SigA")
+            { msTypes = Map.singleton "Elem" (TypeOpaque 0)
+            , msLaws  = [PLe (AInt 0) (AVar "i")]
+            }
+          s2 = (emptyModuleSig "SigB")
+            { msTypes = Map.singleton "Elem" (TypeManifest 0 "Int64")
+            , msLaws  = [PLe (AInt 0) (AVar "i")]
+            }
+      case mergeModuleSigs "Merged" s1 s2 of
+        Left errs -> assertFailure ("Unexpected merge error: " ++ show errs)
+        Right m -> do
+          msName m @?= "Merged"
+          Map.lookup "Elem" (msTypes m) @?= Just (TypeManifest 0 "Int64")
+          msLaws m @?= [PLe (AInt 0) (AVar "i")]
+
+  , testCase "Incompatible manifest representations produce ManifestTypeConflict" $ do
+      let s1 = (emptyModuleSig "SigA") { msTypes = Map.singleton "Elem" (TypeManifest 0 "Int64") }
+          s2 = (emptyModuleSig "SigB") { msTypes = Map.singleton "Elem" (TypeManifest 0 "ByteSlice") }
+      case mergeModuleSigs "Merged" s1 s2 of
+        Left [ManifestTypeConflict "Elem" "Int64" "ByteSlice"] -> pure ()
+        other -> assertFailure ("Expected ManifestTypeConflict, got: " ++ show other)
+
+  , testCase "Mismatched value arities produce ValueArityConflict" $ do
+      let v1 = ValueFieldSpec 1 "Elem -> Int" Profile0FreestandingLinear False
+          v2 = ValueFieldSpec 2 "Elem -> Elem -> Int" Profile0FreestandingLinear False
+          s1 = (emptyModuleSig "SigA") { msValues = Map.singleton "op" v1 }
+          s2 = (emptyModuleSig "SigB") { msValues = Map.singleton "op" v2 }
+      case mergeModuleSigs "Merged" s1 s2 of
+        Left [ValueArityConflict "op" 1 2] -> pure ()
+        other -> assertFailure ("Expected ValueArityConflict, got: " ++ show other)
+
+  , testCase "Signature morphism renames type and value labels consistently" $ do
+      let s0 = (emptyModuleSig "Sig0")
+            { msTypes = Map.singleton "Target" (TypeManifest 0 "Text")
+            , msValues = Map.singleton "render" (ValueFieldSpec 1 "Target -> String" Profile1ThreadLocalPerceus True)
+            }
+          morph = SigMorphism
+            { smRenameTypes  = Map.singleton "Target" "TextTarget"
+            , smRenameValues = Map.singleton "render" "renderText"
+            }
+          renamed = applySigMorphism morph s0
+      Map.member "TextTarget" (msTypes renamed) @?= True
+      Map.member "Target" (msTypes renamed) @?= False
+      Map.member "renderText" (msValues renamed) @?= True
+      Map.member "render" (msValues renamed) @?= False
   ]

@@ -162,6 +162,19 @@ import Frankenstein.Db.ResilientEditCone
   , syncModuleIntoCodeDb
   , resilientModuleToInterface
   )
+import Frankenstein.Ide.LiveSession
+  ( DiagnosticSeverity(..)
+  , LiveDiagnostic(..)
+  , StyleAxis(..)
+  , StyleFeedbackKind(..)
+  , IdeCodeAction(..)
+  , LiveIdeSession(..)
+  , DidChangeResult(..)
+  , initLiveSession
+  , applyBufferChange
+  , recordStyleFeedback
+  , proposeCodeActions
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -247,6 +260,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , transformApiTests
   , dbIncrementalTests
   , resilientEditConeTests
+  , ideLiveSessionTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -3076,4 +3090,104 @@ resilientEditConeTests = testGroup "Db.ResilientEditCone"
       assertBool "ok1 in memos" (Map.member (QDeclSignature "SyncTest.hs" "ok1") (dbMemos db1))
       assertBool "ok2 in memos" (Map.member (QDeclSignature "SyncTest.hs" "ok2") (dbMemos db1))
       assertBool "bad NOT in memos" (not (Map.member (QDeclSignature "SyncTest.hs" "bad") (dbMemos db1)))
+  ]
+
+--------------------------------------------------------------------------------
+-- CC. Ide.LiveSession Tests (TP-INGOLSTADT-T4-003)
+--------------------------------------------------------------------------------
+
+ideLiveSessionTests :: TestTree
+ideLiveSessionTests = testGroup "Ide.LiveSession"
+  [ testCase "Interactive didChange with syntax error in decl5 emits exactly 1 LiveDiagnostic preserving 9 siblings" $ do
+      let sp = defaultStyleForParadigm ParadigmSystems
+          sess0 = initLiveSession sp
+          fp = "src/Workspace.hs"
+          clean10 = T.unlines
+            [ "fn d1() { return 1; }"
+            , ""
+            , "fn d2() { return 2; }"
+            , ""
+            , "fn d3() { return 3; }"
+            , ""
+            , "fn d4() { return 4; }"
+            , ""
+            , "fn d5() { return 5; }"
+            , ""
+            , "fn d6() { return 6; }"
+            , ""
+            , "fn d7() { return 7; }"
+            , ""
+            , "fn d8() { return 8; }"
+            , ""
+            , "fn d9() { return 9; }"
+            , ""
+            , "fn d10() { return 10; }"
+            ]
+          res0 = applyBufferChange fp clean10 sess0
+          sessClean = dcrSession res0
+          srcWithHole5 = T.unlines
+            [ "fn d1() { return 1; }"
+            , ""
+            , "fn d2() { return 2; }"
+            , ""
+            , "fn d3() { return 3; }"
+            , ""
+            , "fn d4() { return 4; }"
+            , ""
+            , "fn d5( { return 5; }"  -- syntax error in d5
+            , ""
+            , "fn d6() { return 6; }"
+            , ""
+            , "fn d7() { return 7; }"
+            , ""
+            , "fn d8() { return 8; }"
+            , ""
+            , "fn d9() { return 9; }"
+            , ""
+            , "fn d10() { return 10; }"
+            ]
+          res = applyBufferChange fp srcWithHole5 sessClean
+          diags = dcrDiagnostics res
+          cone = dcrEditCone res
+      length diags @?= 1
+      case diags of
+        [] -> assertFailure "Expected 1 diagnostic, got 0"
+        (d:_) -> do
+          ldCode d @?= "INGOLSTADT-PARSE-HOLE"
+          assertBool "Contains d5" (T.isInfixOf "d5" (ldMessage d))
+      ecrInvalidatedDecls cone @?= ["d5"]
+      ecrPreservedSiblings cone @?= ["d1", "d2", "d3", "d4", "d6", "d7", "d8", "d9", "d10"]
+
+  , testCase "recordStyleFeedback monotonically updates ipPreferWhereOverLet in [0.0, 1.0]" $ do
+      let sp = defaultStyleForParadigm ParadigmFunctional
+          sess0 = initLiveSession sp
+          initVal = ipPreferWhereOverLet (spIdiomPrefs sp)
+          sess1 = recordStyleFeedback AxisWhereOverLet FeedbackAccepted sess0
+          val1 = ipPreferWhereOverLet (spIdiomPrefs (lisStyle sess1))
+          sess2 = recordStyleFeedback AxisWhereOverLet FeedbackAccepted sess1
+          val2 = ipPreferWhereOverLet (spIdiomPrefs (lisStyle sess2))
+          sess3 = recordStyleFeedback AxisWhereOverLet FeedbackRejected sess2
+          val3 = ipPreferWhereOverLet (spIdiomPrefs (lisStyle sess3))
+      assertBool "Moves upward on accepted" (val1 > initVal)
+      assertBool "Continues upward on second accepted" (val2 > val1)
+      assertBool "Moves downward on rejected" (val3 < val2)
+      assertBool "Within [0.0, 1.0]" (val1 >= 0.0 && val1 <= 1.0 && val3 >= 0.0 && val3 <= 1.0)
+      lisFeedbackN sess3 @?= 3
+
+  , testCase "proposeCodeActions detects ?? hole inside a valid declaration and returns quickfix action" $ do
+      let sp = defaultStyleForParadigm ParadigmSystems
+          sess0 = initLiveSession sp
+          fp = "src/HoleTest.hs"
+          srcWithHole = T.unlines
+            [ "fn calc() {"
+            , "  let x = ??fill_target;"
+            , "  return x;"
+            , "}"
+            ]
+          res = applyBufferChange fp srcWithHole sess0
+          sess1 = dcrSession res
+          actions = proposeCodeActions fp 10 sess1
+      assertBool "Returns at least one code action" (not (null actions))
+      assertBool "Contains synquid action" (any (\a -> icaKind a == "quickfix.ingolstadt.synquid") actions)
+      assertBool "Contains egraph refactor action" (any (\a -> icaKind a == "refactor.rewrite.ingolstadt.egraph") actions)
   ]

@@ -37,6 +37,7 @@ library
         Frankenstein.Ide.LiveSession
         Frankenstein.RTS.UringDriver
         Frankenstein.Linker.DsoPlugin
+        Frankenstein.Driver.Roster15
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

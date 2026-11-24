@@ -177,6 +177,7 @@ import Frankenstein.Ide.LiveSession
   )
 import Frankenstein.RTS.UringDriver
 import Frankenstein.Linker.DsoPlugin
+import Frankenstein.Driver.Roster15
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -265,6 +266,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , ideLiveSessionTests
   , rtsUringDriverTests
   , linkerDsoPluginTests
+  , driverRoster15Tests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -3277,4 +3279,42 @@ linkerDsoPluginTests = testGroup "Linker.DsoPlugin"
       assertBool "Contains organ_dso_get_meta" (T.isInfixOf "organ_dso_get_meta" c11)
       assertBool "Contains ORGAN_DSO_LAYOUT_RESILIENT" (T.isInfixOf "ORGAN_DSO_LAYOUT_RESILIENT" c11)
       assertBool "Contains symbol calc" (T.isInfixOf "calc" c11)
+  ]
+
+
+-------------------------------------------------------------------------------
+-- U. Driver.Roster15 unit tests
+-------------------------------------------------------------------------------
+
+driverRoster15Tests :: TestTree
+driverRoster15Tests = testGroup "Driver.Roster15"
+  [ testCase "roster15Manifests contains exactly 15 drivers" $ do
+      length roster15Manifests @?= 15
+
+  , testCase "buildRoster15Registry succeeds with zero collisions and clean validation" $ do
+      case buildRoster15Registry of
+        Left err -> assertFailure ("buildRoster15Registry failed: " ++ show err)
+        Right reg -> do
+          validateRegistry reg @?= []
+          let expectedMappings =
+                [ (".c", "c11")
+                , (".cpp", "cpp")
+                , (".f90", "fortran-ffi")
+                , (".rs", "rust")
+                , (".hs", "haskell")
+                , (".py", "python-ext")
+                , (".lean", "lean4")
+                , (".v", "rocq")
+                , (".idr", "idris2")
+                , (".ml", "ocaml")
+                , (".sml", "sml")
+                , (".scm", "scheme")
+                , (".m", "mercury")
+                , (".pl", "prolog")
+                , (".dl", "datalog")
+                ]
+          mapM_ (\(ext, expectedId) -> do
+            case lookupByExtension ext reg of
+              Nothing -> assertFailure ("Extension " ++ T.unpack ext ++ " failed to resolve")
+              Just d  -> dmId d @?= expectedId) expectedMappings
   ]

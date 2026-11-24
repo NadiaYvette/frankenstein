@@ -46,6 +46,7 @@ import Frankenstein.Verify.LiquidProfile
   , dischargeLinearityAndBounds
   , runZ3Query
   )
+import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
@@ -118,6 +119,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , c11EmitTests
   , polyglotLinkTests
   , liquidProfileTests
+  , optEGraphTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2005,4 +2007,57 @@ liquidProfileTests = testGroup "LiquidProfile"
       case z3Res of
         Left err -> assertFailure ("Z3 query error: " ++ T.unpack err)
         Right valid -> valid @?= True
+  ]
+
+--------------------------------------------------------------------------------
+-- R. Opt.EGraph Tests (TP-INGOLSTADT-T1-002)
+--------------------------------------------------------------------------------
+
+optEGraphTests :: TestTree
+optEGraphTests = testGroup "Opt.EGraph"
+  [ testCase "Law 1: Perceus drop(dup(x)) -> ENop cancellation" $ do
+      let expr = Opt.EDrop (Opt.EDup (Opt.EVar "x"))
+      Opt.rewriteStep expr @?= Opt.ENop
+      let (opt, stats) = Opt.saturateOrganExpr 10 expr
+      opt @?= Opt.ENop
+      assertBool "Cost strictly decreased" (Opt.rsCostAfter stats < Opt.rsCostBefore stats)
+
+  , testCase "Law 3: Immediate force of thunk promotes to strict body" $ do
+      let body = Opt.EAllocCtor "Pair" [Opt.EInt 1, Opt.EInt 2]
+          expr = Opt.EForce (Opt.EAllocThunk body)
+      Opt.rewriteStep expr @?= body
+      let (opt, stats) = Opt.saturateOrganExpr 10 expr
+      opt @?= body
+      Opt.ocThunkAllocs (Opt.rsCostAfter stats) @?= 0
+      assertBool "Thunk alloc eliminated" (Opt.ocThunkAllocs (Opt.rsCostAfter stats) < Opt.ocThunkAllocs (Opt.rsCostBefore stats))
+
+  , testCase "Law 4: RowMorph fusion and identity deforestation" $ do
+      -- p1 = [1, 0], p2 = [1, 0] -> composePerm = [0, 1] (identity!)
+      let frame = Opt.EVar "frame"
+          expr = Opt.ERowMorph [1, 0] (Opt.ERowMorph [1, 0] frame)
+      Opt.rewriteStep expr @?= frame
+      let (opt, _) = Opt.saturateOrganExpr 10 expr
+      opt @?= frame
+
+  , testCase "Law 5: Liquid-witnessed bounds-check elimination" $ do
+      let arr = Opt.EVar "arr"
+          idx = Opt.EVar "i"
+          checkedProven = Opt.ECheckedIndex arr idx True
+          checkedUnproven = Opt.ECheckedIndex arr idx False
+      Opt.rewriteStep checkedProven @?= Opt.EUncheckedIndex arr idx
+      Opt.rewriteStep checkedUnproven @?= checkedUnproven
+
+  , testCase "Cost monotonicity across complex pipeline" $ do
+      let complexExpr = Opt.ESeq
+            (Opt.EDrop (Opt.EDup (Opt.EVar "buf")))
+            (Opt.ESeq
+              (Opt.EForce (Opt.EAllocThunk (Opt.EAllocCtor "Box" [Opt.EInt 42])))
+              (Opt.ERowMorph [0, 1] (Opt.ECheckedIndex (Opt.EVar "v") (Opt.EInt 0) True)))
+          (opt, stats) = Opt.saturateOrganExpr 10 complexExpr
+      assertBool "Cost monotonicity invariant (costAfter <= costBefore)"
+        (Opt.rsCostAfter stats <= Opt.rsCostBefore stats)
+      assertBool "Heap allocs non-increasing"
+        (Opt.ocHeapAllocs (Opt.rsCostAfter stats) <= Opt.ocHeapAllocs (Opt.rsCostBefore stats))
+      assertBool "RC ops reduced"
+        (Opt.ocRcOps (Opt.rsCostAfter stats) < Opt.ocRcOps (Opt.rsCostBefore stats))
   ]

@@ -15,6 +15,7 @@ library
     exposed-modules:
         Frankenstein.Core.Interface
         Frankenstein.Verify.LiquidProfile
+        Frankenstein.Opt.EGraph
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

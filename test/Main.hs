@@ -135,6 +135,21 @@ import Frankenstein.Transform.Api
   , renderLspWorkspaceEditJson
   , runTransformSession
   )
+import Frankenstein.Db.Incremental
+  ( Revision(..)
+  , Durability(..)
+  , QueryKey(..)
+  , InputCell(..)
+  , MemoEntry(..)
+  , CodeDb(..)
+  , emptyCodeDb
+  , lastRevAtDurability
+  , setInput
+  , isEntryVerified
+  , recordMemoWithCutoff
+  , runTrackedQuery
+  , runTrackedQueryWithStack
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -218,6 +233,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , styleProfileTests
   , emitIdiomaticTests
   , transformApiTests
+  , dbIncrementalTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2731,4 +2747,120 @@ transformApiTests = testGroup "Transform.Api"
       assertBool "Contains line 1" (T.isInfixOf "\"line\": 1" json)
       assertBool "Contains character 11" (T.isInfixOf "\"character\": 11" json)
       assertBool "Contains replacement" (T.isInfixOf "\"newText\": \"replacement\"" json)
+  ]
+
+--------------------------------------------------------------------------------
+-- AA. Db.Incremental Tests (TP-INGOLSTADT-T4-001)
+--------------------------------------------------------------------------------
+
+dbIncrementalTests :: TestTree
+dbIncrementalTests = testGroup "Db.Incremental"
+  [ testCase "Durability Shortcut: DurabilityHigh query stays O(1) verified after 100 DurabilityLow edits" $ do
+      let db0 = emptyCodeDb
+          -- Seed DurabilityHigh stdlib input and memo
+          db1 = setInput (QSourceText "stdlib/prelude.dhall") DurabilityHigh "let id = \\x -> x" db0
+          qKey = QParseModule "stdlib/prelude.dhall"
+          (cutoff, db2) = recordMemoWithCutoff qKey DurabilityHigh [QSourceText "stdlib/prelude.dhall"] "AST(id)" db1
+      assertBool "First record no cutoff" (not cutoff)
+
+      -- Apply 100 keystrokes in active file at DurabilityLow
+      let dbEdited = foldl' (\db i -> setInput (QSourceText "active.hs") DurabilityLow ("keystroke " <> T.pack (show i)) db) db2 [1..100 :: Int]
+      unRevision (dbRevision dbEdited) @?= 102
+
+      -- DurabilityHigh memo must still be verified in O(1) without touching dependencies
+      case Map.lookup qKey (dbMemos dbEdited) of
+        Nothing -> assertFailure "Memo missing"
+        Just entry -> assertBool "O(1) verified" (isEntryVerified entry dbEdited)
+
+      -- runTrackedQuery must return cache hit without calling computeFn
+      let failCompute _ = Left "Should not recompute DurabilityHigh query!"
+      case runTrackedQuery qKey DurabilityHigh failCompute dbEdited of
+        Left err -> assertFailure ("Expected cache hit, got: " <> T.unpack err)
+        Right (val, wasHit, _) -> do
+          val @?= "AST(id)"
+          assertBool "Was cache hit" wasHit
+
+  , testCase "Early Cutoff: comment change triggers early cutoff suppressing downstream passes" $ do
+      let db0 = emptyCodeDb
+          keySrc = QSourceText "A.hs"
+          keyParse = QParseModule "A.hs"
+          keySig = QDeclSignature "A.hs" "foo"
+          keyLower = QLowerOrgan "A.hs" "foo"
+
+          -- Step 1: Initial state
+          db1 = setInput keySrc DurabilityLow "fn foo() { /* comment 1 */ return 42; }" db0
+          -- Parse produces AST
+          (_, db2) = recordMemoWithCutoff keyParse DurabilityLow [keySrc] "AST(foo, body1)" db1
+          -- DeclSignature extracts signature (unchanged by comment!)
+          (_, db3) = recordMemoWithCutoff keySig DurabilityLow [keyParse] "Sig(foo: () -> int)" db2
+          -- LowerOrgan lowers signature to OrganIR
+          (_, db4) = recordMemoWithCutoff keyLower DurabilityLow [keySig] "OrganIR(foo)" db3
+
+          -- Step 2: Edit comment only in A.hs
+          db5 = setInput keySrc DurabilityLow "fn foo() { /* comment 2 */ return 42; }" db4
+
+          -- Parse recomputes because source changed
+          (cutoffParse, db6) = recordMemoWithCutoff keyParse DurabilityLow [keySrc] "AST(foo, body2)" db5
+      assertBool "Parse content changed" (not cutoffParse)
+
+      -- DeclSignature recomputes but returns IDENTICAL signature
+      let (cutoffSig, db7) = recordMemoWithCutoff keySig DurabilityLow [keyParse] "Sig(foo: () -> int)" db6
+      assertBool "Early cutoff triggered on signature" cutoffSig
+
+      -- Key check: QDeclSignature's meChangedAt was preserved!
+      case (Map.lookup keySig (dbMemos db4), Map.lookup keySig (dbMemos db7)) of
+        (Just eOld, Just eNew) -> meChangedAt eOld @?= meChangedAt eNew
+        _ -> assertFailure "Signature memo missing"
+
+      -- Step 3: Run LowerOrgan: its dependency (keySig) has meChangedAt <= meVerifiedAt (keyLower)!
+      let failLower _ = Left "LowerOrgan should NOT recompute when signature hash is unchanged!"
+      case runTrackedQuery keyLower DurabilityLow failLower db7 of
+        Left err -> assertFailure ("Expected cache hit, got: " <> T.unpack err)
+        Right (val, wasHit, _) -> do
+          val @?= "OrganIR(foo)"
+          assertBool "LowerOrgan hit early cutoff cache" wasHit
+
+  , testCase "True Invalidation: changing function signature invalidates dependent queries" $ do
+      let db0 = emptyCodeDb
+          keySrc = QSourceText "B.hs"
+          keyParse = QParseModule "B.hs"
+          keySig = QDeclSignature "B.hs" "bar"
+          keyLower = QLowerOrgan "B.hs" "bar"
+
+          -- Initial run
+          db1 = setInput keySrc DurabilityLow "fn bar(x: int) -> int { return x; }" db0
+          (_, db2) = recordMemoWithCutoff keyParse DurabilityLow [keySrc] "AST(bar: int -> int)" db1
+          (_, db3) = recordMemoWithCutoff keySig DurabilityLow [keyParse] "Sig(bar: int -> int)" db2
+          (_, db4) = recordMemoWithCutoff keyLower DurabilityLow [keySig] "OrganIR(bar_v1)" db3
+
+          -- Advance with signature change via setInput
+          db5 = setInput keySrc DurabilityLow "fn bar(x: float) -> float { return x; }" db4
+          -- Signature changes
+          (cutoffSig, db6) = recordMemoWithCutoff keySig DurabilityLow [keyParse] "Sig(bar: float -> float)" db5
+      assertBool "Signature change did not cut off" (not cutoffSig)
+
+      -- LowerOrgan sees changed dependency and recomputes
+      let recomputeLower dbCurrent = Right ("OrganIR(bar_v2)", [keySig], dbCurrent)
+      case runTrackedQuery keyLower DurabilityLow recomputeLower db6 of
+        Left err -> assertFailure ("Recompute failed: " <> T.unpack err)
+        Right (val, wasHit, _) -> do
+          val @?= "OrganIR(bar_v2)"
+          assertBool "LowerOrgan recomputed (wasHit == False)" (not wasHit)
+
+  , testCase "Cycle Guard: query cycle returns Left cleanly instead of infinite loop" $ do
+      let db = emptyCodeDb
+          keyA = QParseModule "A.hs"
+          keyB = QParseModule "B.hs"
+          -- Query A calls B which calls A
+          computeB dbCurrent =
+            case runTrackedQueryWithStack [keyB, keyA] keyA DurabilityLow (\_ -> Left "unreachable") dbCurrent of
+              Left err -> Left err
+              Right (v, _, db') -> Right (v, [keyA], db')
+          computeA dbCurrent =
+            case runTrackedQueryWithStack [keyA] keyB DurabilityLow computeB dbCurrent of
+              Left err -> Left err
+              Right (v, _, db') -> Right (v, [keyB], db')
+      case runTrackedQuery keyA DurabilityLow computeA db of
+        Left err -> assertBool "Detects cycle" (T.isInfixOf "cycle detected" err)
+        Right _  -> assertFailure "Expected cycle detection error"
   ]

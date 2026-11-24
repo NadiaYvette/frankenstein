@@ -27,6 +27,7 @@ library
         Frankenstein.Style.Profile
         Frankenstein.Emit.Idiomatic
         Frankenstein.Transform.Api
+        Frankenstein.Db.Incremental
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

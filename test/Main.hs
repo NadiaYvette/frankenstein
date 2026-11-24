@@ -99,6 +99,18 @@ import Frankenstein.Driver.Registry
   , lookupByExtension
   , validateRegistry
   )
+import Frankenstein.Style.Profile
+  ( NamingCase(..)
+  , IdiomPrefs(..)
+  , StyleProfile(..)
+  , CognitiveMetrics(..)
+  , defaultStyleForParadigm
+  , formatIdentifier
+  , learnStyleProfile
+  , stylePenalty
+  , rankEquivalentCandidates
+  , styleProfileToDhall
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -179,6 +191,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , backpackStageInstantiateTests
   , backpackHsigBridgeTests
   , driverRegistryTests
+  , styleProfileTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2513,4 +2526,61 @@ driverRegistryTests = testGroup "Driver.Registry"
       case registerDriver badExtDriver emptyRegistry of
         Left (InvalidExtensionFormat "badext" "txt") -> pure ()
         other -> assertFailure ("Expected InvalidExtensionFormat, got: " ++ show other)
+  ]
+
+--------------------------------------------------------------------------------
+-- X. Style.Profile Tests (TP-INGOLSTADT-T3-002)
+--------------------------------------------------------------------------------
+
+styleProfileTests :: TestTree
+styleProfileTests = testGroup "Style.Profile"
+  [ testCase "learnStyleProfile on 2-space camelCase Haskell with where clauses" $ do
+      let hsCorpus =
+            [ "module Example where"
+            , ""
+            , "computeValue :: Int -> Int"
+            , "computeValue x = helper x"
+            , "  where"
+            , "    helper y = y + 1"
+            ]
+          sp = learnStyleProfile "haskell-test" ParadigmFunctional hsCorpus
+      spIndentWidth sp @?= 2
+      spValueNaming sp @?= CamelCase
+      assertBool "ipPreferWhereOverLet > 0.5" (ipPreferWhereOverLet (spIdiomPrefs sp) > 0.5)
+
+  , testCase "learnStyleProfile on 4-space snake_case Rust with .iter()" $ do
+      let rsCorpus =
+            [ "fn compute_total(items: &[i64]) -> i64 {"
+            , "    items.iter().map(|x| x * 2).sum()"
+            , "}"
+            ]
+          sp = learnStyleProfile "rust-test" ParadigmSystems rsCorpus
+      spIndentWidth sp @?= 4
+      spValueNaming sp @?= SnakeCase
+      assertBool "ipPreferPipelineOverLoop > 0.5" (ipPreferPipelineOverLoop (spIdiomPrefs sp) > 0.5)
+
+  , testCase "stylePenalty strictly penalizes functions exceeding Crichton working memory" $ do
+      let sp = defaultStyleForParadigm ParadigmSystems
+          cmNormal = CognitiveMetrics 3 2 10 False False False
+          cmHeavy  = CognitiveMetrics 7 5 30 False False False
+      assertBool "cmHeavy penalty > cmNormal" (stylePenalty sp cmHeavy > stylePenalty sp cmNormal + 20.0)
+
+  , testCase "formatIdentifier round-trips snake, camel, pascal, and kebab cases" $ do
+      let raw = "eval_page_cluster"
+      formatIdentifier CamelCase raw @?= "evalPageCluster"
+      formatIdentifier PascalCase raw @?= "EvalPageCluster"
+      formatIdentifier SnakeCase "evalPageCluster" @?= "eval_page_cluster"
+      formatIdentifier KebabCase "evalPageCluster" @?= "eval-page-cluster"
+
+  , testCase "rankEquivalentCandidates ranks candidates by ascending stylePenalty" $ do
+      let sp = defaultStyleForParadigm ParadigmSystems
+          cands :: [(Text, CognitiveMetrics)]
+          cands = [("heavy", CognitiveMetrics 8 4 10 False False False), ("light", CognitiveMetrics 2 1 5 False False False)]
+      rankEquivalentCandidates sp cands @?= ["light", "heavy"]
+
+  , testCase "styleProfileToDhall produces valid non-empty Dhall text" $ do
+      let sp = defaultStyleForParadigm ParadigmFunctional
+          dhallText = styleProfileToDhall sp
+      assertBool "Non-empty Dhall text" (not (T.null dhallText))
+      assertBool "Contains profileName" (T.isInfixOf "profileName = \"functional-default\"" dhallText)
   ]

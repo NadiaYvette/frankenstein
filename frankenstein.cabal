@@ -24,6 +24,7 @@ library
         Frankenstein.Backpack.StageInstantiate
         Frankenstein.Backpack.HsigBridge
         Frankenstein.Driver.Registry
+        Frankenstein.Style.Profile
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

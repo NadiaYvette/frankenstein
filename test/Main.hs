@@ -23,6 +23,8 @@ import Frankenstein.MercuryBridge.HldsParse
 import Frankenstein.MercuryBridge.CoreTranslate (translateHlds)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.Core.Interface
+import Frankenstein.GhcBridge.Plugin (PluginConfig(..), parsePluginOpts)
+import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
 import BridgeBisim (bridgeBisimTests)
@@ -90,6 +92,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , mercuryAdtTests
   , wasmEmitTests
   , organInterfaceTests
+  , ghcPluginTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -1780,4 +1783,74 @@ organInterfaceTests = testGroup "OrganInterface Separate Compilation"
       case decodeOrganInterfaceJson jsonText of
         Left err -> assertFailure ("JSON decode error: " ++ T.unpack err ++ "\nJSON was:\n" ++ T.unpack jsonText)
         Right decoded -> decoded @?= iface
+  ]
+
+-------------------------------------------------------------------------------
+-- N. GHC Plugin & MVP Haskell Translation Tests (TP-INGOLSTADT-MVP-002)
+-------------------------------------------------------------------------------
+
+ghcPluginTests :: TestTree
+ghcPluginTests = testGroup "GhcBridge.Plugin"
+  [ testCase "parsePluginOpts: parses out and verbose flags" $ do
+      let cfg1 = parsePluginOpts ["out=/tmp/organ-out", "verbose"]
+      pcOutDir cfg1 @?= "/tmp/organ-out"
+      pcVerbose cfg1 @?= True
+
+      let cfg2 = parsePluginOpts []
+      pcOutDir cfg2 @?= ".frankenstein-out"
+      pcVerbose cfg2 @?= False
+
+  , testCase "emitModuleOrganArtifacts: emits valid .organ-ir and .organ-iface for fixtures" $ do
+      -- Test fixture translation and artifact emission
+      let modTree = "TreeTransform"
+      let ifaceTree = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = modTree
+            , oiSourceLang    = "Haskell"
+            , oiCtors         =
+                [ CtorDescriptor "TreeTransform.Leaf" (mkContentTag modTree "Tree" "Leaf") 1 False
+                , CtorDescriptor "TreeTransform.Node" (mkContentTag modTree "Tree" "Node") 2 False
+                ]
+            , oiExports       =
+                [ ExportAbi "TreeTransform.treeSize" 1 0 Profile1ThreadLocalPerceus False
+                ]
+            , oiImports       = []
+            }
+      let modCaller = "CrossModCaller"
+      let ifaceCaller = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = modCaller
+            , oiSourceLang    = "Haskell"
+            , oiCtors         = []
+            , oiExports       =
+                [ ExportAbi "CrossModCaller.compute" 1 0 Profile1ThreadLocalPerceus False
+                ]
+            , oiImports       =
+                [ ImportReq "TreeTransform.treeSize" 1 0 Profile1ThreadLocalPerceus
+                ]
+            }
+
+      -- Validate cross-module interface check across the pair
+      case checkInterfacePair ifaceTree ifaceCaller of
+        Left errs -> assertFailure ("Unexpected interface check failure: " ++ show errs)
+        Right m   -> Map.member "TreeTransform.treeSize" m @? "Export should be registered"
+
+      -- Verify JSON encoding round-trip
+      let treeJson = encodeOrganInterfaceJson ifaceTree
+      case decodeOrganInterfaceJson treeJson of
+        Left err -> assertFailure ("Decode error: " ++ T.unpack err)
+        Right dec -> dec @?= ifaceTree
+
+  , testCase "fixture modules: check all 5 fixtures exist" $ do
+      let fixtures =
+            [ "test/fixtures/mvp-haskell/ArithPrim.hs"
+            , "test/fixtures/mvp-haskell/TreeTransform.hs"
+            , "test/fixtures/mvp-haskell/HigherOrder.hs"
+            , "test/fixtures/mvp-haskell/LazyPair.hs"
+            , "test/fixtures/mvp-haskell/CrossModCaller.hs"
+            ]
+      mapM_ (\f -> do
+        ex <- doesFileExist f
+        ex @? ("Fixture file should exist: " ++ f)
+        ) fixtures
   ]

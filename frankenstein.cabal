@@ -37,6 +37,7 @@ library
         Frankenstein.Core.Linker
         Frankenstein.GhcBridge.Driver
         Frankenstein.GhcBridge.CoreTranslate
+        Frankenstein.GhcBridge.Plugin
         Frankenstein.MercuryBridge.HldsParse
         Frankenstein.MercuryBridge.CoreTranslate
         Frankenstein.RustBridge.MirParse

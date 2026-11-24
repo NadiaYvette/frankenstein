@@ -1,6 +1,6 @@
 # Ingolstadt Track 4 Benchmark Suite: Incremental CodeDb & Stope-and-Winze IDE Latency
 
-**Generated:** 2026-11-24T08:25:41Z  
+**Generated:** 2026-11-24T08:32:11Z  
 **Environment:** Linux x86_64, GHC 9.14.1, MVCC CodeDb (Salsa Early Cutoff), Stope-and-Winze ResilientEditCone.
 
 ## 1. Overview
@@ -15,7 +15,7 @@ By splitting source buffers into declaration-level AST cones and decoupling sign
 
 | Workload | Metric | Naive Whole-File Recompilation | Ingolstadt Incremental CodeDb | Speedup / Advantage |
 | :--- | :--- | :--- | :--- | :--- |
-| **Cold Full Parse & Index** (200 decls) | End-to-End Latency | 14.82 ms | **0.293 ms** | Initial database baseline |
+| **Cold Full Parse & Index** (200 decls) | End-to-End Latency | 14.82 ms | **0.412 ms** | Initial database baseline |
 | | Cached Declaration Signatures | 0 entries | **200 entries** | 100% indexed |
 | **Warm 1-Decl Body Edit** (Early Cutoff) | Incremental Edit Latency | 14.50 ms | **0.050 ms** | **>200x faster (0 downstream passes)** |
 | | Preserved Sibling Declarations | 0 / 200 | **199 / 200 (99.5%)** | O(1) durability fast-path |

@@ -18,6 +18,7 @@ library
         Frankenstein.Opt.EGraph
         Frankenstein.Verify.SynquidHole
         Frankenstein.Backpack.OpenRecordSig
+        Frankenstein.Backpack.StageInstantiate
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

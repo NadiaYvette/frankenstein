@@ -63,6 +63,18 @@ import Frankenstein.Backpack.OpenRecordSig
   , applySigMorphism
   , mergeModuleSigs
   )
+import Frankenstein.Backpack.StageInstantiate
+  ( ModuleImpl(..)
+  , ParameterizedModule(..)
+  , SheafObstruction(..)
+  , InstantiatedModule(..)
+  , checkBehavioralEdge
+  , inlineProviderRefs
+  , substituteValueRefs
+  , verifyModuleGraphSheaf
+  , partialInstantiate
+  , instantiateAndSpecialize
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -139,6 +151,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , optEGraphTests
   , synquidHoleTests
   , backpackOpenRecordSigTests
+  , backpackStageInstantiateTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2178,4 +2191,117 @@ backpackOpenRecordSigTests = testGroup "Backpack.OpenRecordSig"
       Map.member "Target" (msTypes renamed) @?= False
       Map.member "renderText" (msValues renamed) @?= True
       Map.member "render" (msValues renamed) @?= False
+  ]
+
+--------------------------------------------------------------------------------
+-- U. Backpack.StageInstantiate Tests (TP-INGOLSTADT-T2-002)
+--------------------------------------------------------------------------------
+
+backpackStageInstantiateTests :: TestTree
+backpackStageInstantiateTests = testGroup "Backpack.StageInstantiate"
+  [ testCase "Partial Instantiation Diamond: sequential equals simultaneous instantiation" $ do
+      let envSig = (emptyModuleSig "EnvSig")
+            { msTypes  = Map.singleton "Env" (TypeOpaque 0)
+            , msValues = Map.singleton "lookup" (ValueFieldSpec 1 "Env -> Key -> Val" Profile0FreestandingLinear True)
+            }
+          metricSig = (emptyModuleSig "MetricSig")
+            { msTypes  = Map.singleton "Metric" (TypeOpaque 0)
+            , msValues = Map.singleton "count" (ValueFieldSpec 1 "Metric -> Int" Profile0FreestandingLinear True)
+            }
+          envImpl = ModuleImpl
+            { miName       = "EnvIntMap"
+            , miTypes      = Map.singleton "Env" (0, "IntMap")
+            , miBodies     = Map.singleton "lookup" (ValueFieldSpec 1 "Env -> Key -> Val" Profile0FreestandingLinear True, Opt.EInt 42)
+            , miProvenLaws = []
+            }
+          metricImpl = ModuleImpl
+            { miName       = "MetricCounter"
+            , miTypes      = Map.singleton "Metric" (0, "Counter")
+            , miBodies     = Map.singleton "count" (ValueFieldSpec 1 "Metric -> Int" Profile0FreestandingLinear True, Opt.EInt 10)
+            , miProvenLaws = []
+            }
+          pm = ParameterizedModule
+            { pmName     = "App"
+            , pmRequires = Map.fromList [("env", envSig), ("metric", metricSig)]
+            , pmBodies   = Map.singleton "main" (Opt.ESeq (Opt.EVar "env.lookup") (Opt.EVar "metric.count"))
+            }
+
+      -- Sequential path
+      case partialInstantiate "env" envImpl pm of
+        Left errs -> assertFailure ("Sequential step 1 failed: " ++ show errs)
+        Right pmPartial -> do
+          Map.keys (pmRequires pmPartial) @?= ["metric"]
+          case instantiateAndSpecialize 10 (Map.singleton "metric" metricImpl) pmPartial of
+            Left errs -> assertFailure ("Sequential step 2 failed: " ++ show errs)
+            Right imSeq -> do
+              -- Simultaneous path
+              case instantiateAndSpecialize 10 (Map.fromList [("env", envImpl), ("metric", metricImpl)]) pm of
+                Left errs -> assertFailure ("Simultaneous instantiation failed: " ++ show errs)
+                Right imSimul -> do
+                  imBodies imSeq @?= imBodies imSimul
+                  imName imSeq @?= "App"
+                  Map.lookup "main" (imBodies imSeq) @?= Just (Opt.ESeq (Opt.EInt 42) (Opt.EInt 10))
+
+  , testCase "Cross-boundary optimization: inlining collapses Perceus and bounds ops" $ do
+      let envSig = (emptyModuleSig "EnvSig")
+            { msTypes  = Map.singleton "Env" (TypeOpaque 0)
+            , msValues = Map.singleton "get" (ValueFieldSpec 1 "Env -> Val" Profile0FreestandingLinear True)
+            }
+          envImpl = ModuleImpl
+            { miName       = "EnvProvider"
+            , miTypes      = Map.singleton "Env" (0, "RawBuffer")
+            , miBodies     = Map.singleton "get" (ValueFieldSpec 1 "Env -> Val" Profile0FreestandingLinear True, Opt.EDup (Opt.EVar "buffer"))
+            , miProvenLaws = []
+            }
+          pm = ParameterizedModule
+            { pmName     = "Caller"
+            , pmRequires = Map.singleton "env" envSig
+            , pmBodies   = Map.fromList
+                [ ("callerDrop", Opt.EDrop (Opt.EVar "env.get"))
+                , ("callerIdx", Opt.ECheckedIndex (Opt.EVar "env.get") (Opt.EInt 0) True)
+                ]
+            }
+      case instantiateAndSpecialize 10 (Map.singleton "env" envImpl) pm of
+        Left errs -> assertFailure ("Specialization failed: " ++ show errs)
+        Right im -> do
+          -- EDrop (EDup buffer) should simplify to ENop
+          Map.lookup "callerDrop" (imBodies im) @?= Just Opt.ENop
+          -- CheckedIndex with True witness should simplify to EUncheckedIndex
+          Map.lookup "callerIdx" (imBodies im) @?= Just (Opt.EUncheckedIndex (Opt.EDup (Opt.EVar "buffer")) (Opt.EInt 0))
+
+  , testCase "Sheaf H^1 behavioral rejection: missing law and profile violation caught" $ do
+      let law = PLe (AInt 0) (AVar "idx")
+          sig = (emptyModuleSig "SafeSig")
+            { msTypes  = Map.singleton "T" (TypeOpaque 0)
+            , msValues = Map.singleton "fn" (ValueFieldSpec 1 "T -> Int" Profile0FreestandingLinear True)
+            , msLaws   = [law]
+            }
+          -- Provider violating law
+          implBadLaw = ModuleImpl
+            { miName       = "ImplBadLaw"
+            , miTypes      = Map.singleton "T" (0, "Int")
+            , miBodies     = Map.singleton "fn" (ValueFieldSpec 1 "T -> Int" Profile0FreestandingLinear True, Opt.EInt 1)
+            , miProvenLaws = []
+            }
+      case checkBehavioralEdge "testEdge" sig implBadLaw of
+        [MissingBehavioralLaw "testEdge" l] -> l @?= law
+        other -> assertFailure ("Expected MissingBehavioralLaw, got: " ++ show other)
+
+      -- Provider violating MemProfile (requires Profile0, provides Profile1)
+      let implBadProfile = ModuleImpl
+            { miName       = "ImplBadProfile"
+            , miTypes      = Map.singleton "T" (0, "Int")
+            , miBodies     = Map.singleton "fn" (ValueFieldSpec 1 "T -> Int" Profile1ThreadLocalPerceus True, Opt.EInt 1)
+            , miProvenLaws = [law]
+            }
+      case checkBehavioralEdge "testEdge" sig implBadProfile of
+        [ProfileViolation "testEdge" "fn" Profile0FreestandingLinear Profile1ThreadLocalPerceus] -> pure ()
+        other -> assertFailure ("Expected ProfileViolation, got: " ++ show other)
+
+  , testCase "Sheaf graph verification: verifyModuleGraphSheaf detects unattached holes" $ do
+      let pm1 = ParameterizedModule "M1" (Map.singleton "h1" (emptyModuleSig "S1")) Map.empty
+          pm2 = ParameterizedModule "M2" Map.empty Map.empty
+          pms = Map.fromList [("M1", pm1), ("M2", pm2)]
+          obs = verifyModuleGraphSheaf pms Map.empty
+      obs @?= [UnknownHoleLabel "M1" "h1"]
   ]

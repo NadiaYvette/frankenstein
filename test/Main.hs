@@ -176,6 +176,7 @@ import Frankenstein.Ide.LiveSession
   , proposeCodeActions
   )
 import Frankenstein.RTS.UringDriver
+import Frankenstein.Linker.DsoPlugin
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -263,6 +264,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , resilientEditConeTests
   , ideLiveSessionTests
   , rtsUringDriverTests
+  , linkerDsoPluginTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -3224,4 +3226,55 @@ rtsUringDriverTests = testGroup "RTS.UringDriver"
       let c11 = renderReactorInitC11 "my_reactor" 32
       assertBool "Defines slots array" (T.isInfixOf "organ_flight_slot_t my_reactor_slots[32];" c11)
       assertBool "Calls organ_reactor_init" (T.isInfixOf "organ_reactor_init(&my_reactor, 0, 32" c11)
+  ]
+
+
+-------------------------------------------------------------------------------
+-- T. Linker.DsoPlugin unit tests
+-------------------------------------------------------------------------------
+
+linkerDsoPluginTests :: TestTree
+linkerDsoPluginTests = testGroup "Linker.DsoPlugin"
+  [ testCase "checkDsoCompatibility accepts compatible manifest" $ do
+      let iface = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "SamplePlugin"
+            , oiSourceLang    = "c11"
+            , oiCtors         = []
+            , oiExports       = [ ExportAbi "add" 2 0 Profile1ThreadLocalPerceus False ]
+            , oiImports       = []
+            }
+          dm = DsoManifest
+            { dmAbiVersion   = 1
+            , dmLayoutPolicy = DsoFrozenAbi
+            , dmInterface    = iface
+            }
+          reqs = [ ImportReq "add" 2 0 Profile1ThreadLocalPerceus ]
+      checkDsoCompatibility reqs dm @?= Right ()
+
+  , testCase "checkDsoCompatibility catches ABI version mismatch" $ do
+      let iface = OrganInterface "1.0.0" "P" "c11" [] [] []
+          dm = DsoManifest 99 DsoFrozenAbi iface
+      checkDsoCompatibility [] dm @?= Left [AbiVersionMismatch 1 99]
+
+  , testCase "checkDsoCompatibility catches missing symbols" $ do
+      let iface = OrganInterface "1.0.0" "P" "c11" [] [] []
+          dm = DsoManifest 1 DsoFrozenAbi iface
+          reqs = [ ImportReq "missing_fn" 1 0 Profile0FreestandingLinear ]
+      checkDsoCompatibility reqs dm @?= Left [MissingPluginSymbol "missing_fn"]
+
+  , testCase "renderDsoMetaC11 emits valid C11 table" $ do
+      let iface = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "MyMod"
+            , oiSourceLang    = "haskell"
+            , oiCtors         = []
+            , oiExports       = [ ExportAbi "calc" 1 0 Profile1ThreadLocalPerceus False ]
+            , oiImports       = []
+            }
+          dm = DsoManifest 1 DsoResilientWitness iface
+          c11 = renderDsoMetaC11 dm
+      assertBool "Contains organ_dso_get_meta" (T.isInfixOf "organ_dso_get_meta" c11)
+      assertBool "Contains ORGAN_DSO_LAYOUT_RESILIENT" (T.isInfixOf "ORGAN_DSO_LAYOUT_RESILIENT" c11)
+      assertBool "Contains symbol calc" (T.isInfixOf "calc" c11)
   ]

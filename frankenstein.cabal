@@ -36,6 +36,7 @@ library
         Frankenstein.Db.ResilientEditCone
         Frankenstein.Ide.LiveSession
         Frankenstein.RTS.UringDriver
+        Frankenstein.Linker.DsoPlugin
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

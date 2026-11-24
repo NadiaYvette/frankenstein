@@ -32,6 +32,20 @@ import Frankenstein.Linker.PolyglotLink
   , buildPolyglotLinkPlan
   , renderExternHeaderC11
   )
+import Frankenstein.Verify.LiquidProfile
+  ( ArithExpr(..)
+  , RefPred(..)
+  , LiquidContract(..)
+  , OptWitness(..)
+  , ProfilePromotion(..)
+  , emitSmtLib2Expr
+  , emitSmtLib2Pred
+  , emitSmtLib2Query
+  , proveStaticBounds
+  , promoteProfile
+  , dischargeLinearityAndBounds
+  , runZ3Query
+  )
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
@@ -103,6 +117,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , ghcPluginTests
   , c11EmitTests
   , polyglotLinkTests
+  , liquidProfileTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -1922,4 +1937,72 @@ polyglotLinkTests = testGroup "PolyglotLink"
             (T.isInfixOf "extern int64_t ModuleB_foreignHelper" header)
           assertBool "header contains extern int64_t ModuleA_calc"
             (T.isInfixOf "extern int64_t ModuleA_calc" header)
+  ]
+
+--------------------------------------------------------------------------------
+-- Q. LiquidProfile Tests (TP-INGOLSTADT-T1-001)
+--------------------------------------------------------------------------------
+
+liquidProfileTests :: TestTree
+liquidProfileTests = testGroup "LiquidProfile"
+  [ testCase "Positive promotion: unique usage promotes to Profile0" $ do
+      let contract = LiquidContract
+            { lcFuncName       = "updateUniqueTree"
+            , lcInitialProfile = Profile1ThreadLocalPerceus
+            , lcPreconditions  = [ PLe (AInt 0) (AVar "idx") ]
+            , lcMaxUseCount    = 1
+            , lcEscapesHeap    = False
+            , lcFipAllocDelta  = 0
+            }
+          res = dischargeLinearityAndBounds contract [("idx", "len")]
+      ppFinalProfile res @?= Profile0FreestandingLinear
+      assertBool "Contains WitnessPromotedToProfile0"
+        (WitnessPromotedToProfile0 `elem` ppWitnesses res)
+      assertBool "Contains WitnessFipCertified"
+        (WitnessFipCertified 0 `elem` ppWitnesses res)
+      ppRejectedWhy res @?= []
+
+  , testCase "Negative soundness: aliased usage (maxUses == 2) rejected" $ do
+      let contract = LiquidContract
+            { lcFuncName       = "sharedBranch"
+            , lcInitialProfile = Profile1ThreadLocalPerceus
+            , lcPreconditions  = []
+            , lcMaxUseCount    = 2
+            , lcEscapesHeap    = False
+            , lcFipAllocDelta  = 1
+            }
+          res = dischargeLinearityAndBounds contract []
+      ppFinalProfile res @?= Profile1ThreadLocalPerceus
+      assertBool "Rejected with aliasing error"
+        (any (T.isInfixOf "multiplicity > 1") (ppRejectedWhy res))
+
+  , testCase "Negative soundness: heap-escaping reference rejected" $ do
+      let contract = LiquidContract
+            { lcFuncName       = "escapeGlobal"
+            , lcInitialProfile = Profile1ThreadLocalPerceus
+            , lcPreconditions  = []
+            , lcMaxUseCount    = 1
+            , lcEscapesHeap    = True
+            , lcFipAllocDelta  = 0
+            }
+          res = dischargeLinearityAndBounds contract []
+      ppFinalProfile res @?= Profile1ThreadLocalPerceus
+      assertBool "Rejected with escape error"
+        (any (T.isInfixOf "heap/thread escape") (ppRejectedWhy res))
+
+  , testCase "Bounds-check elision: 0 <= i < n discharges; 0 <= i <= n rejected" $ do
+      let validPre = [ PAnd (PLe (AInt 0) (AVar "i")) (PLt (AVar "i") (AVar "n")) ]
+          invalidPre = [ PAnd (PLe (AInt 0) (AVar "i")) (PLe (AVar "i") (AVar "n")) ]
+      proveStaticBounds validPre "i" "n" @?= True
+      proveStaticBounds invalidPre "i" "n" @?= False
+
+  , testCase "SMT-LIB2 query emission and Z3 validity" $ do
+      let query = emitSmtLib2Query ["i", "n"]
+            [ PLe (AInt 0) (AVar "i"), PLt (AVar "i") (AVar "n") ]
+            (PLe (AInt 0) (AVar "i"))
+      assertBool "contains set-logic QF_LIA" (T.isInfixOf "set-logic QF_LIA" query)
+      z3Res <- runZ3Query query
+      case z3Res of
+        Left err -> assertFailure ("Z3 query error: " ++ T.unpack err)
+        Right valid -> valid @?= True
   ]

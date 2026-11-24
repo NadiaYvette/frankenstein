@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0.0",
+  "module_name": "NativeKernel",
+  "source_lang": "C",
+  "ctors": [],
+  "exports": [
+    {
+      "qualified_name": "NativeKernel.compute",
+      "arity": 1,
+      "evidence_params": 0,
+      "profile": "Profile0FreestandingLinear",
+      "is_tail_resumptive": false
+    }
+  ],
+  "imports": []
+}

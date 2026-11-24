@@ -35,6 +35,7 @@ library
         Frankenstein.MlirEmit.PostProcess
         Frankenstein.Core.ConTags
         Frankenstein.Core.Linker
+        Frankenstein.Linker.PolyglotLink
         Frankenstein.GhcBridge.Driver
         Frankenstein.GhcBridge.CoreTranslate
         Frankenstein.GhcBridge.Plugin

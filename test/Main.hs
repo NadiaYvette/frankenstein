@@ -25,6 +25,13 @@ import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..),
 import Frankenstein.Core.Interface
 import Frankenstein.GhcBridge.Plugin (PluginConfig(..), parsePluginOpts)
 import Frankenstein.Emit.C11 (emitOrganC11)
+import Frankenstein.Linker.PolyglotLink
+  ( TranslationUnit(..)
+  , FfiEdgeCheck(..)
+  , LinkPlan(..)
+  , buildPolyglotLinkPlan
+  , renderExternHeaderC11
+  )
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
@@ -95,6 +102,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , organInterfaceTests
   , ghcPluginTests
   , c11EmitTests
+  , polyglotLinkTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -1871,4 +1879,47 @@ c11EmitTests = testGroup "Emit.C11"
       assertBool "contains int main" (T.isInfixOf "int main" c11)
       assertBool "contains TestMod_answer" (T.isInfixOf "TestMod_answer" c11)
       assertBool "returns 42" (T.isInfixOf "return 42" c11)
+  ]
+
+--------------------------------------------------------------------------------
+-- P. Polyglot Linker Tests (TP-INGOLSTADT-MVP-004)
+--------------------------------------------------------------------------------
+
+polyglotLinkTests :: TestTree
+polyglotLinkTests = testGroup "PolyglotLink"
+  [ testCase "buildPolyglotLinkPlan: builds valid plan and ffi edges" $ do
+      let ifaceA = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "ModuleA"
+            , oiSourceLang    = "Haskell"
+            , oiCtors         = []
+            , oiExports       = [ ExportAbi "ModuleA.calc" 1 0 Profile1ThreadLocalPerceus False ]
+            , oiImports       = [ ImportReq "ModuleB.foreignHelper" 1 0 Profile0FreestandingLinear ]
+            }
+          ifaceB = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "ModuleB"
+            , oiSourceLang    = "C"
+            , oiCtors         = []
+            , oiExports       = [ ExportAbi "ModuleB.foreignHelper" 1 0 Profile0FreestandingLinear False ]
+            , oiImports       = []
+            }
+          unitA = TranslationUnit "ModuleA.o" ifaceA
+          unitB = TranslationUnit "ModuleB.o" ifaceB
+      case buildPolyglotLinkPlan [unitA, unitB] of
+        Left errs -> assertFailure ("Link plan error: " ++ show errs)
+        Right plan -> do
+          length (lpFfiEdges plan) @?= 1
+          let edge = head (lpFfiEdges plan)
+          feCallerMod edge @?= "ModuleA"
+          feCallerLang edge @?= "Haskell"
+          feCalleeMod edge @?= "ModuleB"
+          feCalleeLang edge @?= "C"
+          feSymbol edge @?= "ModuleB.foreignHelper"
+          feProfile edge @?= Profile0FreestandingLinear
+          let header = renderExternHeaderC11 plan
+          assertBool "header contains extern int64_t ModuleB_foreignHelper"
+            (T.isInfixOf "extern int64_t ModuleB_foreignHelper" header)
+          assertBool "header contains extern int64_t ModuleA_calc"
+            (T.isInfixOf "extern int64_t ModuleA_calc" header)
   ]

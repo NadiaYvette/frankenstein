@@ -1,0 +1,10 @@
+signature Smirk.Target.Sig where
+
+--@ profile: freestanding_linear
+--@ law: 0 <= idx < len
+data Target
+
+targetLength :: Target -> Int
+indexCodeUnit :: Target -> Int -> Int
+sliceTarget :: Int -> Int -> Target -> Target
+emptyTarget :: Target

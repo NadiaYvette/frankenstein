@@ -75,6 +75,12 @@ import Frankenstein.Backpack.StageInstantiate
   , partialInstantiate
   , instantiateAndSpecialize
   )
+import Frankenstein.Backpack.HsigBridge
+  ( HsigParseError(..)
+  , countArrowArity
+  , parseLaw
+  , parseHsigToOpenRecord
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -84,6 +90,7 @@ import BridgeBisim (bridgeBisimTests)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
 import Data.Text (Text)
 
 -------------------------------------------------------------------------------
@@ -152,6 +159,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , synquidHoleTests
   , backpackOpenRecordSigTests
   , backpackStageInstantiateTests
+  , backpackHsigBridgeTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2304,4 +2312,68 @@ backpackStageInstantiateTests = testGroup "Backpack.StageInstantiate"
           pms = Map.fromList [("M1", pm1), ("M2", pm2)]
           obs = verifyModuleGraphSheaf pms Map.empty
       obs @?= [UnknownHoleLabel "M1" "h1"]
+  ]
+
+--------------------------------------------------------------------------------
+-- V. Backpack.HsigBridge Tests (TP-INGOLSTADT-T2-003)
+--------------------------------------------------------------------------------
+
+backpackHsigBridgeTests :: TestTree
+backpackHsigBridgeTests = testGroup "Backpack.HsigBridge"
+  [ testCase "Parse Smirk.Target.Sig fixture with refinement law" $ do
+      src <- TIO.readFile "test/fixtures/hsig/Smirk.Target.Sig.hsig"
+      case parseHsigToOpenRecord src of
+        Left err -> assertFailure ("Failed to parse Smirk.Target.Sig: " ++ show err)
+        Right sig -> do
+          msName sig @?= "Smirk.Target.Sig"
+          Map.lookup "Target" (msTypes sig) @?= Just (TypeOpaque 0)
+          case Map.lookup "targetLength" (msValues sig) of
+            Nothing -> assertFailure "Missing targetLength"
+            Just v -> do
+              vfsArity v @?= 1
+              vfsMinProfile v @?= Profile0FreestandingLinear
+          case Map.lookup "indexCodeUnit" (msValues sig) of
+            Nothing -> assertFailure "Missing indexCodeUnit"
+            Just v -> do
+              vfsArity v @?= 2
+              vfsMinProfile v @?= Profile0FreestandingLinear
+          msLaws sig @?= [PAnd (PLe (AInt 0) (AVar "idx")) (PLt (AVar "idx") (AVar "len"))]
+
+  , testCase "Parse Cek.Env.Sig fixture with translucent type and arities" $ do
+      src <- TIO.readFile "test/fixtures/hsig/Cek.Env.Sig.hsig"
+      case parseHsigToOpenRecord src of
+        Left err -> assertFailure ("Failed to parse Cek.Env.Sig: " ++ show err)
+        Right sig -> do
+          msName sig @?= "Cek.Env.Sig"
+          Map.lookup "Env" (msTypes sig) @?= Just (TypeOpaque 0)
+          Map.lookup "Key" (msTypes sig) @?= Just (TypeManifest 0 "Int")
+          Map.lookup "Val" (msTypes sig) @?= Just (TypeOpaque 0)
+          case Map.lookup "extendEnv" (msValues sig) of
+            Nothing -> assertFailure "Missing extendEnv"
+            Just v -> vfsArity v @?= 3
+
+  , testCase "Instantiate Cek.Env.Sig via StageInstantiate and verify specialized structure" $ do
+      src <- TIO.readFile "test/fixtures/hsig/Cek.Env.Sig.hsig"
+      case parseHsigToOpenRecord src of
+        Left err -> assertFailure ("Failed to parse Cek.Env.Sig: " ++ show err)
+        Right sig -> do
+          let envImpl = ModuleImpl
+                { miName       = "Cek.Env.Fast"
+                , miTypes      = Map.fromList [("Env", (0, "FastEnv")), ("Key", (0, "Int")), ("Val", (0, "FastVal"))]
+                , miBodies     = Map.fromList
+                    [ ("emptyEnv", (ValueFieldSpec 0 "Env" Profile0FreestandingLinear True, Opt.EInt 0))
+                    , ("lookupEnv", (ValueFieldSpec 2 "Key -> Env -> Val" Profile0FreestandingLinear True, Opt.EVar "val"))
+                    , ("extendEnv", (ValueFieldSpec 3 "Key -> Val -> Env -> Env" Profile0FreestandingLinear True, Opt.EVar "newEnv"))
+                    ]
+                , miProvenLaws = []
+                }
+              pm = ParameterizedModule
+                { pmName     = "CekKernel"
+                , pmRequires = Map.singleton "env" sig
+                , pmBodies   = Map.singleton "evalVar" (Opt.EVar "env.lookupEnv")
+                }
+          case instantiateAndSpecialize 10 (Map.singleton "env" envImpl) pm of
+            Left errs -> assertFailure ("Instantiation failed: " ++ show errs)
+            Right im -> do
+              Map.lookup "evalVar" (imBodies im) @?= Just (Opt.EVar "val")
   ]

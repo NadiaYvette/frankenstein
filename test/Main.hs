@@ -122,6 +122,19 @@ import Frankenstein.Emit.Idiomatic
   , emitRocqSpecSkeleton
   , applyFormatterHook
   )
+import Frankenstein.Transform.Api
+  ( SourceSpan(..)
+  , SourceEdit(..)
+  , TransformMode(..)
+  , TransformKind(..)
+  , TransformRequest(..)
+  , TransformWitness(..)
+  , TransformReport(..)
+  , applySourceEdits
+  , renderUnifiedDiffSimple
+  , renderLspWorkspaceEditJson
+  , runTransformSession
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -204,6 +217,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , driverRegistryTests
   , styleProfileTests
   , emitIdiomaticTests
+  , transformApiTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2650,4 +2664,71 @@ emitIdiomaticTests = testGroup "Emit.Idiomatic"
       assertBool "Contains ZArith" (T.isInfixOf "From Stdlib Require Import ZArith." rocqCode)
       assertBool "Contains Leaf_tag" (T.isInfixOf "Tree_Leaf_tag : Z := 101%Z" rocqCode)
       assertBool "Contains Parameter node" (T.isInfixOf "Parameter node : Z -> Z -> Z." rocqCode)
+  ]
+
+--------------------------------------------------------------------------------
+-- Z. Transform.Api Tests (TP-INGOLSTADT-T3-004)
+--------------------------------------------------------------------------------
+
+transformApiTests :: TestTree
+transformApiTests = testGroup "Transform.Api"
+  [ testCase "Mode A surgical patch preserves surrounding comments and whitespace byte-for-byte" $ do
+      let original = "-- Header comment\nfn foo() {\n  let x = ??hole1;\n  x + 1\n}\n-- Footer comment\n"
+          sp = SourceSpan "test.rs" 39 46 -- span of "??hole1"
+          edit = SourceEdit sp "42" "filled hole"
+          res = applySourceEdits original [edit]
+      case res of
+        Left err -> assertFailure ("Expected Right, got: " <> T.unpack err)
+        Right patched -> do
+          let expected = "-- Header comment\nfn foo() {\n  let x = 42;\n  x + 1\n}\n-- Footer comment\n"
+          patched @?= expected
+          assertBool "Preserves header" (T.isPrefixOf "-- Header comment\n" patched)
+          assertBool "Preserves footer" (T.isSuffixOf "\n-- Footer comment\n" patched)
+
+  , testCase "Overlapping SourceEdit spans fail cleanly with Left instead of corrupting text" $ do
+      let original = "abcdefghijklmnopqrstuvwxyz"
+          e1 = SourceEdit (SourceSpan "t.txt" 0 10) "AAA" "r1"
+          e2 = SourceEdit (SourceSpan "t.txt" 5 15) "BBB" "r2"
+          res = applySourceEdits original [e1, e2]
+      case res of
+        Left err -> assertBool "Contains overlapping" (T.isInfixOf "overlapping" err)
+        Right _  -> assertFailure "Expected failure on overlapping spans"
+
+  , testCase "KindSynquidFillHole replaces ?? hole span and emits TransformWitness" $ do
+      let original = "let y = ??calc in y"
+          style = defaultStyleForParadigm ParadigmFunctional
+          req = TransformRequest
+            { trFilePath   = "sample.hs"
+            , trSourceText = original
+            , trMode       = ModeSurgicalPatch
+            , trKind       = KindSynquidFillHole "calc"
+            , trStyle      = style
+            , trAnchorSpan = Nothing
+            }
+      case runTransformSession req of
+        Left err -> assertFailure ("Transform session failed: " <> T.unpack err)
+        Right rep -> do
+          trpResultText rep @?= "let y = synthesized_calc in y"
+          assertBool "Witness kind" (twKindLabel (trpWitness rep) == "SynquidFillHole")
+          assertBool "Diff is non-empty" (not (T.null (trpUnifiedDiff rep)))
+
+  , testCase "KindSheafBoundaryRepair executes and emits coboundary witness" $ do
+      let original = "module Test where"
+          style = defaultStyleForParadigm ParadigmFunctional
+          req = TransformRequest "test.hs" original ModeSurgicalPatch KindSheafBoundaryRepair style Nothing
+      case runTransformSession req of
+        Left err -> assertFailure ("Sheaf repair failed: " <> T.unpack err)
+        Right rep -> do
+          trpResultText rep @?= original
+          assertBool "Witness notes" (any (T.isInfixOf "H^1 coboundary check passed") (twNotes (trpWitness rep)))
+
+  , testCase "renderLspWorkspaceEditJson emits valid LSP JSON with line/character offsets" $ do
+      let original = "line0\nline1 with target here\nline2"
+          sp = SourceSpan "src/Lib.hs" 17 23 -- span of "target"
+          edit = SourceEdit sp "replacement" "fix"
+          json = renderLspWorkspaceEditJson "src/Lib.hs" original [edit]
+      assertBool "Contains file URI" (T.isInfixOf "\"file://src/Lib.hs\"" json)
+      assertBool "Contains line 1" (T.isInfixOf "\"line\": 1" json)
+      assertBool "Contains character 11" (T.isInfixOf "\"character\": 11" json)
+      assertBool "Contains replacement" (T.isInfixOf "\"newText\": \"replacement\"" json)
   ]

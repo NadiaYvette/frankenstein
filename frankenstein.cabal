@@ -26,6 +26,7 @@ library
         Frankenstein.Driver.Registry
         Frankenstein.Style.Profile
         Frankenstein.Emit.Idiomatic
+        Frankenstein.Transform.Api
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

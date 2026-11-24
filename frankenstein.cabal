@@ -5,6 +5,9 @@ license:            GPL-2.0-only
 license-file:       LICENSE
 synopsis:           Polyglot compiler: Haskell, Mercury, Rust via Koka Core + MLIR
 build-type:         Simple
+data-files:
+    drivers/schema/*.dhall
+    drivers/*.dhall
 
 common warnings
     ghc-options: -Wall -Wno-unused-imports -Wno-orphans
@@ -20,6 +23,7 @@ library
         Frankenstein.Backpack.OpenRecordSig
         Frankenstein.Backpack.StageInstantiate
         Frankenstein.Backpack.HsigBridge
+        Frankenstein.Driver.Registry
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

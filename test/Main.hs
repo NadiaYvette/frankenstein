@@ -81,6 +81,24 @@ import Frankenstein.Backpack.HsigBridge
   , parseLaw
   , parseHsigToOpenRecord
   )
+import Frankenstein.Driver.Registry
+  ( ParadigmTag(..)
+  , IngestStrategy(..)
+  , EmitStrategy(..)
+  , FfiTypeRule(..)
+  , FormatterHook(..)
+  , DriverManifest(..)
+  , DriverRegistry(..)
+  , DriverError(..)
+  , emptyRegistry
+  , builtInDrivers
+  , loadBuiltInRegistry
+  , registerDriver
+  , upsertDriverOverride
+  , lookupById
+  , lookupByExtension
+  , validateRegistry
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -160,6 +178,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , backpackOpenRecordSigTests
   , backpackStageInstantiateTests
   , backpackHsigBridgeTests
+  , driverRegistryTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2376,4 +2395,122 @@ backpackHsigBridgeTests = testGroup "Backpack.HsigBridge"
             Left errs -> assertFailure ("Instantiation failed: " ++ show errs)
             Right im -> do
               Map.lookup "evalVar" (imBodies im) @?= Just (Opt.EVar "val")
+  ]
+
+--------------------------------------------------------------------------------
+-- W. Driver.Registry Tests (TP-INGOLSTADT-T3-001)
+--------------------------------------------------------------------------------
+
+driverRegistryTests :: TestTree
+driverRegistryTests = testGroup "Driver.Registry"
+  [ testCase "Built-in registry loads all 6 manifests without error" $ do
+      case loadBuiltInRegistry of
+        Left err -> assertFailure ("Failed to load built-in registry: " ++ show err)
+        Right reg -> do
+          Map.size (drById reg) @?= 6
+          validateRegistry reg @?= []
+
+  , testCase "Lookup by extension resolves .hs, .c, .rs, .py, .f90, .v accurately" $ do
+      case loadBuiltInRegistry of
+        Left err -> assertFailure ("Registry error: " ++ show err)
+        Right reg -> do
+          fmap dmId (lookupByExtension ".hs" reg)  @?= Just "haskell"
+          fmap dmId (lookupByExtension ".lhs" reg) @?= Just "haskell"
+          fmap dmId (lookupByExtension ".c" reg)   @?= Just "c11"
+          fmap dmId (lookupByExtension ".rs" reg)  @?= Just "rust"
+          fmap dmId (lookupByExtension ".py" reg)  @?= Just "python-ext"
+          fmap dmId (lookupByExtension ".f90" reg) @?= Just "fortran-ffi"
+          fmap dmId (lookupByExtension ".v" reg)   @?= Just "rocq"
+          lookupByExtension ".unknown" reg         @?= Nothing
+
+  , testCase "Lookup by ID resolves all 6 drivers" $ do
+      case loadBuiltInRegistry of
+        Left err -> assertFailure ("Registry error: " ++ show err)
+        Right reg -> do
+          fmap dmDisplayName (lookupById "haskell" reg)     @?= Just "GHC Haskell"
+          fmap dmDisplayName (lookupById "c11" reg)         @?= Just "C11 (ISO C 2011)"
+          fmap dmDisplayName (lookupById "rust" reg)        @?= Just "Rust 2024"
+          fmap dmDisplayName (lookupById "python-ext" reg)  @?= Just "Python C-API Extension"
+          fmap dmDisplayName (lookupById "fortran-ffi" reg) @?= Just "Fortran ISO_C_BINDING FFI"
+          fmap dmDisplayName (lookupById "rocq" reg)        @?= Just "Rocq / Coq / Iris Specification"
+
+  , testCase "User override replaces existing manifest" $ do
+      case loadBuiltInRegistry of
+        Left err -> assertFailure ("Registry error: " ++ show err)
+        Right reg -> do
+          let customC11 = DriverManifest
+                { dmId          = "c11"
+                , dmDisplayName = "Custom Clang C11"
+                , dmParadigm    = ParadigmSystems
+                , dmExtensions  = [".c"]
+                , dmIngest      = IngestNone
+                , dmEmit        = EmitIdiomaticTarget "c11-custom" Nothing
+                , dmFfiRules    = []
+                , dmFormatter   = Nothing
+                }
+          case upsertDriverOverride customC11 reg of
+            Left err -> assertFailure ("Override failed: " ++ show err)
+            Right reg' -> do
+              fmap dmDisplayName (lookupById "c11" reg') @?= Just "Custom Clang C11"
+              fmap dmId (lookupByExtension ".c" reg') @?= Just "c11"
+              lookupByExtension ".h" reg' @?= Nothing
+
+  , testCase "Duplicate registration produces DuplicateDriverId" $ do
+      case loadBuiltInRegistry of
+        Left err -> assertFailure ("Registry error: " ++ show err)
+        Right reg -> do
+          case builtInDrivers of
+            [] -> assertFailure "builtInDrivers is empty"
+            (d0 : _) -> do
+              case registerDriver d0 reg of
+                Left (DuplicateDriverId did) -> did @?= dmId d0
+                other -> assertFailure ("Expected DuplicateDriverId, got: " ++ show other)
+
+  , testCase "Extension collision produces ExtensionCollision" $ do
+      case loadBuiltInRegistry of
+        Left err -> assertFailure ("Registry error: " ++ show err)
+        Right reg -> do
+          let colliding = DriverManifest
+                { dmId          = "clash"
+                , dmDisplayName = "Clashing Driver"
+                , dmParadigm    = ParadigmFunctional
+                , dmExtensions  = [".rs"]
+                , dmIngest      = IngestNone
+                , dmEmit        = EmitIdiomaticTarget "clash" Nothing
+                , dmFfiRules    = []
+                , dmFormatter   = Nothing
+                }
+          case registerDriver colliding reg of
+            Left (ExtensionCollision ".rs" "rust" "clash") -> pure ()
+            other -> assertFailure ("Expected ExtensionCollision, got: " ++ show other)
+
+  , testCase "Empty driver capabilities produces EmptyDriverCapabilities" $ do
+      let emptyDriver = DriverManifest
+            { dmId          = "noop"
+            , dmDisplayName = "Noop Driver"
+            , dmParadigm    = ParadigmSystems
+            , dmExtensions  = [".noop"]
+            , dmIngest      = IngestNone
+            , dmEmit        = EmitNone
+            , dmFfiRules    = []
+            , dmFormatter   = Nothing
+            }
+      case registerDriver emptyDriver emptyRegistry of
+        Left (EmptyDriverCapabilities "noop") -> pure ()
+        other -> assertFailure ("Expected EmptyDriverCapabilities, got: " ++ show other)
+
+  , testCase "Invalid extension format produces InvalidExtensionFormat" $ do
+      let badExtDriver = DriverManifest
+            { dmId          = "badext"
+            , dmDisplayName = "Bad Extension Driver"
+            , dmParadigm    = ParadigmSystems
+            , dmExtensions  = ["txt"]
+            , dmIngest      = IngestNone
+            , dmEmit        = EmitIdiomaticTarget "bad" Nothing
+            , dmFfiRules    = []
+            , dmFormatter   = Nothing
+            }
+      case registerDriver badExtDriver emptyRegistry of
+        Left (InvalidExtensionFormat "badext" "txt") -> pure ()
+        other -> assertFailure ("Expected InvalidExtensionFormat, got: " ++ show other)
   ]

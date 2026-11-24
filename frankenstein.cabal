@@ -38,6 +38,7 @@ library
         Frankenstein.GhcBridge.Driver
         Frankenstein.GhcBridge.CoreTranslate
         Frankenstein.GhcBridge.Plugin
+        Frankenstein.Emit.C11
         Frankenstein.MercuryBridge.HldsParse
         Frankenstein.MercuryBridge.CoreTranslate
         Frankenstein.RustBridge.MirParse

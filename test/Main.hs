@@ -24,6 +24,7 @@ import Frankenstein.MercuryBridge.CoreTranslate (translateHlds)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
 import Frankenstein.Core.Interface
 import Frankenstein.GhcBridge.Plugin (PluginConfig(..), parsePluginOpts)
+import Frankenstein.Emit.C11 (emitOrganC11)
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
@@ -93,6 +94,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , wasmEmitTests
   , organInterfaceTests
   , ghcPluginTests
+  , c11EmitTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -1853,4 +1855,20 @@ ghcPluginTests = testGroup "GhcBridge.Plugin"
         ex <- doesFileExist f
         ex @? ("Fixture file should exist: " ++ f)
         ) fixtures
+  ]
+
+--------------------------------------------------------------------------------
+-- O. C11 Golden Emission & Liborgan_rt Tests (TP-INGOLSTADT-MVP-003)
+--------------------------------------------------------------------------------
+
+c11EmitTests :: TestTree
+c11EmitTests = testGroup "Emit.C11"
+  [ testCase "emitOrganC11: emits organ_rt.h include and main" $ do
+      let prog = mkProgram "TestMod" "testProg"
+            [ mkFunDef "TestMod" "answer" (ELit (LitInt 42)) intType ]
+          c11 = emitOrganC11 prog
+      assertBool "contains #include \"organ_rt.h\"" (T.isInfixOf "#include \"organ_rt.h\"" c11)
+      assertBool "contains int main" (T.isInfixOf "int main" c11)
+      assertBool "contains TestMod_answer" (T.isInfixOf "TestMod_answer" c11)
+      assertBool "returns 42" (T.isInfixOf "return 42" c11)
   ]

@@ -66,6 +66,7 @@ library
         Frankenstein.IdrisBridge.Driver
         Frankenstein.MlirEmit.Emitter
         Frankenstein.MlirEmit.Dialects
+        Frankenstein.RTS.UringLower
         Frankenstein.OrganIR.Consumer
         Frankenstein.OrganIR.Emitter
         Frankenstein.Funnel.MVP

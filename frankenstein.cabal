@@ -13,6 +13,11 @@ common warnings
     ghc-options: -Wall -Wno-unused-imports -Wno-orphans
     default-extensions: OverloadedStrings
 
+flag uring-linux-ffi
+    description: Enable native Linux io_uring syscall bridge
+    default:     False
+    manual:      True
+
 library
     import:           warnings
     exposed-modules:
@@ -30,6 +35,7 @@ library
         Frankenstein.Db.Incremental
         Frankenstein.Db.ResilientEditCone
         Frankenstein.Ide.LiveSession
+        Frankenstein.RTS.UringDriver
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

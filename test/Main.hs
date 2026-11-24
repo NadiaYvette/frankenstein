@@ -175,6 +175,7 @@ import Frankenstein.Ide.LiveSession
   , recordStyleFeedback
   , proposeCodeActions
   )
+import Frankenstein.RTS.UringDriver
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -261,6 +262,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , dbIncrementalTests
   , resilientEditConeTests
   , ideLiveSessionTests
+  , rtsUringDriverTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -3190,4 +3192,36 @@ ideLiveSessionTests = testGroup "Ide.LiveSession"
       assertBool "Returns at least one code action" (not (null actions))
       assertBool "Contains synquid action" (any (\a -> icaKind a == "quickfix.ingolstadt.synquid") actions)
       assertBool "Contains egraph refactor action" (any (\a -> icaKind a == "refactor.rewrite.ingolstadt.egraph") actions)
+  ]
+
+
+-------------------------------------------------------------------------------
+-- S. RTS.UringDriver unit tests
+-------------------------------------------------------------------------------
+
+rtsUringDriverTests :: TestTree
+rtsUringDriverTests = testGroup "RTS.UringDriver"
+  [ testCase "probeUringKernelSupport returns valid kernel support status" $ do
+      status <- probeUringKernelSupport
+      assertBool "Returns NativeSupported or SandboxBlockedFallback"
+        (status `elem` [NativeSupported, SandboxBlockedFallback])
+
+  , testCase "lowerBatchToC11 emits C11 calls to organ_uring_submit_obj" $ do
+      let sqes =
+            [ UringSqe 1 (UringReadFixed 0 4096 0) False False "obj_buf1"
+            , UringSqe 2 (UringWriteFixed 1 4096 0) True True "linear_buf2"
+            , UringSqe 3 (UringFsync 1 True) True False "fsync_buf3"
+            ]
+          batch = UringBatch sqes
+          c11 = lowerBatchToC11 "core_reactor" batch
+      assertBool "Contains organ_uring_submit_obj" (T.isInfixOf "organ_uring_submit_obj" c11)
+      assertBool "Contains ORGAN_PROFILE_THREAD_LOCAL_PERCEUS" (T.isInfixOf "ORGAN_PROFILE_THREAD_LOCAL_PERCEUS" c11)
+      assertBool "Contains ORGAN_PROFILE_FREESTANDING_LINEAR" (T.isInfixOf "ORGAN_PROFILE_FREESTANDING_LINEAR" c11)
+      assertBool "Contains IOSQE_IO_LINK comment" (T.isInfixOf "IOSQE_IO_LINK" c11)
+      assertBool "Contains reactorVar reference" (T.isInfixOf "&core_reactor" c11)
+
+  , testCase "renderReactorInitC11 initializes reactor with correct capacity" $ do
+      let c11 = renderReactorInitC11 "my_reactor" 32
+      assertBool "Defines slots array" (T.isInfixOf "organ_flight_slot_t my_reactor_slots[32];" c11)
+      assertBool "Calls organ_reactor_init" (T.isInfixOf "organ_reactor_init(&my_reactor, 0, 32" c11)
   ]

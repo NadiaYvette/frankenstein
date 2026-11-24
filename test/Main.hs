@@ -150,6 +150,18 @@ import Frankenstein.Db.Incremental
   , runTrackedQuery
   , runTrackedQueryWithStack
   )
+import Frankenstein.Db.ResilientEditCone
+  ( DeclState(..)
+  , ResilientDecl(..)
+  , ResilientModule(..)
+  , EditConeReport(..)
+  , parseResilientModule
+  , reparseEditCone
+  , validSiblingDecls
+  , collectParseHoles
+  , syncModuleIntoCodeDb
+  , resilientModuleToInterface
+  )
 import qualified Frankenstein.Opt.EGraph as Opt
 import System.Directory (doesFileExist)
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
@@ -234,6 +246,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , emitIdiomaticTests
   , transformApiTests
   , dbIncrementalTests
+  , resilientEditConeTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -2863,4 +2876,204 @@ dbIncrementalTests = testGroup "Db.Incremental"
       case runTrackedQuery keyA DurabilityLow computeA db of
         Left err -> assertBool "Detects cycle" (T.isInfixOf "cycle detected" err)
         Right _  -> assertFailure "Expected cycle detection error"
+  ]
+
+--------------------------------------------------------------------------------
+-- BB. Db.ResilientEditCone Tests (TP-INGOLSTADT-T4-002)
+--------------------------------------------------------------------------------
+
+resilientEditConeTests :: TestTree
+resilientEditConeTests = testGroup "Db.ResilientEditCone"
+  [ testCase "Stope-and-Winze: Corrupting 3 of 10 declarations isolates exact ParseHoles while 7 siblings parse cleanly" $ do
+      let mod10Corrupted = T.unlines
+            [ "fn d1() { return 1; }"
+            , ""
+            , "fn d2( { return 2; }"
+            , ""
+            , "fn d3() { return 3; }"
+            , ""
+            , "fn d4() { return 4; }"
+            , ""
+            , "fn d5() { let s = \"unterminated; return 5; }"
+            , ""
+            , "fn d6() { return 6; }"
+            , ""
+            , "fn d7() { return 7; }"
+            , ""
+            , "fn d8() { SYNTAX_ERROR }"
+            , ""
+            , "fn d9() { return 9; }"
+            , ""
+            , "fn d10() { return 10; }"
+            ]
+          rm = parseResilientModule "Module10.hs" mod10Corrupted
+          valid = validSiblingDecls rm
+          holes = collectParseHoles rm
+      length (rmDecls rm) @?= 10
+      length valid @?= 7
+      length holes @?= 3
+      map rdName valid @?= ["d1", "d3", "d4", "d6", "d7", "d9", "d10"]
+      map (\(n, _, _) -> n) holes @?= ["d2", "d5", "d8"]
+
+      -- Verify resilientModuleToInterface exports exactly the 7 valid siblings
+      let iface = resilientModuleToInterface rm
+      oiModuleName iface @?= "Module10"
+      map eaQualifiedName (oiExports iface) @?= ["d1", "d3", "d4", "d6", "d7", "d9", "d10"]
+
+  , testCase "Body-Only Early Cutoff: Modifying decl4 body leaves sigHash unchanged, landing in ecrEarlyCutoffDecls with 9 siblings preserved" $ do
+      let mod10Old = T.unlines
+            [ "fn d1()"
+            , "  { return 1; }"
+            , ""
+            , "fn d2()"
+            , "  { return 2; }"
+            , ""
+            , "fn d3()"
+            , "  { return 3; }"
+            , ""
+            , "fn d4()"
+            , "  { return 4; }"
+            , ""
+            , "fn d5()"
+            , "  { return 5; }"
+            , ""
+            , "fn d6()"
+            , "  { return 6; }"
+            , ""
+            , "fn d7()"
+            , "  { return 7; }"
+            , ""
+            , "fn d8()"
+            , "  { return 8; }"
+            , ""
+            , "fn d9()"
+            , "  { return 9; }"
+            , ""
+            , "fn d10()"
+            , "  { return 10; }"
+            ]
+          mod10BodyEdited = T.unlines
+            [ "fn d1()"
+            , "  { return 1; }"
+            , ""
+            , "fn d2()"
+            , "  { return 2; }"
+            , ""
+            , "fn d3()"
+            , "  { return 3; }"
+            , ""
+            , "fn d4()"
+            , "  { return 44; }"
+            , ""
+            , "fn d5()"
+            , "  { return 5; }"
+            , ""
+            , "fn d6()"
+            , "  { return 6; }"
+            , ""
+            , "fn d7()"
+            , "  { return 7; }"
+            , ""
+            , "fn d8()"
+            , "  { return 8; }"
+            , ""
+            , "fn d9()"
+            , "  { return 9; }"
+            , ""
+            , "fn d10()"
+            , "  { return 10; }"
+            ]
+          oldRm = parseResilientModule "Mod.hs" mod10Old
+          newRm = parseResilientModule "Mod.hs" mod10BodyEdited
+          cone = reparseEditCone oldRm newRm
+      ecrEarlyCutoffDecls cone @?= ["d4"]
+      ecrPreservedSiblings cone @?= ["d1", "d2", "d3", "d5", "d6", "d7", "d8", "d9", "d10"]
+      ecrInvalidatedDecls cone @?= []
+      ecrParseHoles cone @?= []
+
+  , testCase "Signature Change Invalidation: Changing decl4 signature lands it in ecrInvalidatedDecls while preserving 9 siblings" $ do
+      let mod10Old = T.unlines
+            [ "fn d1()"
+            , "  { return 1; }"
+            , ""
+            , "fn d2()"
+            , "  { return 2; }"
+            , ""
+            , "fn d3()"
+            , "  { return 3; }"
+            , ""
+            , "fn d4()"
+            , "  { return 4; }"
+            , ""
+            , "fn d5()"
+            , "  { return 5; }"
+            , ""
+            , "fn d6()"
+            , "  { return 6; }"
+            , ""
+            , "fn d7()"
+            , "  { return 7; }"
+            , ""
+            , "fn d8()"
+            , "  { return 8; }"
+            , ""
+            , "fn d9()"
+            , "  { return 9; }"
+            , ""
+            , "fn d10()"
+            , "  { return 10; }"
+            ]
+          mod10SigEdited = T.unlines
+            [ "fn d1()"
+            , "  { return 1; }"
+            , ""
+            , "fn d2()"
+            , "  { return 2; }"
+            , ""
+            , "fn d3()"
+            , "  { return 3; }"
+            , ""
+            , "fn d4(x: int)"
+            , "  { return x; }"
+            , ""
+            , "fn d5()"
+            , "  { return 5; }"
+            , ""
+            , "fn d6()"
+            , "  { return 6; }"
+            , ""
+            , "fn d7()"
+            , "  { return 7; }"
+            , ""
+            , "fn d8()"
+            , "  { return 8; }"
+            , ""
+            , "fn d9()"
+            , "  { return 9; }"
+            , ""
+            , "fn d10()"
+            , "  { return 10; }"
+            ]
+          oldRm = parseResilientModule "Mod.hs" mod10Old
+          newRm = parseResilientModule "Mod.hs" mod10SigEdited
+          cone = reparseEditCone oldRm newRm
+      ecrInvalidatedDecls cone @?= ["d4"]
+      ecrEarlyCutoffDecls cone @?= []
+      ecrPreservedSiblings cone @?= ["d1", "d2", "d3", "d5", "d6", "d7", "d8", "d9", "d10"]
+
+  , testCase "syncModuleIntoCodeDb populates signature memos and isolates parse holes" $ do
+      let src = T.unlines
+            [ "fn ok1() { return 1; }"
+            , ""
+            , "fn bad( { return 2; }"
+            , ""
+            , "fn ok2() { return 3; }"
+            ]
+          rm = parseResilientModule "SyncTest.hs" src
+          db0 = emptyCodeDb
+          (report, db1) = syncModuleIntoCodeDb rm db0
+      ecrParseHoles report @?= collectParseHoles rm
+      assertBool "ok1 in memos" (Map.member (QDeclSignature "SyncTest.hs" "ok1") (dbMemos db1))
+      assertBool "ok2 in memos" (Map.member (QDeclSignature "SyncTest.hs" "ok2") (dbMemos db1))
+      assertBool "bad NOT in memos" (not (Map.member (QDeclSignature "SyncTest.hs" "bad") (dbMemos db1)))
   ]

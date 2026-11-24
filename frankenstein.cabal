@@ -28,6 +28,7 @@ library
         Frankenstein.Emit.Idiomatic
         Frankenstein.Transform.Api
         Frankenstein.Db.Incremental
+        Frankenstein.Db.ResilientEditCone
         Frankenstein.Core.Types
         Frankenstein.Core.KokaCore
         Frankenstein.Core.Perceus

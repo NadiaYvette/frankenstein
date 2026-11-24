@@ -22,6 +22,7 @@ import Frankenstein.MercuryBridge.HldsParse
   )
 import Frankenstein.MercuryBridge.CoreTranslate (translateHlds)
 import Frankenstein.Core.Linker (linkPrograms, linkProgramsWith, LinkResult(..), LinkError(..))
+import Frankenstein.Core.Interface
 import Frankenstein.MlirEmit.Emitter (emitProgram, emitProgramWasm, emitProgramWithEffects)
 import KOracle (kOracleTests)
 import BridgeBisim (bridgeBisimTests)
@@ -88,6 +89,7 @@ main = defaultMain $ testGroup "Frankenstein"
   , conTagsTests
   , mercuryAdtTests
   , wasmEmitTests
+  , organInterfaceTests
   , adjustOption (\_ -> QuickCheckMaxRatio 200) kOracleTests
   , bridgeBisimTests
   ]
@@ -1685,4 +1687,97 @@ typeCheckTests = testGroup "TypeCheck"
                 (TFun [(Many, anyType)] EffectRowEmpty intType)
           prog = mkProgram "M" "main" [d]
       in typeCheckProgram prog @?= [EmptyCase]
+  ]
+
+-------------------------------------------------------------------------------
+-- OrganInterface & Separate Compilation Tests
+-------------------------------------------------------------------------------
+
+organInterfaceTests :: TestTree
+organInterfaceTests = testGroup "OrganInterface Separate Compilation"
+  [ testCase "content tag determinism: identical ADTs in separate TUs produce identical tags" $ do
+      let tag1 = mkContentTag "Data.List" "List" "Cons"
+      let tag2 = mkContentTag "Data.List" "List" "Cons"
+      tag1 @?= tag2
+      unContentTag tag1 /= 0 @? "Content tag should be non-zero"
+
+  , testCase "content tag disjointness: distinct constructors never collide" $ do
+      let tagA = mkContentTag "ModA" "Tree" "Leaf"
+      let tagB = mkContentTag "ModB" "Tree" "Leaf"
+      let tagC = mkContentTag "ModA" "Tree" "Node"
+      tagA /= tagB @? "Tags from different modules must not collide"
+      tagA /= tagC @? "Tags for different constructors must not collide"
+
+  , testCase "cross-TU check: matching exports and imports succeed" $ do
+      let expA = ExportAbi "ModA.compute" 2 0 Profile0FreestandingLinear False
+      let ifaceA = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "ModA"
+            , oiSourceLang    = "Haskell"
+            , oiCtors         = [CtorDescriptor "ModA.Leaf" (mkContentTag "ModA" "Tree" "Leaf") 0 False]
+            , oiExports       = [expA]
+            , oiImports       = []
+            }
+      let reqB = ImportReq "ModA.compute" 2 0 Profile0FreestandingLinear
+      let ifaceB = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "ModB"
+            , oiSourceLang    = "Haskell"
+            , oiCtors         = []
+            , oiExports       = []
+            , oiImports       = [reqB]
+            }
+      case checkInterfacePair ifaceA ifaceB of
+        Left errs -> assertFailure ("Unexpected interface check failure: " ++ show errs)
+        Right m   -> Map.lookup "ModA.compute" m @?= Just expA
+
+  , testCase "cross-TU check: catches arity mismatch" $ do
+      let expA = ExportAbi "ModA.fn" 2 0 Profile1ThreadLocalPerceus False
+      let reqB = ImportReq "ModA.fn" 3 0 Profile1ThreadLocalPerceus
+      let ifaceA = OrganInterface "1.0" "ModA" "Haskell" [] [expA] []
+      let ifaceB = OrganInterface "1.0" "ModB" "Haskell" [] [] [reqB]
+      case checkInterfacePair ifaceA ifaceB of
+        Left [ArityMismatch "ModA.fn" 3 2] -> pure ()
+        other -> assertFailure ("Expected ArityMismatch, got: " ++ show other)
+
+  , testCase "cross-TU check: catches evidence-count mismatch" $ do
+      let expA = ExportAbi "ModA.fn" 2 0 Profile1ThreadLocalPerceus False
+      let reqB = ImportReq "ModA.fn" 2 1 Profile1ThreadLocalPerceus
+      let ifaceA = OrganInterface "1.0" "ModA" "Haskell" [] [expA] []
+      let ifaceB = OrganInterface "1.0" "ModB" "Haskell" [] [] [reqB]
+      case checkInterfacePair ifaceA ifaceB of
+        Left [EvidenceMismatch "ModA.fn" 1 0] -> pure ()
+        other -> assertFailure ("Expected EvidenceMismatch, got: " ++ show other)
+
+  , testCase "cross-TU check: catches profile incompatibility" $ do
+      let expA = ExportAbi "ModA.fn" 2 0 Profile0FreestandingLinear False
+      let reqB = ImportReq "ModA.fn" 2 0 Profile2ConcurrentShared
+      let ifaceA = OrganInterface "1.0" "ModA" "Haskell" [] [expA] []
+      let ifaceB = OrganInterface "1.0" "ModB" "Haskell" [] [] [reqB]
+      case checkInterfacePair ifaceA ifaceB of
+        Left [ProfileIncompatibility "ModA.fn" Profile2ConcurrentShared Profile0FreestandingLinear] -> pure ()
+        other -> assertFailure ("Expected ProfileIncompatibility, got: " ++ show other)
+
+  , testCase "JSON round-trip: encodes and decodes OrganInterface bit-for-bit" $ do
+      let iface = OrganInterface
+            { oiSchemaVersion = "1.0.0"
+            , oiModuleName    = "Test.Module"
+            , oiSourceLang    = "Haskell"
+            , oiCtors         =
+                [ CtorDescriptor "Test.Nil" (mkContentTag "Test" "List" "Nil") 0 False
+                , CtorDescriptor "Test.Cons" (mkContentTag "Test" "List" "Cons") 2 True
+                ]
+            , oiExports       =
+                [ ExportAbi "Test.map" 2 0 Profile1ThreadLocalPerceus False
+                , ExportAbi "Test.fold" 3 1 Profile0FreestandingLinear True
+                ]
+            , oiImports       =
+                [ ImportReq "Foreign.alloc" 1 0 Profile0FreestandingLinear
+                , ImportReq "Foreign.free" 1 0 Profile1ThreadLocalPerceus
+                ]
+            }
+      let jsonText = encodeOrganInterfaceJson iface
+      case decodeOrganInterfaceJson jsonText of
+        Left err -> assertFailure ("JSON decode error: " ++ T.unpack err ++ "\nJSON was:\n" ++ T.unpack jsonText)
+        Right decoded -> decoded @?= iface
   ]

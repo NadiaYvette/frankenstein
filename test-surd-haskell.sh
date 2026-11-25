@@ -56,7 +56,7 @@ echo "========================================"
 # compatibility issues are currently breaking the cabal build).
 cd "$SURD_DIR"
 echo "Building native binaries via cabal (timeout 300s)..."
-timeout 300 cabal build surd-trig-table surd-euler-integral surd-elliptic-integral surd-solvable-quintic \
+timeout -k 10s 300 cabal build surd-trig-table surd-euler-integral surd-elliptic-integral surd-solvable-quintic \
     > /tmp/surd-haskell-cabal.log 2>&1
 case "$?" in
     0)   echo "  cabal: OK" ;;
@@ -88,7 +88,7 @@ for entry in "${TARGETS[@]}"; do
         continue
     fi
 
-    DL=$(diff <(timeout 90 "$native" $args 2>&1) <(timeout 90 "$bin" $args 2>&1) 2>&1 | wc -l)
+    DL=$(diff <(timeout -k 10s 90 "$native" $args 2>&1) <(timeout -k 10s 90 "$bin" $args 2>&1) 2>&1 | wc -l)
     if [ "$DL" -eq 0 ]; then
         echo "PASS  (byte-identical)"
         PASS=$((PASS + 1))

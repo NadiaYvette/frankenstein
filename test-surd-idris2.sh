@@ -113,8 +113,8 @@ for entry in "${TARGETS[@]}"; do
         surd-quintic) bin_timeout=600 ;;
         *)            bin_timeout=90  ;;
     esac
-    DL=$(diff <(timeout 90 "$native" 2>&1) \
-              <(KK_RECYCLE=1 timeout "$bin_timeout" "$bin" 2>&1) 2>&1 | wc -l)
+    DL=$(diff <(timeout -k 10s 90 "$native" 2>&1) \
+              <(KK_RECYCLE=1 timeout -k 10s "$bin_timeout" "$bin" 2>&1) 2>&1 | wc -l)
     if [ "$DL" -eq 0 ]; then
         echo "PASS  (byte-identical)"
         PASS=$((PASS + 1))

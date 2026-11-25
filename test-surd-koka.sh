@@ -53,7 +53,7 @@ echo "========================================"
 cd "$SURD_DIR"
 for entry in "${TARGETS[@]}"; do
     demo="${entry%% *}"
-    timeout 300 koka --compile -i. "surd/demo/$demo.kk" > /dev/null 2>&1 || true
+    timeout -k 10s 300 koka --compile -i. "surd/demo/$demo.kk" > /dev/null 2>&1 || true
 done
 
 # Locate the latest koka build dir (version number varies)
@@ -84,7 +84,7 @@ for entry in "${TARGETS[@]}"; do
         continue
     fi
 
-    DL=$(diff <(timeout 90 "$native" 2>&1) <(timeout 90 "$bin" 2>&1) 2>&1 | wc -l)
+    DL=$(diff <(timeout -k 10s 90 "$native" 2>&1) <(timeout -k 10s 90 "$bin" 2>&1) 2>&1 | wc -l)
     if [ "$DL" -eq 0 ]; then
         echo "PASS  (byte-identical)"
         PASS=$((PASS + 1))

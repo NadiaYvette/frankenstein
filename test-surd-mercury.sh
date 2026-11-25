@@ -73,7 +73,7 @@ for prog in "${PROGS[@]}"; do
         echo "SKIP (no native binary)"
         continue
     fi
-    DL=$(diff <(timeout 90 "$SURD_DIR/$prog" 2>&1) <(timeout 90 "$bin" 2>&1) 2>&1 | wc -l)
+    DL=$(diff <(timeout -k 10s 90 "$SURD_DIR/$prog" 2>&1) <(timeout -k 10s 90 "$bin" 2>&1) 2>&1 | wc -l)
     if [ "$DL" -eq 0 ]; then
         echo "PASS  (byte-identical)"
         PASS=$((PASS + 1))
